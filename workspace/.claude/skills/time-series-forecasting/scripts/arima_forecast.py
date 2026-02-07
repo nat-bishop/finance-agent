@@ -11,11 +11,10 @@ import json
 import sys
 import warnings
 
-import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
-from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.stattools import adfuller
 
 warnings.filterwarnings("ignore")
 
@@ -57,11 +56,13 @@ def auto_arima(series: pd.Series, max_p: int = 5, max_d: int = 2, max_q: int = 5
             try:
                 model = ARIMA(series, order=(p, best_d, q))
                 fit = model.fit()
-                results_log.append({
-                    "order": f"({p},{best_d},{q})",
-                    "aic": round(fit.aic, 2),
-                    "bic": round(fit.bic, 2),
-                })
+                results_log.append(
+                    {
+                        "order": f"({p},{best_d},{q})",
+                        "aic": round(fit.aic, 2),
+                        "bic": round(fit.bic, 2),
+                    }
+                )
                 if fit.aic < best_aic:
                     best_aic = fit.aic
                     best_order = (p, best_d, q)
@@ -169,7 +170,11 @@ def main():
         sys.exit(1)
 
     if args.column not in df.columns:
-        print(json.dumps({"error": f"Column '{args.column}' not found. Available: {list(df.columns)}"}))
+        print(
+            json.dumps(
+                {"error": f"Column '{args.column}' not found. Available: {list(df.columns)}"}
+            )
+        )
         sys.exit(1)
 
     series = df[args.column].dropna()

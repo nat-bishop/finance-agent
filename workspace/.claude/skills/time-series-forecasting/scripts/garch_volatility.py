@@ -65,11 +65,13 @@ def fit_garch(
     fc = fit.forecast(horizon=forecast_horizon)
     vol_forecast = []
     for h in range(forecast_horizon):
-        vol_forecast.append({
-            "step": h + 1,
-            "variance_forecast": round(float(fc.variance.iloc[-1, h]), 6),
-            "volatility_forecast": round(float(np.sqrt(fc.variance.iloc[-1, h])), 4),
-        })
+        vol_forecast.append(
+            {
+                "step": h + 1,
+                "variance_forecast": round(float(fc.variance.iloc[-1, h]), 6),
+                "volatility_forecast": round(float(np.sqrt(fc.variance.iloc[-1, h])), 4),
+            }
+        )
 
     # Regime classification
     if long_run_vol is not None:
@@ -131,7 +133,11 @@ def main():
         sys.exit(1)
 
     if args.column not in df.columns:
-        print(json.dumps({"error": f"Column '{args.column}' not found. Available: {list(df.columns)}"}))
+        print(
+            json.dumps(
+                {"error": f"Column '{args.column}' not found. Available: {list(df.columns)}"}
+            )
+        )
         sys.exit(1)
 
     series = df[args.column].dropna()

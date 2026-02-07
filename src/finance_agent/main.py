@@ -6,13 +6,13 @@ import asyncio
 from pathlib import Path
 
 from claude_agent_sdk import (
+    AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    AssistantMessage,
     ResultMessage,
     TextBlock,
+    create_sdk_mcp_server,
 )
-from claude_agent_sdk import create_sdk_mcp_server
 
 from .config import AgentConfig, TradingConfig, build_system_prompt, load_configs
 from .hooks import create_audit_hooks
@@ -91,8 +91,6 @@ async def run_repl() -> None:
     print(f"Max portfolio: ${trading_config.max_portfolio_usd}")
     print("Type 'quit' or 'exit' to stop.\n")
 
-    session_id = None
-
     async with ClaudeSDKClient(options=options) as client:
         while True:
             try:
@@ -115,7 +113,6 @@ async def run_repl() -> None:
                         if isinstance(block, TextBlock):
                             print(block.text)
                 elif isinstance(msg, ResultMessage):
-                    session_id = msg.session_id
                     if msg.total_cost_usd is not None:
                         print(f"  [cost: ${msg.total_cost_usd:.4f}]")
                     if msg.is_error:

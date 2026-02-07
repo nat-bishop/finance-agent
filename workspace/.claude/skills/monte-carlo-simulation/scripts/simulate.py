@@ -68,7 +68,11 @@ def simulate_portfolio(
 
     # VaR and CVaR at 95%
     var_95 = float(np.percentile(portfolio_pnl, 5))  # 5th percentile = 95% VaR
-    cvar_95 = float(portfolio_pnl[portfolio_pnl <= var_95].mean()) if (portfolio_pnl <= var_95).any() else var_95
+    cvar_95 = (
+        float(portfolio_pnl[portfolio_pnl <= var_95].mean())
+        if (portfolio_pnl <= var_95).any()
+        else var_95
+    )
 
     win_rate = float((portfolio_pnl > 0).mean())
     sharpe = mean_pnl / std_pnl if std_pnl > 0 else 0.0
@@ -127,7 +131,9 @@ def main():
     parser.add_argument("--positions", type=str, help="JSON array of positions")
     parser.add_argument("--positions-file", type=str, help="Path to positions JSON file")
     parser.add_argument("--n-trials", type=int, default=10000, help="Number of trials")
-    parser.add_argument("--correlation-matrix", type=str, default=None, help="JSON correlation matrix")
+    parser.add_argument(
+        "--correlation-matrix", type=str, default=None, help="JSON correlation matrix"
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
 
     args = parser.parse_args()

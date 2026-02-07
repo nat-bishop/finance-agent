@@ -44,23 +44,27 @@ def create_audit_hooks(journal_dir: Path) -> dict[str, list[HookMatcher]]:
         tool_input = input_data.get("tool_input", {})
 
         if "place_order" in tool_name:
-            _log({
-                "event": "order_intent",
-                "tool_use_id": tool_use_id,
-                "ticker": tool_input.get("ticker"),
-                "action": tool_input.get("action"),
-                "side": tool_input.get("side"),
-                "count": tool_input.get("count"),
-                "yes_price": tool_input.get("yes_price"),
-                "no_price": tool_input.get("no_price"),
-                "order_type": tool_input.get("order_type", "limit"),
-            })
+            _log(
+                {
+                    "event": "order_intent",
+                    "tool_use_id": tool_use_id,
+                    "ticker": tool_input.get("ticker"),
+                    "action": tool_input.get("action"),
+                    "side": tool_input.get("side"),
+                    "count": tool_input.get("count"),
+                    "yes_price": tool_input.get("yes_price"),
+                    "no_price": tool_input.get("no_price"),
+                    "order_type": tool_input.get("order_type", "limit"),
+                }
+            )
         elif "cancel_order" in tool_name:
-            _log({
-                "event": "cancel_intent",
-                "tool_use_id": tool_use_id,
-                "order_id": tool_input.get("order_id"),
-            })
+            _log(
+                {
+                    "event": "cancel_intent",
+                    "tool_use_id": tool_use_id,
+                    "order_id": tool_input.get("order_id"),
+                }
+            )
 
         return {}  # No blocking, just logging
 
@@ -86,18 +90,22 @@ def create_audit_hooks(journal_dir: Path) -> dict[str, list[HookMatcher]]:
 
         if "place_order" in tool_name:
             trade_count["placed"] += 1
-            _log({
-                "event": "order_result",
-                "tool_use_id": tool_use_id,
-                "result": result,
-            })
+            _log(
+                {
+                    "event": "order_result",
+                    "tool_use_id": tool_use_id,
+                    "result": result,
+                }
+            )
         elif "cancel_order" in tool_name:
             trade_count["cancelled"] += 1
-            _log({
-                "event": "cancel_result",
-                "tool_use_id": tool_use_id,
-                "result": result,
-            })
+            _log(
+                {
+                    "event": "cancel_result",
+                    "tool_use_id": tool_use_id,
+                    "result": result,
+                }
+            )
 
         return {}
 
@@ -109,12 +117,14 @@ def create_audit_hooks(journal_dir: Path) -> dict[str, list[HookMatcher]]:
         context: Any,
     ) -> dict:
         duration = time.time() - session_start
-        _log({
-            "event": "session_end",
-            "duration_seconds": round(duration, 1),
-            "orders_placed": trade_count["placed"],
-            "orders_cancelled": trade_count["cancelled"],
-        })
+        _log(
+            {
+                "event": "session_end",
+                "duration_seconds": round(duration, 1),
+                "orders_placed": trade_count["placed"],
+                "orders_cancelled": trade_count["cancelled"],
+            }
+        )
         return {}
 
     return {

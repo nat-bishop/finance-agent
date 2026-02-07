@@ -7,9 +7,6 @@ Usage:
 
 import argparse
 import json
-import sys
-
-import numpy as np
 
 
 def analyze_orderbook(
@@ -132,8 +129,10 @@ def analyze_orderbook(
         "slippage_sell_yes": sell_yes_slippage,
         "market_impact": impact,
         "recommendation": (
-            "Liquid — market orders OK" if liquidity_score > 70
-            else "Moderate — prefer limit orders" if liquidity_score > 40
+            "Liquid — market orders OK"
+            if liquidity_score > 70
+            else "Moderate — prefer limit orders"
+            if liquidity_score > 40
             else "Illiquid — limit orders only, consider smaller size"
         ),
     }

@@ -45,7 +45,6 @@ def create_permission_handler(
         input_data: dict[str, Any],
         context: Any,
     ) -> PermissionResultAllow | PermissionResultDeny:
-
         # Always allow read tools
         if tool_name in read_tools:
             return PermissionResultAllow()

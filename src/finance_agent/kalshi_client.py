@@ -22,7 +22,7 @@ class KalshiAPIClient:
         cfg = Configuration(host=config.kalshi_api_url)
         cfg.api_key_id = config.kalshi_api_key_id
 
-        with open(config.kalshi_private_key_path, "r") as f:
+        with open(config.kalshi_private_key_path) as f:
             cfg.private_key_pem = f.read()
 
         return KalshiClient(cfg)

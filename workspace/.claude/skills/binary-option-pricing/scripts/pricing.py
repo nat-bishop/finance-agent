@@ -9,7 +9,6 @@ Usage:
 import argparse
 import json
 import math
-import sys
 
 import numpy as np
 from scipy import stats as sp_stats
@@ -114,11 +113,21 @@ def binary_option_greeks(
 
 def main():
     parser = argparse.ArgumentParser(description="Binary option pricing for prediction markets")
-    parser.add_argument("--market-price", type=int, required=True, help="YES price in cents (1-99)")
-    parser.add_argument("--time-to-expiry-days", type=float, required=True, help="Days to settlement")
-    parser.add_argument("--historical-prices", type=str, default=None, help="JSON array of historical prices")
-    parser.add_argument("--model-prob", type=float, default=None, help="Your probability estimate (0-1)")
-    parser.add_argument("--volatility", type=float, default=None, help="Override annual volatility")
+    parser.add_argument(
+        "--market-price", type=int, required=True, help="YES price in cents (1-99)"
+    )
+    parser.add_argument(
+        "--time-to-expiry-days", type=float, required=True, help="Days to settlement"
+    )
+    parser.add_argument(
+        "--historical-prices", type=str, default=None, help="JSON array of historical prices"
+    )
+    parser.add_argument(
+        "--model-prob", type=float, default=None, help="Your probability estimate (0-1)"
+    )
+    parser.add_argument(
+        "--volatility", type=float, default=None, help="Override annual volatility"
+    )
 
     args = parser.parse_args()
 

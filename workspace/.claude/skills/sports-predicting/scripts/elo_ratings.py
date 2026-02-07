@@ -14,7 +14,6 @@ import json
 import sys
 from collections import defaultdict
 
-import numpy as np
 import pandas as pd
 
 
@@ -87,17 +86,19 @@ def compute_elo_ratings(
         new_home = ratings[home] + k_factor * (actual_home - exp_home)
         new_away = ratings[away] + k_factor * (actual_away - exp_away)
 
-        history.append({
-            "home": home,
-            "away": away,
-            "home_score": home_score,
-            "away_score": away_score,
-            "home_win_prob": round(exp_home, 4),
-            "home_elo_before": round(ratings[home], 1),
-            "away_elo_before": round(ratings[away], 1),
-            "home_elo_after": round(new_home, 1),
-            "away_elo_after": round(new_away, 1),
-        })
+        history.append(
+            {
+                "home": home,
+                "away": away,
+                "home_score": home_score,
+                "away_score": away_score,
+                "home_win_prob": round(exp_home, 4),
+                "home_elo_before": round(ratings[home], 1),
+                "away_elo_before": round(ratings[away], 1),
+                "home_elo_after": round(new_home, 1),
+                "away_elo_after": round(new_away, 1),
+            }
+        )
 
         ratings[home] = new_home
         ratings[away] = new_away
@@ -170,7 +171,9 @@ def main():
     parser.add_argument("--games-file", type=str, required=True, help="CSV of game results")
     parser.add_argument("--k-factor", type=float, default=20.0, help="K-factor")
     parser.add_argument("--home-advantage", type=float, default=0.0, help="Home advantage in Elo")
-    parser.add_argument("--predict", type=str, default=None, help="Predict matchup: 'TeamA vs TeamB'")
+    parser.add_argument(
+        "--predict", type=str, default=None, help="Predict matchup: 'TeamA vs TeamB'"
+    )
 
     args = parser.parse_args()
 

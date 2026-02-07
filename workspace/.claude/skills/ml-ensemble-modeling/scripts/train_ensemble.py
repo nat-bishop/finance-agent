@@ -10,11 +10,10 @@ import argparse
 import json
 import sys
 
-import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
 
 
@@ -91,7 +90,7 @@ def train_ensemble(
     feature_importance = sorted(
         [
             {"feature": feat, "importance": round(float(imp), 4)}
-            for feat, imp in zip(features, importances)
+            for feat, imp in zip(features, importances, strict=False)
         ],
         key=lambda x: x["importance"],
         reverse=True,
@@ -142,7 +141,7 @@ def train_ensemble(
         "overfit_warning": overfit_warning,
         "predictions_sample": [
             {"prob": round(float(p), 4), "actual": int(a)}
-            for p, a in zip(y_prob_test[:10], y_test[:10])
+            for p, a in zip(y_prob_test[:10], y_test[:10], strict=False)
         ],
     }
 
@@ -151,9 +150,16 @@ def main():
     parser = argparse.ArgumentParser(description="Ensemble model training")
     parser.add_argument("--data-file", type=str, required=True, help="CSV file path")
     parser.add_argument("--target", type=str, required=True, help="Target column (binary)")
-    parser.add_argument("--features", type=str, required=True, help="Comma-separated feature names")
-    parser.add_argument("--model", type=str, default="random_forest",
-                        choices=["random_forest", "xgboost"], help="Model type")
+    parser.add_argument(
+        "--features", type=str, required=True, help="Comma-separated feature names"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="random_forest",
+        choices=["random_forest", "xgboost"],
+        help="Model type",
+    )
     parser.add_argument("--test-size", type=float, default=0.2, help="Test set fraction")
 
     args = parser.parse_args()
@@ -166,8 +172,11 @@ def main():
 
     features = [f.strip() for f in args.features.split(",")]
     result = train_ensemble(
-        df, target=args.target, features=features,
-        model_type=args.model, test_size=args.test_size,
+        df,
+        target=args.target,
+        features=features,
+        model_type=args.model,
+        test_size=args.test_size,
     )
     print(json.dumps(result, indent=2))
 

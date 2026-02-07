@@ -131,10 +131,16 @@ def size_position(
 def main():
     parser = argparse.ArgumentParser(description="Kelly Criterion position sizing")
     parser.add_argument("--true-prob", type=float, required=True, help="True probability (0-1)")
-    parser.add_argument("--market-price", type=int, required=True, help="Market YES price in cents (1-99)")
+    parser.add_argument(
+        "--market-price", type=int, required=True, help="Market YES price in cents (1-99)"
+    )
     parser.add_argument("--bankroll", type=float, required=True, help="Available bankroll in USD")
-    parser.add_argument("--fraction", type=float, default=0.25, help="Kelly fraction (default 0.25)")
-    parser.add_argument("--fee-rate", type=float, default=0.0, help="Fee rate as decimal (default 0)")
+    parser.add_argument(
+        "--fraction", type=float, default=0.25, help="Kelly fraction (default 0.25)"
+    )
+    parser.add_argument(
+        "--fee-rate", type=float, default=0.0, help="Fee rate as decimal (default 0)"
+    )
 
     args = parser.parse_args()
 

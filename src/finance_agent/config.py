@@ -9,10 +9,9 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
-
 _TOML_CANDIDATES = [
     Path(__file__).resolve().parents[2] / "config.toml",  # repo root
-    Path("/app/config.toml"),                              # Docker
+    Path("/app/config.toml"),  # Docker
 ]
 
 
@@ -93,10 +92,12 @@ def load_configs() -> tuple[AgentConfig, TradingConfig]:
 
     # Split TOML keys into agent-level vs trading-level
     agent_keys = set(AgentConfig.model_fields) - {"permissions"}
-    trading_toml = {k: v for k, v in profile_defaults.items()
-                    if k not in agent_keys and k in TradingConfig.model_fields}
-    agent_toml = {k: v for k, v in profile_defaults.items()
-                  if k in agent_keys}
+    trading_toml = {
+        k: v
+        for k, v in profile_defaults.items()
+        if k not in agent_keys and k in TradingConfig.model_fields
+    }
+    agent_toml = {k: v for k, v in profile_defaults.items() if k in agent_keys}
 
     # For each config class, only apply TOML value if env didn't set the field.
     # We detect "env set" by checking if the env-loaded value differs from the

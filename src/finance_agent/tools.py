@@ -66,8 +66,7 @@ def create_kalshi_tools(
 
     @tool(
         "get_orderbook",
-        "Get the current orderbook for a market: bid/ask levels, depth, spread, "
-        "and mid price.",
+        "Get the current orderbook for a market: bid/ask levels, depth, spread, and mid price.",
         {
             "ticker": {"type": "string", "description": "Market ticker"},
             "depth": {

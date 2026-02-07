@@ -8,7 +8,6 @@ Usage:
 
 import argparse
 import json
-import math
 import sys
 
 import numpy as np
@@ -36,9 +35,7 @@ def compute_calibration(predictions: np.ndarray, outcomes: np.ndarray, n_bins: i
     # Log Loss (with clipping to avoid log(0))
     eps = 1e-15
     clipped = np.clip(predictions, eps, 1 - eps)
-    log_loss = -float(np.mean(
-        outcomes * np.log(clipped) + (1 - outcomes) * np.log(1 - clipped)
-    ))
+    log_loss = -float(np.mean(outcomes * np.log(clipped) + (1 - outcomes) * np.log(1 - clipped)))
 
     # Calibration curve
     bin_edges = np.linspace(0, 1, n_bins + 1)
@@ -58,14 +55,16 @@ def compute_calibration(predictions: np.ndarray, outcomes: np.ndarray, n_bins: i
 
     # Reliability diagram deviation (mean absolute calibration error)
     if bin_centers:
-        mace = float(np.mean([abs(c - a) for c, a in zip(bin_centers, bin_actual)]))
+        mace = float(np.mean([abs(c - a) for c, a in zip(bin_centers, bin_actual, strict=False)]))
     else:
         mace = 0.0
 
     # Diagnosis
     diagnosis = []
     if brier > 0.25:
-        diagnosis.append("Brier score worse than naive 50% baseline — predictions have negative value")
+        diagnosis.append(
+            "Brier score worse than naive 50% baseline — predictions have negative value"
+        )
     elif brier > 0.20:
         diagnosis.append("Brier score marginal — slight improvement over baseline")
     elif brier > 0.15:
@@ -77,7 +76,7 @@ def compute_calibration(predictions: np.ndarray, outcomes: np.ndarray, n_bins: i
 
     # Check for overconfidence/underconfidence
     if len(bin_centers) >= 3:
-        deviations = [a - c for c, a in zip(bin_centers, bin_actual)]
+        deviations = [a - c for c, a in zip(bin_centers, bin_actual, strict=False)]
         avg_deviation = np.mean(deviations)
         if avg_deviation > 0.05:
             diagnosis.append("Underconfident: actual outcomes consistently better than predicted")
@@ -89,7 +88,9 @@ def compute_calibration(predictions: np.ndarray, outcomes: np.ndarray, n_bins: i
     # Check high-confidence accuracy
     high_conf_mask = (predictions > 0.8) | (predictions < 0.2)
     if high_conf_mask.sum() >= 5:
-        high_conf_brier = float(np.mean((predictions[high_conf_mask] - outcomes[high_conf_mask]) ** 2))
+        high_conf_brier = float(
+            np.mean((predictions[high_conf_mask] - outcomes[high_conf_mask]) ** 2)
+        )
         if high_conf_brier > brier * 1.5:
             diagnosis.append("High-confidence predictions are disproportionately inaccurate")
 
@@ -98,9 +99,7 @@ def compute_calibration(predictions: np.ndarray, outcomes: np.ndarray, n_bins: i
         "brier_score": round(brier, 6),
         "log_loss": round(log_loss, 6),
         "mean_abs_calibration_error": round(mace, 6),
-        "overall_accuracy": round(float((
-            (predictions >= 0.5).astype(int) == outcomes
-        ).mean()), 4),
+        "overall_accuracy": round(float(((predictions >= 0.5).astype(int) == outcomes).mean()), 4),
         "mean_prediction": round(float(predictions.mean()), 4),
         "base_rate": round(float(outcomes.mean()), 4),
         "calibration_curve": {

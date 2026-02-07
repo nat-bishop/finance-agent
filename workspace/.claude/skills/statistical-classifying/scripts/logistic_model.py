@@ -12,8 +12,8 @@ import sys
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
+from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
 
 
@@ -68,21 +68,25 @@ def train_logistic(
     y_prob_test = model.predict_proba(X_test)[:, 1]
 
     # Cross-validation
-    cv_scores = cross_val_score(model, X_scaled, y, cv=min(5, len(df_clean) // 5), scoring="accuracy")
+    cv_scores = cross_val_score(
+        model, X_scaled, y, cv=min(5, len(df_clean) // 5), scoring="accuracy"
+    )
 
     # Coefficients and odds ratios
     coefficients = []
     for i, feat in enumerate(features):
         coef = float(model.coef_[0][i])
         odds_ratio = float(np.exp(coef))
-        coefficients.append({
-            "feature": feat,
-            "coefficient": round(coef, 4),
-            "odds_ratio": round(odds_ratio, 4),
-            "direction": "positive" if coef > 0 else "negative",
-            "feature_mean": round(float(df_clean[feat].mean()), 4),
-            "feature_std": round(float(df_clean[feat].std()), 4),
-        })
+        coefficients.append(
+            {
+                "feature": feat,
+                "coefficient": round(coef, 4),
+                "odds_ratio": round(odds_ratio, 4),
+                "direction": "positive" if coef > 0 else "negative",
+                "feature_mean": round(float(df_clean[feat].mean()), 4),
+                "feature_std": round(float(df_clean[feat].std()), 4),
+            }
+        )
 
     # Sort by absolute importance
     coefficients.sort(key=lambda x: abs(x["coefficient"]), reverse=True)
@@ -117,7 +121,7 @@ def train_logistic(
         },
         "predictions_sample": [
             {"prob": round(float(p), 4), "actual": int(a)}
-            for p, a in zip(y_prob_test[:10], y_test[:10])
+            for p, a in zip(y_prob_test[:10], y_test[:10], strict=False)
         ],
     }
 
@@ -126,7 +130,9 @@ def main():
     parser = argparse.ArgumentParser(description="Logistic regression for binary prediction")
     parser.add_argument("--data-file", type=str, required=True, help="CSV file path")
     parser.add_argument("--target", type=str, required=True, help="Target column (binary)")
-    parser.add_argument("--features", type=str, required=True, help="Comma-separated feature names")
+    parser.add_argument(
+        "--features", type=str, required=True, help="Comma-separated feature names"
+    )
     parser.add_argument("--test-size", type=float, default=0.2, help="Test set fraction")
 
     args = parser.parse_args()
