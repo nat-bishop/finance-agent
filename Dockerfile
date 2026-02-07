@@ -1,0 +1,23 @@
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# System deps for scipy/numpy wheels
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install claude-code CLI (bundled by SDK)
+RUN uv pip install --system --no-cache claude-code
+
+# Install project deps — copy source before install so -e works
+COPY pyproject.toml uv.lock config.toml /app/
+COPY src/ /app/src/
+RUN uv pip install --system --no-cache /app
+
+# Create isolated agent workspace
+RUN mkdir -p /workspace/{analysis,data,lib,trade_journal,.claude/skills}
+COPY workspace/.claude/skills/ /workspace/.claude/skills/
+
+WORKDIR /workspace
+ENTRYPOINT ["python", "-m", "finance_agent.main"]

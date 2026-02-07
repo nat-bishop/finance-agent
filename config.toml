@@ -1,0 +1,29 @@
+[demo]
+model = "claude-sonnet-4-5-20250929"
+kalshi_env = "demo"
+max_position_usd = 50.0
+max_portfolio_usd = 500.0
+max_order_count = 100
+min_edge_pct = 5.0
+kalshi_fee_rate = 0.03
+max_budget_usd = 1.0
+
+[prod]
+model = "claude-sonnet-4-5-20250929"
+kalshi_env = "prod"
+max_position_usd = 100.0
+max_portfolio_usd = 1000.0
+max_order_count = 50
+min_edge_pct = 7.0
+kalshi_fee_rate = 0.03
+max_budget_usd = 2.0
+
+[research]
+model = "claude-opus-4-6"
+kalshi_env = "demo"
+max_position_usd = 0.0
+max_portfolio_usd = 0.0
+max_order_count = 0
+min_edge_pct = 0.0
+kalshi_fee_rate = 0.03
+max_budget_usd = 5.0

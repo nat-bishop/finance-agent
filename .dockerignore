@@ -1,0 +1,9 @@
+.git
+.env
+__pycache__
+*.pyc
+.claude/
+workspace/trade_journal/
+workspace/analysis/
+workspace/data/
+workspace/lib/

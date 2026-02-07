@@ -1,0 +1,14 @@
+services:
+  agent:
+    build: .
+    env_file: .env
+    environment:
+      - ANTHROPIC_API_KEY
+    volumes:
+      - ./workspace:/workspace
+      - trade_journal:/workspace/trade_journal
+    stdin_open: true
+    tty: true
+
+volumes:
+  trade_journal:
