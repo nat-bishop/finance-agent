@@ -26,7 +26,45 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pre-commit>=4.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# ---------- Ruff ----------
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "E501",   # line length (formatter handles this)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["finance_agent"]
+
+# ---------- mypy ----------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true

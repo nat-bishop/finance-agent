@@ -17,13 +17,3 @@ max_order_count = 50
 min_edge_pct = 7.0
 kalshi_fee_rate = 0.03
 max_budget_usd = 2.0
-
-[research]
-model = "claude-opus-4-6"
-kalshi_env = "demo"
-max_position_usd = 0.0
-max_portfolio_usd = 0.0
-max_order_count = 0
-min_edge_pct = 0.0
-kalshi_fee_rate = 0.03
-max_budget_usd = 5.0

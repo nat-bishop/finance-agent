@@ -1,4 +1,4 @@
-.PHONY: build run dev shell clean logs setup lock install
+.PHONY: build run dev shell clean logs setup lock install lint format check
 
 build:
 	docker compose build
@@ -26,3 +26,14 @@ lock:
 
 install:
 	uv sync
+
+lint:
+	uv run ruff check src/
+	uv run ruff format --check src/
+	uv run mypy src/
+
+format:
+	uv run ruff check --fix src/
+	uv run ruff format src/
+
+check: lint
