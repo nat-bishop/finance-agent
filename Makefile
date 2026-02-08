@@ -1,4 +1,4 @@
-.PHONY: build run dev shell clean logs setup lock install lint format check
+.PHONY: build run dev shell clean logs setup lock install lint format check collect signals scan backup
 
 build:
 	docker compose build
@@ -16,7 +16,7 @@ clean:
 	docker compose down -v
 
 logs:
-	cat workspace/trade_journal/trades.jsonl
+	@echo "Trade journal is now in SQLite. Use: make shell -> sqlite3 /workspace/data/agent.db"
 
 setup:
 	cp .env.example .env
@@ -37,3 +37,16 @@ format:
 	uv run ruff format src/
 
 check: lint
+
+# ── Data pipeline ────────────────────────────────────────────
+
+collect:
+	uv run python -m finance_agent.collector
+
+signals:
+	uv run python -m finance_agent.signals
+
+scan: collect signals
+
+backup:
+	uv run python -c "from finance_agent.database import AgentDatabase; from finance_agent.config import load_configs; _, tc = load_configs(); db = AgentDatabase(tc.db_path); print(db.backup_if_needed(tc.backup_dir) or 'No backup needed'); db.close()"

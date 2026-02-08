@@ -41,6 +41,13 @@ class TradingConfig(BaseSettings):
     min_edge_pct: float = 5.0
     kalshi_fee_rate: float = 0.03
 
+    db_path: str = "/workspace/data/agent.db"
+    backup_dir: str = "/workspace/backups"
+    backup_max_age_hours: int = 24
+    rate_limit_reads_per_sec: int = 20
+    rate_limit_writes_per_sec: int = 10
+    auto_scan_on_startup: bool = True
+
     @property
     def kalshi_base_url(self) -> str:
         if self.kalshi_env == "prod":

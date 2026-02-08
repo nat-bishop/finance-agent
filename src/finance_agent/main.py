@@ -15,16 +15,20 @@ from claude_agent_sdk import (
 )
 
 from .config import AgentConfig, TradingConfig, build_system_prompt, load_configs
+from .database import AgentDatabase
 from .hooks import create_audit_hooks
 from .kalshi_client import KalshiAPIClient
 from .permissions import create_permission_handler
-from .tools import create_kalshi_tools
+from .tools import create_db_tools, create_kalshi_tools
 
 
 def build_options(
     agent_config: AgentConfig,
     trading_config: TradingConfig,
     kalshi_mcp: dict,
+    db_mcp: dict,
+    db: AgentDatabase,
+    session_id: str,
     workspace: str = "/workspace",
 ) -> ClaudeAgentOptions:
     """Assemble ClaudeAgentOptions from configs."""
@@ -38,7 +42,7 @@ def build_options(
         },
         model=agent_config.model,
         cwd=workspace,
-        mcp_servers={"kalshi": kalshi_mcp},
+        mcp_servers={"kalshi": kalshi_mcp, "db": db_mcp},
         allowed_tools=[
             # Kalshi MCP tools
             "mcp__kalshi__search_markets",
@@ -51,6 +55,13 @@ def build_options(
             "mcp__kalshi__get_open_orders",
             "mcp__kalshi__place_order",
             "mcp__kalshi__cancel_order",
+            # Database MCP tools
+            "mcp__db__db_query",
+            "mcp__db__db_log_prediction",
+            "mcp__db__db_resolve_predictions",
+            "mcp__db__db_get_session_state",
+            "mcp__db__db_add_watchlist",
+            "mcp__db__db_remove_watchlist",
             # Filesystem tools (built-in)
             "Read",
             "Write",
@@ -58,13 +69,15 @@ def build_options(
             "Bash",
             "Glob",
             "Grep",
+            # User interaction
+            "AskUserQuestion",
         ],
         can_use_tool=create_permission_handler(
             workspace_path=workspace,
             permissions=agent_config.permissions,
             trading_config=trading_config,
         ),
-        hooks=create_audit_hooks(Path(workspace) / "trade_journal"),
+        hooks=create_audit_hooks(db=db, session_id=session_id),
         max_budget_usd=agent_config.max_budget_usd,
         permission_mode=agent_config.permission_mode,
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
@@ -76,22 +89,69 @@ async def run_repl() -> None:
     agent_config, trading_config = load_configs()
     kalshi = KalshiAPIClient(trading_config)
 
+    # Initialize database
+    db = AgentDatabase(trading_config.db_path)
+    backup_result = db.backup_if_needed(
+        trading_config.backup_dir,
+        max_age_hours=trading_config.backup_max_age_hours,
+    )
+    if backup_result:
+        print(f"DB backup: {backup_result}")
+
+    session_id = db.create_session(profile=agent_config.profile)
+
+    # Clear session scratch file
+    session_log = Path("/workspace/data/session.log")
+    session_log.parent.mkdir(parents=True, exist_ok=True)
+    session_log.write_text("", encoding="utf-8")
+
     kalshi_mcp = create_sdk_mcp_server(
         name="kalshi",
         version="1.0.0",
         tools=create_kalshi_tools(kalshi, trading_config),
     )
 
-    options = build_options(agent_config, trading_config, kalshi_mcp)
+    db_mcp = create_sdk_mcp_server(
+        name="db",
+        version="1.0.0",
+        tools=create_db_tools(db),
+    )
+
+    options = build_options(
+        agent_config,
+        trading_config,
+        kalshi_mcp,
+        db_mcp,
+        db,
+        session_id,
+    )
 
     print("Kalshi Trading Agent")
     print(f"Profile: {agent_config.profile}  |  Model: {agent_config.model}")
     print(f"Environment: {trading_config.kalshi_env}")
     print(f"Max position: ${trading_config.max_position_usd}")
     print(f"Max portfolio: ${trading_config.max_portfolio_usd}")
+    print(f"Session: {session_id}")
     print("Type 'quit' or 'exit' to stop.\n")
 
     async with ClaudeSDKClient(options=options) as client:
+        # Send BEGIN_SESSION to trigger startup protocol
+        await client.query("BEGIN_SESSION")
+
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        print(block.text)
+            elif isinstance(msg, ResultMessage):
+                if msg.total_cost_usd is not None:
+                    print(f"  [cost: ${msg.total_cost_usd:.4f}]")
+                if msg.is_error:
+                    print(f"  [error: {msg.result}]")
+
+        print()
+
+        # Interactive loop
         while True:
             try:
                 user_input = input("> ").strip()
@@ -119,6 +179,8 @@ async def run_repl() -> None:
                         print(f"  [error: {msg.result}]")
 
             print()  # blank line between turns
+
+    db.close()
 
 
 def main() -> None:

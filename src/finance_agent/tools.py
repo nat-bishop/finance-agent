@@ -1,4 +1,4 @@
-"""MCP tool factories for Kalshi API access."""
+"""MCP tool factories for Kalshi API access and database."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from .config import TradingConfig
+from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
 
 
@@ -236,4 +237,133 @@ def create_kalshi_tools(
         get_open_orders,
         place_order,
         cancel_order,
+    ]
+
+
+def create_db_tools(db: AgentDatabase) -> list:
+    """Create MCP tool definitions for database access."""
+
+    @tool(
+        "db_query",
+        "Execute a read-only SQL SELECT query against the agent database. "
+        "Tables: market_snapshots, events, signals, trades, predictions, "
+        "portfolio_snapshots, sessions, watchlist. Returns list of row dicts.",
+        {
+            "sql": {
+                "type": "string",
+                "description": "SQL SELECT query to execute",
+            },
+        },
+    )
+    async def db_query(args: dict) -> dict:
+        rows = db.query(args["sql"])
+        return _text(rows)
+
+    @tool(
+        "db_log_prediction",
+        "Log a probability prediction for a market. Used for calibration tracking.",
+        {
+            "market_ticker": {
+                "type": "string",
+                "description": "Kalshi market ticker",
+            },
+            "prediction": {
+                "type": "number",
+                "description": "Predicted probability (0.0 to 1.0)",
+            },
+            "market_price_cents": {
+                "type": "integer",
+                "description": "Current market price in cents",
+                "optional": True,
+            },
+            "methodology": {
+                "type": "string",
+                "description": "How you arrived at this prediction",
+                "optional": True,
+            },
+            "notes": {
+                "type": "string",
+                "description": "Additional context",
+                "optional": True,
+            },
+        },
+    )
+    async def db_log_prediction(args: dict) -> dict:
+        pred_id = db.log_prediction(
+            market_ticker=args["market_ticker"],
+            prediction=args["prediction"],
+            market_price_cents=args.get("market_price_cents"),
+            methodology=args.get("methodology"),
+            notes=args.get("notes"),
+        )
+        return _text({"prediction_id": pred_id, "status": "logged"})
+
+    @tool(
+        "db_resolve_predictions",
+        "Resolve predictions by checking settled markets. "
+        "Pass a list of {prediction_id, outcome} pairs.",
+        {
+            "resolutions": {
+                "type": "array",
+                "description": "List of {prediction_id: int, outcome: int (1=yes, 0=no)}",
+            },
+        },
+    )
+    async def db_resolve_predictions(args: dict) -> dict:
+        resolved = 0
+        for r in args.get("resolutions", []):
+            db.resolve_prediction(r["prediction_id"], r["outcome"])
+            resolved += 1
+        return _text({"resolved": resolved})
+
+    @tool(
+        "db_get_session_state",
+        "Get session state for startup: last session summary, pending signals, "
+        "unresolved predictions, watchlist, portfolio delta, recent trades.",
+        {},
+    )
+    async def db_get_session_state(args: dict) -> dict:
+        return _text(db.get_session_state())
+
+    @tool(
+        "db_add_watchlist",
+        "Add a market to the watchlist for tracking across sessions.",
+        {
+            "ticker": {"type": "string", "description": "Market ticker to watch"},
+            "reason": {
+                "type": "string",
+                "description": "Why you're watching this market",
+                "optional": True,
+            },
+            "alert_condition": {
+                "type": "string",
+                "description": "Condition to alert on (e.g. 'price_below_30')",
+                "optional": True,
+            },
+        },
+    )
+    async def db_add_watchlist(args: dict) -> dict:
+        db.add_to_watchlist(
+            ticker=args["ticker"],
+            reason=args.get("reason"),
+            alert_condition=args.get("alert_condition"),
+        )
+        return _text({"status": "added", "ticker": args["ticker"]})
+
+    @tool(
+        "db_remove_watchlist",
+        "Remove a market from the watchlist.",
+        {"ticker": {"type": "string", "description": "Market ticker to remove"}},
+    )
+    async def db_remove_watchlist(args: dict) -> dict:
+        db.remove_from_watchlist(args["ticker"])
+        return _text({"status": "removed", "ticker": args["ticker"]})
+
+    return [
+        db_query,
+        db_log_prediction,
+        db_resolve_predictions,
+        db_get_session_state,
+        db_add_watchlist,
+        db_remove_watchlist,
     ]

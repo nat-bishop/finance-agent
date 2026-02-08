@@ -8,14 +8,20 @@ from kalshi_python import Configuration, KalshiClient
 from kalshi_python.models import CreateOrderRequest
 
 from .config import TradingConfig
+from .rate_limiter import RateLimiter
 
 
 class KalshiAPIClient:
     """Convenience wrapper providing typed methods around the Kalshi SDK."""
 
-    def __init__(self, config: TradingConfig) -> None:
+    def __init__(
+        self,
+        config: TradingConfig,
+        rate_limiter: RateLimiter | None = None,
+    ) -> None:
         self._config = config
         self._client = self._build_client(config)
+        self._limiter = rate_limiter
 
     @staticmethod
     def _build_client(config: TradingConfig) -> KalshiClient:
@@ -26,6 +32,16 @@ class KalshiAPIClient:
             cfg.private_key_pem = f.read()
 
         return KalshiClient(cfg)
+
+    def _rate_read(self) -> None:
+        """Block until a read token is available (if limiter configured)."""
+        if self._limiter:
+            self._limiter.acquire_read_sync()
+
+    def _rate_write(self) -> None:
+        """Block until a write token is available (if limiter configured)."""
+        if self._limiter:
+            self._limiter.acquire_write_sync()
 
     # ── Market data (read) ──────────────────────────────────────────
 
@@ -39,6 +55,7 @@ class KalshiAPIClient:
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit}
         if query:
             kwargs["tickers"] = query  # SDK uses tickers param for search
@@ -54,14 +71,17 @@ class KalshiAPIClient:
         return resp.to_dict() if hasattr(resp, "to_dict") else resp
 
     def get_market(self, ticker: str) -> dict[str, Any]:
+        self._rate_read()
         resp = self._client.get_market(ticker)
         return resp.to_dict() if hasattr(resp, "to_dict") else resp
 
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
+        self._rate_read()
         resp = self._client.get_market_orderbook(ticker, depth=depth)
         return resp.to_dict() if hasattr(resp, "to_dict") else resp
 
     def get_event(self, event_ticker: str, with_nested_markets: bool = True) -> dict[str, Any]:
+        self._rate_read()
         resp = self._client.get_event(event_ticker, with_nested_markets=with_nested_markets)
         return resp.to_dict() if hasattr(resp, "to_dict") else resp
 
@@ -72,6 +92,7 @@ class KalshiAPIClient:
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit}
         if ticker:
             kwargs["ticker"] = ticker
@@ -88,6 +109,7 @@ class KalshiAPIClient:
         end_ts: int | None = None,
         period_interval: int = 60,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {
             "ticker": ticker,
             "market_ticker": ticker,
@@ -103,6 +125,7 @@ class KalshiAPIClient:
     # ── Portfolio (read) ────────────────────────────────────────────
 
     def get_balance(self) -> dict[str, Any]:
+        self._rate_read()
         resp = self._client.get_balance()
         return resp.to_dict() if hasattr(resp, "to_dict") else resp
 
@@ -114,6 +137,7 @@ class KalshiAPIClient:
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit, "settlement_status": "unsettled"}
         if ticker:
             kwargs["ticker"] = ticker
@@ -131,6 +155,7 @@ class KalshiAPIClient:
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit}
         if ticker:
             kwargs["ticker"] = ticker
@@ -145,6 +170,7 @@ class KalshiAPIClient:
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit}
         if cursor:
             kwargs["cursor"] = cursor
@@ -160,6 +186,7 @@ class KalshiAPIClient:
         status: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
+        self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit}
         if ticker:
             kwargs["ticker"] = ticker
@@ -181,6 +208,7 @@ class KalshiAPIClient:
         client_order_id: str | None = None,
         expiration_ts: int | None = None,
     ) -> dict[str, Any]:
+        self._rate_write()
         kwargs: dict[str, Any] = {
             "ticker": ticker,
             "action": action,
@@ -201,5 +229,6 @@ class KalshiAPIClient:
         return resp.to_dict() if hasattr(resp, "to_dict") else resp
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
+        self._rate_write()
         resp = self._client.cancel_order(order_id)
         return resp.to_dict() if hasattr(resp, "to_dict") else resp

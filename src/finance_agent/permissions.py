@@ -1,4 +1,4 @@
-"""Permission handler — gates writes, enforces trading limits."""
+"""Permission handler — gates writes, enforces trading limits, handles user interaction."""
 
 from __future__ import annotations
 
@@ -19,8 +19,10 @@ def create_permission_handler(
 
     Rules:
     - Read-only Kalshi tools: always allow
-    - place_order: validate position size, contract count, require confirmation
+    - DB read tools: always allow
+    - place_order: validate position size, contract count
     - cancel_order: always allow
+    - AskUserQuestion: present questions, collect answers
     - Bash: allow only within /workspace writable dirs
     - Write/Edit: allow in writable_patterns, deny in deny_patterns
     - Read/Glob/Grep: always allow
@@ -35,10 +37,28 @@ def create_permission_handler(
         "mcp__kalshi__get_recent_trades",
         "mcp__kalshi__get_portfolio",
         "mcp__kalshi__get_open_orders",
+        # Database reads
+        "mcp__db__db_query",
+        "mcp__db__db_get_session_state",
+        "mcp__db__db_log_prediction",
+        "mcp__db__db_resolve_predictions",
+        "mcp__db__db_add_watchlist",
+        "mcp__db__db_remove_watchlist",
+        # Filesystem reads
         "Read",
         "Glob",
         "Grep",
     }
+
+    def _parse_response(response: str, options: list[dict]) -> str:
+        """Parse user response — option number or free text."""
+        try:
+            idx = int(response) - 1
+            if 0 <= idx < len(options):
+                return options[idx]["label"]
+        except ValueError:
+            pass
+        return response
 
     async def handler(
         tool_name: str,
@@ -47,7 +67,27 @@ def create_permission_handler(
     ) -> PermissionResultAllow | PermissionResultDeny:
         # Always allow read tools
         if tool_name in read_tools:
-            return PermissionResultAllow()
+            return PermissionResultAllow(updated_input=input_data)
+
+        # ── AskUserQuestion: present questions, collect answers ──
+        if tool_name == "AskUserQuestion":
+            answers: dict[str, str] = {}
+            for q in input_data.get("questions", []):
+                print(f"\n{q.get('header', '')}: {q['question']}")
+                for i, opt in enumerate(q.get("options", [])):
+                    print(f"  {i + 1}. {opt['label']} — {opt.get('description', '')}")
+                print("  (Enter number, or type your own answer)")
+                try:
+                    response = input("Your choice: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    response = ""
+                answers[q["question"]] = _parse_response(response, q.get("options", []))
+            return PermissionResultAllow(
+                updated_input={
+                    "questions": input_data.get("questions", []),
+                    "answers": answers,
+                }
+            )
 
         # ── place_order: enforce trading limits ─────────────────────
         if tool_name == "mcp__kalshi__place_order":
@@ -77,20 +117,40 @@ def create_permission_handler(
                     interrupt=False,
                 )
 
-            # Validation passed — SDK will still prompt user for confirmation
-            # because we are in "default" permission mode.
-            return PermissionResultAllow()
+            # Show formatted trade summary and ask for approval
+            ticker = input_data.get("ticker", "?")
+            action = input_data.get("action", "?")
+            side = input_data.get("side", "?")
+            order_type = input_data.get("order_type", "limit")
 
-        # ── cancel_order: always allow ──────────────────────────────
+            print(f"\n{'=' * 50}")
+            print(f"  TRADE: {action.upper()} {count}x {side.upper()} on {ticker}")
+            print(f"  Type: {order_type}  |  Price: {price}¢  |  Cost: ${cost_usd:.2f}")
+            print(f"{'=' * 50}")
+            try:
+                response = input("Approve this trade? (y/n): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                response = "n"
+            if response.lower() == "y":
+                return PermissionResultAllow(updated_input=input_data)
+            return PermissionResultDeny(message="User rejected trade")
+
+        # ── cancel_order: approval ────────────────────────────────
         if tool_name == "mcp__kalshi__cancel_order":
-            return PermissionResultAllow()
+            order_id = input_data.get("order_id", "?")
+            print(f"\nCancel order: {order_id}")
+            try:
+                response = input("Approve cancellation? (y/n): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                response = "n"
+            if response.lower() == "y":
+                return PermissionResultAllow(updated_input=input_data)
+            return PermissionResultDeny(message="User rejected cancellation")
 
         # ── Bash: restrict to workspace writable directories ────────
         if tool_name == "Bash":
             command = input_data.get("command", "")
-            # Block commands that escape workspace
             abs_workspace = os.path.abspath(workspace_path)
-            # Simple heuristic: disallow cd outside workspace, writing to /app
             dangerous = ["/app", "/etc", "/usr", "/root", "/home"]
             for d in dangerous:
                 if d in command and "pip" not in command:
@@ -98,7 +158,7 @@ def create_permission_handler(
                         message=f"Bash access restricted to {abs_workspace}",
                         interrupt=False,
                     )
-            return PermissionResultAllow()
+            return PermissionResultAllow(updated_input=input_data)
 
         # ── Write / Edit: check path against patterns ───────────────
         if tool_name in ("Write", "Edit"):
@@ -116,7 +176,7 @@ def create_permission_handler(
             # Check writable patterns
             for pat in permissions.writable_patterns:
                 if rel_path.startswith(pat):
-                    return PermissionResultAllow()
+                    return PermissionResultAllow(updated_input=input_data)
 
             # Not in any writable pattern — deny
             return PermissionResultDeny(
@@ -124,7 +184,7 @@ def create_permission_handler(
                 interrupt=False,
             )
 
-        # Default: let SDK handle (will prompt user)
-        return PermissionResultAllow()
+        # Default: auto-approve (hooks handle deny/allow for most tools)
+        return PermissionResultAllow(updated_input=input_data)
 
     return handler

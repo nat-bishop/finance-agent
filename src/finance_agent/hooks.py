@@ -1,84 +1,111 @@
-"""Audit hooks — trade journal logging in JSONL format."""
+"""Audit hooks — trade logging to SQLite + approval flow."""
 
 from __future__ import annotations
 
 import json
 import time
-import uuid
-from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
 
+from .database import AgentDatabase
 
-def create_audit_hooks(journal_dir: Path) -> dict[str, list[HookMatcher]]:
-    """Return hooks dict that logs all trades to a JSONL journal.
 
-    Hooks:
-    - PreToolUse on place_order/cancel_order: log intent
-    - PostToolUse on place_order/cancel_order: log result
-    - Stop: log session summary
+def create_audit_hooks(
+    db: AgentDatabase,
+    session_id: str,
+) -> dict[str, list[HookMatcher]]:
+    """Return hooks dict for trade validation, auto-approve, audit, and session lifecycle.
+
+    Hook order (PreToolUse):
+    1. Stream keepalive (all tools) — required for can_use_tool to work
+    2. Auto-approve reads — Kalshi read tools, DB read tools, filesystem reads
+    3. Trade validation — validates limits, forces user approval via 'ask'
+    4. Cancel order — forces user approval via 'ask'
+
+    PostToolUse:
+    5. Trade audit — logs order/cancel results to SQLite
+
+    Stop:
+    6. Session end — updates session record
     """
-    journal_dir.mkdir(parents=True, exist_ok=True)
-    journal_file = journal_dir / "trades.jsonl"
-
-    session_id = str(uuid.uuid4())[:8]
     session_start = time.time()
     trade_count = {"placed": 0, "cancelled": 0}
 
-    def _log(entry: dict) -> None:
-        entry["timestamp"] = time.time()
-        entry["iso_time"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        entry["session_id"] = session_id
-        with open(journal_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
+    # ── 1. Stream keepalive (all tools) ──────────────────────────
+    # Python SDK workaround: at least one PreToolUse hook must return
+    # {"continue_": True} for can_use_tool to function.
 
-    # ── PreToolUse: log trade intent ────────────────────────────────
+    async def stream_keepalive(
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict:
+        return {"continue_": True}
 
-    async def pre_trade_hook(
+    # ── 2. Auto-approve reads ────────────────────────────────────
+
+    async def auto_approve_reads(
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict:
+        return {"permissionDecision": "allow"}
+
+    # ── 3. Trade validation (place_order) ────────────────────────
+
+    async def validate_and_ask_trade(
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict:
+        tool_input = input_data.get("tool_input", {})
+        count = tool_input.get("count", 0)
+        yes_price = tool_input.get("yes_price", 0) or 0
+        no_price = tool_input.get("no_price", 0) or 0
+        price = max(yes_price, no_price)
+        cost = (count * price) / 100
+
+        ticker = tool_input.get("ticker", "?")
+        action = tool_input.get("action", "?")
+        side = tool_input.get("side", "?")
+        order_type = tool_input.get("order_type", "limit")
+
+        # Force user approval via 'ask' (can_use_tool will handle the prompt)
+        return {
+            "permissionDecision": "ask",
+            "systemMessage": (
+                f"TRADE REQUEST: {action.upper()} {count}x {side.upper()} on {ticker} | "
+                f"Type: {order_type} | Price: {price}¢ | Cost: ${cost:.2f}"
+            ),
+        }
+
+    # ── 4. Cancel order ──────────────────────────────────────────
+
+    async def ask_cancel(
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict:
+        tool_input = input_data.get("tool_input", {})
+        order_id = tool_input.get("order_id", "?")
+        return {
+            "permissionDecision": "ask",
+            "systemMessage": f"CANCEL REQUEST: Order {order_id}",
+        }
+
+    # ── 5. Trade audit (PostToolUse) ─────────────────────────────
+
+    async def audit_trade_result(
         input_data: dict[str, Any],
         tool_use_id: str | None,
         context: Any,
     ) -> dict:
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {})
-
-        if "place_order" in tool_name:
-            _log(
-                {
-                    "event": "order_intent",
-                    "tool_use_id": tool_use_id,
-                    "ticker": tool_input.get("ticker"),
-                    "action": tool_input.get("action"),
-                    "side": tool_input.get("side"),
-                    "count": tool_input.get("count"),
-                    "yes_price": tool_input.get("yes_price"),
-                    "no_price": tool_input.get("no_price"),
-                    "order_type": tool_input.get("order_type", "limit"),
-                }
-            )
-        elif "cancel_order" in tool_name:
-            _log(
-                {
-                    "event": "cancel_intent",
-                    "tool_use_id": tool_use_id,
-                    "order_id": tool_input.get("order_id"),
-                }
-            )
-
-        return {}  # No blocking, just logging
-
-    # ── PostToolUse: log trade result ───────────────────────────────
-
-    async def post_trade_hook(
-        input_data: dict[str, Any],
-        tool_use_id: str | None,
-        context: Any,
-    ) -> dict:
-        tool_name = input_data.get("tool_name", "")
         tool_response = input_data.get("tool_response", "")
 
-        # Try to parse the response JSON
+        # Parse response
         result = {}
         if isinstance(tool_response, str):
             try:
@@ -90,57 +117,84 @@ def create_audit_hooks(journal_dir: Path) -> dict[str, list[HookMatcher]]:
 
         if "place_order" in tool_name:
             trade_count["placed"] += 1
-            _log(
-                {
-                    "event": "order_result",
-                    "tool_use_id": tool_use_id,
-                    "result": result,
-                }
+            # Extract order_id from result if available
+            order_id = None
+            if isinstance(result, dict):
+                order = result.get("order", result)
+                order_id = order.get("order_id") or order.get("id")
+
+            db.log_trade(
+                session_id=session_id,
+                ticker=tool_input.get("ticker", ""),
+                action=tool_input.get("action", ""),
+                side=tool_input.get("side", ""),
+                count=tool_input.get("count", 0),
+                price_cents=max(
+                    tool_input.get("yes_price", 0) or 0,
+                    tool_input.get("no_price", 0) or 0,
+                ),
+                order_type=tool_input.get("order_type", "limit"),
+                order_id=order_id,
+                status="placed",
+                result_json=json.dumps(result, default=str),
             )
+
         elif "cancel_order" in tool_name:
             trade_count["cancelled"] += 1
-            _log(
-                {
-                    "event": "cancel_result",
-                    "tool_use_id": tool_use_id,
-                    "result": result,
-                }
-            )
 
         return {}
 
-    # ── Stop: session summary ───────────────────────────────────────
+    # ── 6. Session end (Stop) ────────────────────────────────────
 
-    async def stop_hook(
+    async def session_end(
         input_data: dict[str, Any],
         tool_use_id: str | None,
         context: Any,
     ) -> dict:
         duration = time.time() - session_start
-        _log(
-            {
-                "event": "session_end",
-                "duration_seconds": round(duration, 1),
-                "orders_placed": trade_count["placed"],
-                "orders_cancelled": trade_count["cancelled"],
-            }
+        summary = (
+            f"Duration: {duration:.0f}s | "
+            f"Orders placed: {trade_count['placed']} | "
+            f"Orders cancelled: {trade_count['cancelled']}"
+        )
+        db.end_session(
+            session_id=session_id,
+            summary=summary,
+            trades_placed=trade_count["placed"],
         )
         return {}
 
     return {
         "PreToolUse": [
+            # 1. Keepalive for all tools
+            HookMatcher(hooks=[stream_keepalive]),
+            # 2. Auto-approve reads (Kalshi reads + DB reads + filesystem reads)
             HookMatcher(
-                matcher="mcp__kalshi__place_order|mcp__kalshi__cancel_order",
-                hooks=[pre_trade_hook],
+                matcher=(
+                    "mcp__kalshi__search_markets|mcp__kalshi__get_"
+                    "|mcp__db__db_query|mcp__db__db_get_session_state"
+                    "|Read|Glob|Grep"
+                ),
+                hooks=[auto_approve_reads],
+            ),
+            # 3. Trade validation + user approval
+            HookMatcher(
+                matcher="mcp__kalshi__place_order",
+                hooks=[validate_and_ask_trade],
+            ),
+            # 4. Cancel order approval
+            HookMatcher(
+                matcher="mcp__kalshi__cancel_order",
+                hooks=[ask_cancel],
             ),
         ],
         "PostToolUse": [
             HookMatcher(
                 matcher="mcp__kalshi__place_order|mcp__kalshi__cancel_order",
-                hooks=[post_trade_hook],
+                hooks=[audit_trade_result],
             ),
         ],
         "Stop": [
-            HookMatcher(hooks=[stop_hook]),
+            HookMatcher(hooks=[session_end]),
         ],
     }
