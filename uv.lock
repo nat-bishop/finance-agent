@@ -337,18 +337,13 @@ name = "finance-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "arch" },
     { name = "claude-agent-sdk" },
     { name = "kalshi-python" },
-    { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pandas" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
-    { name = "scikit-learn" },
     { name = "scipy" },
-    { name = "statsmodels" },
 ]
 
 [package.optional-dependencies]
@@ -359,16 +354,23 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+skills = [
+    { name = "arch" },
+    { name = "matplotlib" },
+    { name = "pandas" },
+    { name = "scikit-learn" },
+    { name = "statsmodels" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "arch", specifier = ">=7.0" },
+    { name = "arch", marker = "extra == 'skills'", specifier = ">=7.0" },
     { name = "claude-agent-sdk", specifier = ">=0.1.33" },
     { name = "kalshi-python", specifier = ">=2.1.0" },
-    { name = "matplotlib", specifier = ">=3.8" },
+    { name = "matplotlib", marker = "extra == 'skills'", specifier = ">=3.8" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pandas", specifier = ">=2.2" },
+    { name = "pandas", marker = "extra == 'skills'", specifier = ">=2.2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
@@ -376,11 +378,11 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
-    { name = "scikit-learn", specifier = ">=1.4" },
+    { name = "scikit-learn", marker = "extra == 'skills'", specifier = ">=1.4" },
     { name = "scipy", specifier = ">=1.12" },
-    { name = "statsmodels", specifier = ">=0.14" },
+    { name = "statsmodels", marker = "extra == 'skills'", specifier = ">=0.14" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["skills", "dev"]
 
 [[package]]
 name = "fonttools"

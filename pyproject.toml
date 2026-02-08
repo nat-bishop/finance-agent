@@ -15,14 +15,17 @@ dependencies = [
     "pydantic-settings>=2.0",
     "numpy>=1.26",
     "scipy>=1.12",
+]
+
+[project.optional-dependencies]
+# Scientific computing for workspace skill scripts (agent-authored analysis)
+skills = [
     "pandas>=2.2",
     "matplotlib>=3.8",
     "scikit-learn>=1.4",
     "statsmodels>=0.14",
     "arch>=7.0",
 ]
-
-[project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
