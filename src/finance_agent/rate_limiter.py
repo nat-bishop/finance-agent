@@ -23,6 +23,10 @@ class RateLimiter:
         self._write_tokens = min(self._max_write, self._write_tokens + elapsed * self._max_write)
         self._last_refill = now
 
+    def _wait_time(self, tokens: float, max_rate: float) -> float:
+        """Calculate wait time for token refill."""
+        return (1.0 - tokens) / max_rate
+
     async def acquire_read(self) -> None:
         """Wait until a read token is available."""
         while True:
@@ -30,9 +34,7 @@ class RateLimiter:
             if self._read_tokens >= 1.0:
                 self._read_tokens -= 1.0
                 return
-            # Wait for ~1 token to refill
-            wait = (1.0 - self._read_tokens) / self._max_read
-            await asyncio.sleep(wait)
+            await asyncio.sleep(self._wait_time(self._read_tokens, self._max_read))
 
     async def acquire_write(self) -> None:
         """Wait until a write token is available."""
@@ -41,8 +43,7 @@ class RateLimiter:
             if self._write_tokens >= 1.0:
                 self._write_tokens -= 1.0
                 return
-            wait = (1.0 - self._write_tokens) / self._max_write
-            await asyncio.sleep(wait)
+            await asyncio.sleep(self._wait_time(self._write_tokens, self._max_write))
 
     def acquire_read_sync(self) -> None:
         """Blocking version for synchronous code."""
@@ -51,8 +52,7 @@ class RateLimiter:
             if self._read_tokens >= 1.0:
                 self._read_tokens -= 1.0
                 return
-            wait = (1.0 - self._read_tokens) / self._max_read
-            time.sleep(wait)
+            time.sleep(self._wait_time(self._read_tokens, self._max_read))
 
     def acquire_write_sync(self) -> None:
         """Blocking version for synchronous code."""
@@ -61,5 +61,4 @@ class RateLimiter:
             if self._write_tokens >= 1.0:
                 self._write_tokens -= 1.0
                 return
-            wait = (1.0 - self._write_tokens) / self._max_write
-            time.sleep(wait)
+            time.sleep(self._wait_time(self._write_tokens, self._max_write))

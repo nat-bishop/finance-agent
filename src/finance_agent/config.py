@@ -135,11 +135,14 @@ def load_prompt(name: str) -> str:
 def build_system_prompt(trading_config: TradingConfig) -> str:
     """Load system.md and substitute config values."""
     raw = load_prompt("system")
-    return (
-        raw.replace("{{MAX_POSITION_USD}}", str(trading_config.max_position_usd))
-        .replace("{{MAX_PORTFOLIO_USD}}", str(trading_config.max_portfolio_usd))
-        .replace("{{MAX_ORDER_COUNT}}", str(trading_config.max_order_count))
-        .replace("{{MIN_EDGE_PCT}}", str(trading_config.min_edge_pct))
-        .replace("{{KALSHI_FEE_RATE}}", str(trading_config.kalshi_fee_rate))
-        .replace("{{KALSHI_ENV}}", trading_config.kalshi_env)
-    )
+    replacements = {
+        "{{MAX_POSITION_USD}}": str(trading_config.max_position_usd),
+        "{{MAX_PORTFOLIO_USD}}": str(trading_config.max_portfolio_usd),
+        "{{MAX_ORDER_COUNT}}": str(trading_config.max_order_count),
+        "{{MIN_EDGE_PCT}}": str(trading_config.min_edge_pct),
+        "{{KALSHI_FEE_RATE}}": str(trading_config.kalshi_fee_rate),
+        "{{KALSHI_ENV}}": trading_config.kalshi_env,
+    }
+    for placeholder, value in replacements.items():
+        raw = raw.replace(placeholder, value)
+    return raw

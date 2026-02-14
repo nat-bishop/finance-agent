@@ -40,15 +40,13 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
     if close_time:
         try:
             if isinstance(close_time, str):
-                # Parse ISO format
                 close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
             elif isinstance(close_time, int | float):
                 close_dt = datetime.fromtimestamp(close_time, tz=UTC)
             else:
                 close_dt = None
             if close_dt:
-                now_dt = datetime.now(UTC)
-                days_to_exp = max(0, (close_dt - now_dt).total_seconds() / 86400)
+                days_to_exp = max(0, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
         except (ValueError, TypeError, OSError):
             pass
 
@@ -80,78 +78,54 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
     }
 
 
-def collect_open_markets(
+def _collect_markets_by_status(
     client: KalshiAPIClient,
     db: AgentDatabase,
+    status: str,
+    label: str,
+    max_total: int | None = None,
 ) -> int:
+    """Generic market collection with pagination and batching."""
+    now = _now_iso()
+    cursor = None
+    total = 0
+    batch: list[dict[str, Any]] = []
+
+    print(f"Collecting {label}...")
+    while True:
+        resp = client.search_markets(status=status, limit=200, cursor=cursor)
+        markets = resp.get("markets", [])
+        if not markets:
+            break
+
+        for m in markets:
+            batch.append(_compute_derived(m, now))
+
+        if len(batch) >= 500:
+            total += db.insert_market_snapshots(batch)
+            batch.clear()
+
+        cursor = resp.get("cursor")
+        if not cursor:
+            break
+        if max_total and total + len(batch) >= max_total:
+            break
+
+    if batch:
+        total += db.insert_market_snapshots(batch)
+
+    print(f"  → {total} {label}")
+    return total
+
+
+def collect_open_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
     """Collect all open markets via pagination."""
-    now = _now_iso()
-    cursor = None
-    total = 0
-    batch: list[dict[str, Any]] = []
-
-    print("Collecting open markets...")
-    while True:
-        resp = client.search_markets(status="open", limit=200, cursor=cursor)
-        markets = resp.get("markets", [])
-        if not markets:
-            break
-
-        for m in markets:
-            batch.append(_compute_derived(m, now))
-
-        # Flush in batches of 500
-        if len(batch) >= 500:
-            total += db.insert_market_snapshots(batch)
-            batch.clear()
-
-        cursor = resp.get("cursor")
-        if not cursor:
-            break
-
-    if batch:
-        total += db.insert_market_snapshots(batch)
-
-    print(f"  → {total} open market snapshots")
-    return total
+    return _collect_markets_by_status(client, db, "open", "open market snapshots")
 
 
-def collect_settled_markets(
-    client: KalshiAPIClient,
-    db: AgentDatabase,
-) -> int:
+def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
     """Collect recently settled markets for calibration data."""
-    now = _now_iso()
-    cursor = None
-    total = 0
-    batch: list[dict[str, Any]] = []
-
-    print("Collecting settled markets...")
-    while True:
-        resp = client.search_markets(status="settled", limit=200, cursor=cursor)
-        markets = resp.get("markets", [])
-        if not markets:
-            break
-
-        for m in markets:
-            batch.append(_compute_derived(m, now))
-
-        if len(batch) >= 500:
-            total += db.insert_market_snapshots(batch)
-            batch.clear()
-
-        cursor = resp.get("cursor")
-        if not cursor:
-            break
-        # Only get first few pages of settled markets
-        if total + len(batch) >= 1000:
-            break
-
-    if batch:
-        total += db.insert_market_snapshots(batch)
-
-    print(f"  → {total} settled market snapshots")
-    return total
+    return _collect_markets_by_status(client, db, "settled", "settled market snapshots", 1000)
 
 
 def collect_events(

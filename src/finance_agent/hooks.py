@@ -40,6 +40,12 @@ def create_audit_hooks(
     ) -> dict:
         return {"permissionDecision": "allow"}
 
+    def _extract_price(tool_input: dict[str, Any]) -> int:
+        """Extract the effective price from yes_price or no_price."""
+        yes_price = tool_input.get("yes_price", 0) or 0
+        no_price = tool_input.get("no_price", 0) or 0
+        return max(yes_price, no_price)
+
     # ── 2. Trade validation (place_order) ────────────────────────
 
     async def validate_and_ask_trade(
@@ -49,9 +55,7 @@ def create_audit_hooks(
     ) -> dict:
         tool_input = input_data.get("tool_input", {})
         count = tool_input.get("count", 0)
-        yes_price = tool_input.get("yes_price", 0) or 0
-        no_price = tool_input.get("no_price", 0) or 0
-        price = max(yes_price, no_price)
+        price = _extract_price(tool_input)
         cost = (count * price) / 100
 
         ticker = tool_input.get("ticker", "?")
@@ -117,10 +121,7 @@ def create_audit_hooks(
                 action=tool_input.get("action", ""),
                 side=tool_input.get("side", ""),
                 count=tool_input.get("count", 0),
-                price_cents=max(
-                    tool_input.get("yes_price", 0) or 0,
-                    tool_input.get("no_price", 0) or 0,
-                ),
+                price_cents=_extract_price(tool_input),
                 order_type=tool_input.get("order_type", "limit"),
                 order_id=order_id,
                 status="placed",

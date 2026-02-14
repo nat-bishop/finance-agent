@@ -349,10 +349,9 @@ class AgentDatabase:
             "raw_json",
         ]
         placeholders = ", ".join(["?"] * len(cols))
-        col_names = ", ".join(cols)
         params_list = [tuple(row.get(c) for c in cols) for row in rows]
         self.executemany(
-            f"INSERT INTO market_snapshots ({col_names}) VALUES ({placeholders})",
+            f"INSERT INTO market_snapshots ({', '.join(cols)}) VALUES ({placeholders})",
             params_list,
         )
         return len(params_list)

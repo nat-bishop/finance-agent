@@ -135,21 +135,24 @@ async def run_repl() -> None:
     print("Type 'quit' or 'exit' to stop.\n")
 
     async with ClaudeSDKClient(options=options) as client:
+
+        async def handle_response():
+            """Process and display response messages."""
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            print(block.text)
+                elif isinstance(msg, ResultMessage):
+                    if msg.total_cost_usd is not None:
+                        print(f"  [cost: ${msg.total_cost_usd:.4f}]")
+                    if msg.is_error:
+                        print(f"  [error: {msg.result}]")
+            print()
+
         # Send BEGIN_SESSION to trigger startup protocol
         await client.query("BEGIN_SESSION")
-
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        print(block.text)
-            elif isinstance(msg, ResultMessage):
-                if msg.total_cost_usd is not None:
-                    print(f"  [cost: ${msg.total_cost_usd:.4f}]")
-                if msg.is_error:
-                    print(f"  [error: {msg.result}]")
-
-        print()
+        await handle_response()
 
         # Interactive loop
         while True:
@@ -166,19 +169,7 @@ async def run_repl() -> None:
                 break
 
             await client.query(user_input)
-
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            print(block.text)
-                elif isinstance(msg, ResultMessage):
-                    if msg.total_cost_usd is not None:
-                        print(f"  [cost: ${msg.total_cost_usd:.4f}]")
-                    if msg.is_error:
-                        print(f"  [error: {msg.result}]")
-
-            print()  # blank line between turns
+            await handle_response()
 
     db.close()
 

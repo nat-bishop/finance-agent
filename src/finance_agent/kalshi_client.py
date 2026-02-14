@@ -33,6 +33,10 @@ class KalshiAPIClient:
 
         return KalshiClient(cfg)
 
+    def _to_dict(self, resp: Any) -> dict[str, Any]:
+        """Convert SDK response to dict."""
+        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+
     def _rate_read(self) -> None:
         """Block until a read token is available (if limiter configured)."""
         if self._limiter:
@@ -68,22 +72,21 @@ class KalshiAPIClient:
         if cursor:
             kwargs["cursor"] = cursor
         resp = self._client.get_markets(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(resp)
 
     def get_market(self, ticker: str) -> dict[str, Any]:
         self._rate_read()
-        resp = self._client.get_market(ticker)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_market(ticker))
 
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
         self._rate_read()
-        resp = self._client.get_market_orderbook(ticker, depth=depth)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_market_orderbook(ticker, depth=depth))
 
     def get_event(self, event_ticker: str, with_nested_markets: bool = True) -> dict[str, Any]:
         self._rate_read()
-        resp = self._client.get_event(event_ticker, with_nested_markets=with_nested_markets)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(
+            self._client.get_event(event_ticker, with_nested_markets=with_nested_markets)
+        )
 
     def get_trades(
         self,
@@ -98,8 +101,7 @@ class KalshiAPIClient:
             kwargs["ticker"] = ticker
         if cursor:
             kwargs["cursor"] = cursor
-        resp = self._client.get_trades(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_trades(**kwargs))
 
     def get_candlesticks(
         self,
@@ -110,24 +112,20 @@ class KalshiAPIClient:
         period_interval: int = 60,
     ) -> dict[str, Any]:
         self._rate_read()
-        kwargs: dict[str, Any] = {
+        kwargs = {
             "ticker": ticker,
             "market_ticker": ticker,
             "period_interval": period_interval,
+            **({"start_ts": start_ts} if start_ts is not None else {}),
+            **({"end_ts": end_ts} if end_ts is not None else {}),
         }
-        if start_ts is not None:
-            kwargs["start_ts"] = start_ts
-        if end_ts is not None:
-            kwargs["end_ts"] = end_ts
-        resp = self._client.get_market_candlesticks(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_market_candlesticks(**kwargs))
 
     # ── Portfolio (read) ────────────────────────────────────────────
 
     def get_balance(self) -> dict[str, Any]:
         self._rate_read()
-        resp = self._client.get_balance()
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_balance())
 
     def get_positions(
         self,
@@ -145,8 +143,7 @@ class KalshiAPIClient:
             kwargs["event_ticker"] = event_ticker
         if cursor:
             kwargs["cursor"] = cursor
-        resp = self._client.get_positions(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_positions(**kwargs))
 
     def get_fills(
         self,
@@ -161,8 +158,7 @@ class KalshiAPIClient:
             kwargs["ticker"] = ticker
         if cursor:
             kwargs["cursor"] = cursor
-        resp = self._client.get_fills(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_fills(**kwargs))
 
     def get_settlements(
         self,
@@ -174,8 +170,7 @@ class KalshiAPIClient:
         kwargs: dict[str, Any] = {"limit": limit}
         if cursor:
             kwargs["cursor"] = cursor
-        resp = self._client.get_settlements(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_settlements(**kwargs))
 
     # ── Orders (write) ──────────────────────────────────────────────
 
@@ -192,8 +187,7 @@ class KalshiAPIClient:
             kwargs["ticker"] = ticker
         if status:
             kwargs["status"] = status
-        resp = self._client.get_orders(**kwargs)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.get_orders(**kwargs))
 
     def create_order(
         self,
@@ -209,26 +203,19 @@ class KalshiAPIClient:
         expiration_ts: int | None = None,
     ) -> dict[str, Any]:
         self._rate_write()
-        kwargs: dict[str, Any] = {
+        kwargs = {
             "ticker": ticker,
             "action": action,
             "side": side,
             "count": count,
             "type": order_type,
+            **({"yes_price": yes_price} if yes_price is not None else {}),
+            **({"no_price": no_price} if no_price is not None else {}),
+            **({"client_order_id": client_order_id} if client_order_id else {}),
+            **({"expiration_ts": expiration_ts} if expiration_ts is not None else {}),
         }
-        if yes_price is not None:
-            kwargs["yes_price"] = yes_price
-        if no_price is not None:
-            kwargs["no_price"] = no_price
-        if client_order_id:
-            kwargs["client_order_id"] = client_order_id
-        if expiration_ts is not None:
-            kwargs["expiration_ts"] = expiration_ts
-
-        resp = self._client.create_order(CreateOrderRequest(**kwargs))
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.create_order(CreateOrderRequest(**kwargs)))
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         self._rate_write()
-        resp = self._client.cancel_order(order_id)
-        return resp.to_dict() if hasattr(resp, "to_dict") else resp
+        return self._to_dict(self._client.cancel_order(order_id))

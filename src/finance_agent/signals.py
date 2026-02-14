@@ -25,6 +25,15 @@ from .config import load_configs
 from .database import AgentDatabase
 
 
+def _get_market_title(db: AgentDatabase, ticker: str) -> str:
+    """Fetch market title from latest snapshot, fallback to ticker."""
+    rows = db.query(
+        "SELECT title FROM market_snapshots WHERE ticker = ? ORDER BY captured_at DESC LIMIT 1",
+        (ticker,),
+    )
+    return rows[0]["title"] if rows else ticker
+
+
 def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     """Find events where bracket YES prices don't sum to ~100%.
 
@@ -48,44 +57,40 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
             continue
 
         # Use mid-price (average of bid/ask) for each market
-        prices = []
-        tickers = []
+        legs = []
         for m in markets:
             bid = m.get("yes_bid") or 0
             ask = m.get("yes_ask") or 0
-            if bid and ask:
-                prices.append((bid + ask) / 2)
-                tickers.append(m.get("ticker", ""))
-            elif bid or ask:
-                prices.append(bid or ask)
-                tickers.append(m.get("ticker", ""))
+            if bid or ask:
+                mid_price = (bid + ask) / 2 if bid and ask else (bid or ask)
+                legs.append({"ticker": m.get("ticker", ""), "mid_price": mid_price})
 
-        if len(prices) < 2:
+        if len(legs) < 2:
             continue
 
+        prices = [leg["mid_price"] for leg in legs]
         price_sum = sum(prices)
         deviation = abs(price_sum - 100)
 
         # Flag if sum deviates by more than 2 cents
         if deviation > 2:
-            edge_pct = deviation / 100.0 * 100  # as percentage
             signals.append(
                 {
                     "scan_type": "arbitrage",
                     "ticker": event["event_ticker"],
                     "event_ticker": event["event_ticker"],
                     "signal_strength": min(1.0, deviation / 10),
-                    "estimated_edge_pct": edge_pct,
+                    "estimated_edge_pct": deviation,
                     "details_json": {
                         "title": event["title"],
                         "price_sum": round(price_sum, 1),
                         "deviation_cents": round(deviation, 1),
                         "direction": "overpriced" if price_sum > 100 else "underpriced",
                         "legs": [
-                            {"ticker": t, "mid_price": round(p, 1)}
-                            for t, p in zip(tickers, prices, strict=True)
+                            {"ticker": leg["ticker"], "mid_price": round(leg["mid_price"], 1)}
+                            for leg in legs
                         ],
-                        "num_markets": len(prices),
+                        "num_markets": len(legs),
                     },
                 }
             )
@@ -189,13 +194,7 @@ def _generate_mean_reversion_signals(db: AgentDatabase) -> list[dict[str, Any]]:
         z_score = (current - mean) / std
 
         if abs(z_score) > 1.5:
-            # Get title from latest snapshot
-            latest = db.query(
-                "SELECT title FROM market_snapshots WHERE ticker = ? ORDER BY captured_at DESC LIMIT 1",
-                (ticker,),
-            )
-            title = latest[0]["title"] if latest else ticker
-
+            title = _get_market_title(db, ticker)
             signals.append(
                 {
                     "scan_type": "mean_reversion",
@@ -388,12 +387,7 @@ def _generate_timeseries_signals(db: AgentDatabase) -> list[dict[str, Any]]:
         if divergence < 3:  # Less than 3 cents divergence
             continue
 
-        # Get title
-        latest = db.query(
-            "SELECT title FROM market_snapshots WHERE ticker = ? ORDER BY captured_at DESC LIMIT 1",
-            (ticker,),
-        )
-        title = latest[0]["title"] if latest else ticker
+        title = _get_market_title(db, ticker)
 
         # Residual std for confidence
         predicted = np.polyval(coeffs, x)

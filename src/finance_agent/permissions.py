@@ -89,6 +89,14 @@ def create_permission_handler(
                 }
             )
 
+        def _ask_user(prompt: str) -> bool:
+            """Prompt user for yes/no approval."""
+            try:
+                response = input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                response = "n"
+            return response.lower() == "y"
+
         # ── place_order: enforce trading limits ─────────────────────
         if tool_name == "mcp__kalshi__place_order":
             count = input_data.get("count", 0)
@@ -127,11 +135,8 @@ def create_permission_handler(
             print(f"  TRADE: {action.upper()} {count}x {side.upper()} on {ticker}")
             print(f"  Type: {order_type}  |  Price: {price}¢  |  Cost: ${cost_usd:.2f}")
             print(f"{'=' * 50}")
-            try:
-                response = input("Approve this trade? (y/n): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                response = "n"
-            if response.lower() == "y":
+
+            if _ask_user("Approve this trade? (y/n): "):
                 return PermissionResultAllow(updated_input=input_data)
             return PermissionResultDeny(message="User rejected trade")
 
@@ -139,11 +144,7 @@ def create_permission_handler(
         if tool_name == "mcp__kalshi__cancel_order":
             order_id = input_data.get("order_id", "?")
             print(f"\nCancel order: {order_id}")
-            try:
-                response = input("Approve cancellation? (y/n): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                response = "n"
-            if response.lower() == "y":
+            if _ask_user("Approve cancellation? (y/n): "):
                 return PermissionResultAllow(updated_input=input_data)
             return PermissionResultDeny(message="User rejected cancellation")
 
