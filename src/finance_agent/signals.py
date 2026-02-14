@@ -7,31 +7,19 @@ Reads from SQLite (market_snapshots, events), writes to signals table.
 Scans:
 - Arbitrage: bracket price sums != ~100%
 - Spread: wide spreads with volume
-- Mean reversion: z-score of recent price moves
-- Theta decay: near-expiry markets with unresolved prices
-- Calibration: systematic bias in predictions vs outcomes
-- Time-series: ARIMA forecast vs current price
+- Cross-platform mismatch: same market, different prices on Kalshi vs Polymarket
+- Structural arb: Kalshi brackets vs Polymarket individual markets
 """
 
 from __future__ import annotations
 
 import json
 import time
+from difflib import SequenceMatcher
 from typing import Any
-
-import numpy as np
 
 from .config import load_configs
 from .database import AgentDatabase
-
-
-def _get_market_title(db: AgentDatabase, ticker: str) -> str:
-    """Fetch market title from latest snapshot, fallback to ticker."""
-    rows = db.query(
-        "SELECT title FROM market_snapshots WHERE ticker = ? ORDER BY captured_at DESC LIMIT 1",
-        (ticker,),
-    )
-    return rows[0]["title"] if rows else ticker
 
 
 def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
@@ -151,270 +139,144 @@ def _generate_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     return signals
 
 
-def _generate_mean_reversion_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find markets where recent price moves are extreme vs historical vol.
-
-    Z-score of recent move relative to price history standard deviation.
-    """
-    signals = []
-
-    # Get tickers with enough history (at least 10 snapshots)
-    tickers = db.query(
-        """SELECT ticker, COUNT(*) as cnt
-           FROM market_snapshots
-           WHERE mid_price_cents IS NOT NULL AND status = 'open'
-           GROUP BY ticker
-           HAVING cnt >= 10
-           ORDER BY cnt DESC
-           LIMIT 200"""
-    )
-
-    for row in tickers:
-        ticker = row["ticker"]
-        prices = db.query(
-            """SELECT mid_price_cents, captured_at
-               FROM market_snapshots
-               WHERE ticker = ? AND mid_price_cents IS NOT NULL
-               ORDER BY captured_at DESC
-               LIMIT 50""",
-            (ticker,),
-        )
-
-        if len(prices) < 10:
-            continue
-
-        price_series = [p["mid_price_cents"] for p in prices]
-        current = price_series[0]
-        mean = np.mean(price_series)
-        std = np.std(price_series)
-
-        if std < 1:  # No meaningful volatility
-            continue
-
-        z_score = (current - mean) / std
-
-        if abs(z_score) > 1.5:
-            title = _get_market_title(db, ticker)
-            signals.append(
-                {
-                    "scan_type": "mean_reversion",
-                    "ticker": ticker,
-                    "signal_strength": min(1.0, abs(z_score) / 3),
-                    "estimated_edge_pct": abs(current - mean) / 100 * 100,
-                    "details_json": {
-                        "title": title,
-                        "current_price": current,
-                        "mean_price": round(float(mean), 1),
-                        "std_dev": round(float(std), 1),
-                        "z_score": round(float(z_score), 2),
-                        "direction": "high" if z_score > 0 else "low",
-                        "data_points": len(price_series),
-                    },
-                }
-            )
-
-    return signals
-
-
-def _generate_theta_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find markets near expiry with unresolved prices (20-80 range).
-
-    These have high time-value decay — price must converge to 0 or 100.
-    """
-    signals = []
-
-    markets = db.query(
-        """SELECT ticker, title, mid_price_cents, days_to_expiration,
-                  volume, open_interest, close_time
-           FROM market_snapshots
-           WHERE days_to_expiration IS NOT NULL
-             AND days_to_expiration < 7
-             AND days_to_expiration > 0
-             AND mid_price_cents BETWEEN 20 AND 80
-             AND status = 'open'
-           GROUP BY ticker
-           HAVING captured_at = MAX(captured_at)
-           ORDER BY days_to_expiration ASC
-           LIMIT 30"""
-    )
-
-    for m in markets:
-        mid = m["mid_price_cents"]
-        days = m["days_to_expiration"]
-
-        # Time value: how far from 0 or 100, weighted by time pressure
-        distance_from_resolution = min(mid, 100 - mid)
-        time_pressure = max(0, 1 - days / 7)
-        time_value_estimate = distance_from_resolution * time_pressure
-
-        if time_value_estimate < 5:
-            continue
-
-        signals.append(
-            {
-                "scan_type": "theta_decay",
-                "ticker": m["ticker"],
-                "signal_strength": min(1.0, time_value_estimate / 30),
-                "estimated_edge_pct": time_value_estimate / 100 * 100,
-                "details_json": {
-                    "title": m["title"],
-                    "mid_price": mid,
-                    "days_to_expiration": round(days, 2),
-                    "time_value_estimate": round(time_value_estimate, 1),
-                    "distance_from_resolution": distance_from_resolution,
-                    "close_time": m["close_time"],
-                    "volume": m["volume"],
-                    "open_interest": m["open_interest"],
-                },
-            }
-        )
-
-    return signals
-
-
-def _generate_calibration_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Compare past predictions vs outcomes to find systematic biases."""
+def _generate_cross_platform_mismatch_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Find equivalent markets on Kalshi and Polymarket with price discrepancies."""
     signals: list[dict[str, Any]] = []
 
-    # Need resolved predictions to analyze
-    resolved = db.query(
-        """SELECT market_ticker, prediction, market_price_cents, outcome, methodology
-           FROM predictions
-           WHERE outcome IS NOT NULL
-           ORDER BY resolved_at DESC
-           LIMIT 200"""
+    kalshi = db.query(
+        """SELECT ticker, title, mid_price_cents, implied_probability,
+                  yes_bid, yes_ask, volume
+           FROM market_snapshots
+           WHERE exchange = 'kalshi' AND status = 'open'
+             AND mid_price_cents IS NOT NULL
+           GROUP BY ticker HAVING captured_at = MAX(captured_at)"""
     )
-
-    if len(resolved) < 10:
+    polymarket = db.query(
+        """SELECT ticker, title, mid_price_cents, implied_probability,
+                  yes_bid, yes_ask, volume
+           FROM market_snapshots
+           WHERE exchange = 'polymarket' AND status = 'open'
+             AND mid_price_cents IS NOT NULL
+           GROUP BY ticker HAVING captured_at = MAX(captured_at)"""
+    )
+    if not kalshi or not polymarket:
         return signals
 
-    # Bin predictions by price range and check calibration
-    bins: dict[int, dict[str, list]] = {}  # price_bin -> list of outcomes
-    for r in resolved:
-        price = r["market_price_cents"] or 50
-        bin_key = (price // 10) * 10  # 0-9, 10-19, ..., 90-99
-        if bin_key not in bins:
-            bins[bin_key] = {"outcomes": [], "prices": []}
-        bins[bin_key]["outcomes"].append(r["outcome"])
-        bins[bin_key]["prices"].append(price)
+    def _norm(t: str) -> str:
+        return t.lower().strip().replace("?", "").replace("will ", "")
 
-    for bin_key, data in bins.items():
-        if len(data["outcomes"]) < 5:
+    # Build Polymarket lookup by normalized title
+    pm_lookup: dict[str, list[dict]] = {}
+    for pm in polymarket:
+        n = _norm(pm["title"] or "")
+        if n:
+            pm_lookup.setdefault(n, []).append(pm)
+
+    for km in kalshi:
+        kn = _norm(km["title"] or "")
+        if not kn:
             continue
 
-        actual_rate = np.mean(data["outcomes"])
-        expected_rate = np.mean(data["prices"]) / 100
-        bias = actual_rate - expected_rate
+        # Try exact match first, then fuzzy
+        matches = pm_lookup.get(kn, [])
+        if not matches:
+            for pn, pms in pm_lookup.items():
+                if SequenceMatcher(None, kn, pn).ratio() > 0.8:
+                    matches = pms
+                    break
 
-        if abs(bias) > 0.1:  # 10%+ systematic bias
+        for pm in matches:
+            k_prob = km["implied_probability"] or km["mid_price_cents"] / 100
+            p_prob = pm["implied_probability"] or pm["mid_price_cents"] / 100
+            diff_pct = abs(k_prob - p_prob) * 100
+
+            if diff_pct < 2.0:
+                continue
+
             signals.append(
                 {
-                    "scan_type": "calibration",
-                    "ticker": f"CALIBRATION-{bin_key}-{bin_key + 9}",
-                    "signal_strength": min(1.0, abs(bias) * 2),
-                    "estimated_edge_pct": abs(bias) * 100,
+                    "scan_type": "cross_platform_mismatch",
+                    "ticker": km["ticker"],
+                    "exchange": "cross_platform",
+                    "signal_strength": min(1.0, diff_pct / 15),
+                    "estimated_edge_pct": round(diff_pct, 2),
                     "details_json": {
-                        "price_range": f"{bin_key}-{bin_key + 9}¢",
-                        "actual_outcome_rate": round(float(actual_rate), 3),
-                        "expected_rate": round(float(expected_rate), 3),
-                        "bias_direction": "market_underprices"
-                        if bias > 0
-                        else "market_overprices",
-                        "sample_size": len(data["outcomes"]),
-                        "brier_score": round(
-                            float(
-                                np.mean(
-                                    [
-                                        (o - p / 100) ** 2
-                                        for o, p in zip(
-                                            data["outcomes"], data["prices"], strict=True
-                                        )
-                                    ]
-                                )
-                            ),
-                            4,
-                        ),
+                        "kalshi_ticker": km["ticker"],
+                        "polymarket_slug": pm["ticker"],
+                        "kalshi_prob": round(k_prob, 4),
+                        "polymarket_prob": round(p_prob, 4),
+                        "diff_pct": round(diff_pct, 2),
+                        "direction": "kalshi_high" if k_prob > p_prob else "polymarket_high",
                     },
                 }
             )
-
     return signals
 
 
-def _generate_timeseries_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Simple trend-following: linear regression on recent price data.
-
-    Full ARIMA/GARCH requires statsmodels; using simple linear fit as baseline.
-    """
-    signals = []
-
-    tickers = db.query(
-        """SELECT ticker, COUNT(*) as cnt
-           FROM market_snapshots
-           WHERE mid_price_cents IS NOT NULL AND status = 'open'
-           GROUP BY ticker
-           HAVING cnt >= 20
-           ORDER BY cnt DESC
-           LIMIT 100"""
+def _generate_structural_arb_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Find structural arb between Kalshi brackets and Polymarket individual markets."""
+    signals: list[dict[str, Any]] = []
+    events = db.query(
+        "SELECT event_ticker, title, markets_json FROM events WHERE mutually_exclusive = 1"
     )
+    pm_markets = db.query(
+        """SELECT ticker, title, mid_price_cents FROM market_snapshots
+           WHERE exchange = 'polymarket' AND status = 'open' AND mid_price_cents IS NOT NULL
+           GROUP BY ticker HAVING captured_at = MAX(captured_at)"""
+    )
+    if not events or not pm_markets:
+        return signals
 
-    for row in tickers:
-        ticker = row["ticker"]
-        prices = db.query(
-            """SELECT mid_price_cents, captured_at
-               FROM market_snapshots
-               WHERE ticker = ? AND mid_price_cents IS NOT NULL
-               ORDER BY captured_at ASC""",
-            (ticker,),
+    def _norm(t: str) -> str:
+        return t.lower().strip().replace("?", "").replace("will ", "")
+
+    pm_by_title = {_norm(m["title"] or ""): m for m in pm_markets if m["title"]}
+
+    for event in events:
+        try:
+            k_markets = json.loads(event["markets_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if len(k_markets) < 2:
+            continue
+
+        matched = []
+        for km in k_markets:
+            kt = _norm(km.get("title", ""))
+            if kt in pm_by_title:
+                matched.append({"kalshi": km, "polymarket": pm_by_title[kt]})
+
+        if len(matched) < 2:
+            continue
+
+        k_sum = sum(
+            ((m["kalshi"].get("yes_bid", 0) or 0) + (m["kalshi"].get("yes_ask", 0) or 0)) / 2
+            for m in matched
         )
+        p_sum = sum(m["polymarket"]["mid_price_cents"] for m in matched)
 
-        if len(prices) < 20:
+        diff = abs(k_sum - p_sum)
+        if diff < 3:
             continue
-
-        price_arr = np.array([p["mid_price_cents"] for p in prices], dtype=float)
-        x = np.arange(len(price_arr), dtype=float)
-
-        # Simple linear regression
-        coeffs = np.polyfit(x, price_arr, 1)
-        slope = coeffs[0]
-        current = price_arr[-1]
-
-        # Forecast 5 steps ahead
-        forecast = np.polyval(coeffs, len(price_arr) + 5)
-        forecast = float(np.clip(forecast, 1, 99))  # clamp to valid range
-
-        divergence = abs(forecast - current)
-        if divergence < 3:  # Less than 3 cents divergence
-            continue
-
-        title = _get_market_title(db, ticker)
-
-        # Residual std for confidence
-        predicted = np.polyval(coeffs, x)
-        residual_std = float(np.std(price_arr - predicted))
 
         signals.append(
             {
-                "scan_type": "time_series",
-                "ticker": ticker,
-                "signal_strength": min(1.0, divergence / 15),
-                "estimated_edge_pct": divergence / 100 * 100,
+                "scan_type": "structural_arb",
+                "ticker": event["event_ticker"],
+                "event_ticker": event["event_ticker"],
+                "exchange": "cross_platform",
+                "signal_strength": min(1.0, diff / 15),
+                "estimated_edge_pct": round(diff / len(matched), 2),
                 "details_json": {
-                    "title": title,
-                    "current_price": float(current),
-                    "forecast_price": round(float(forecast), 1),
-                    "slope_per_step": round(float(slope), 3),
-                    "direction": "up" if slope > 0 else "down",
-                    "residual_std": round(residual_std, 2),
-                    "confidence_band": [
-                        round(float(forecast - 2 * residual_std), 1),
-                        round(float(forecast + 2 * residual_std), 1),
-                    ],
-                    "data_points": len(price_arr),
+                    "event_title": event["title"],
+                    "kalshi_sum": round(k_sum, 1),
+                    "polymarket_sum": round(p_sum, 1),
+                    "diff_cents": round(diff, 1),
+                    "matched_legs": len(matched),
+                    "total_legs": len(k_markets),
                 },
             }
         )
-
     return signals
 
 
@@ -437,10 +299,8 @@ def run_signals() -> None:
     scan_funcs = [
         ("arbitrage", _generate_arbitrage_signals),
         ("spread", _generate_spread_signals),
-        ("mean_reversion", _generate_mean_reversion_signals),
-        ("theta_decay", _generate_theta_signals),
-        ("calibration", _generate_calibration_signals),
-        ("time_series", _generate_timeseries_signals),
+        ("cross_platform_mismatch", _generate_cross_platform_mismatch_signals),
+        ("structural_arb", _generate_structural_arb_signals),
     ]
 
     for name, func in scan_funcs:

@@ -10,6 +10,7 @@ from claude_agent_sdk import tool
 from .config import TradingConfig
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
+from .polymarket_client import PolymarketAPIClient
 
 
 def _text(data: Any) -> list[dict]:
@@ -235,6 +236,148 @@ def create_kalshi_tools(
         get_recent_trades,
         get_portfolio,
         get_open_orders,
+        place_order,
+        cancel_order,
+    ]
+
+
+def create_polymarket_tools(
+    client: PolymarketAPIClient,
+    trading_config: TradingConfig,
+) -> list:
+    """Create MCP tool definitions bound to a Polymarket client via closure."""
+
+    @tool(
+        "search_markets",
+        "Search Polymarket US markets by keyword or category. "
+        "Returns matching markets with slugs, titles, prices, and volumes.",
+        {
+            "query": {"type": "string", "description": "Search keyword"},
+            "limit": {
+                "type": "integer",
+                "description": "Max results (default 50)",
+                "optional": True,
+            },
+        },
+    )
+    async def search_markets(args: dict) -> dict:
+        return _text(client.search_markets(query=args.get("query"), limit=args.get("limit", 50)))
+
+    @tool(
+        "get_market_details",
+        "Get full details for a single Polymarket US market by slug: rules, "
+        "current prices, volume, and resolution criteria.",
+        {"slug": {"type": "string", "description": "Market slug (e.g. btc-100k-2025)"}},
+    )
+    async def get_market_details(args: dict) -> dict:
+        return _text(client.get_market(args["slug"]))
+
+    @tool(
+        "get_orderbook",
+        "Get the current orderbook for a Polymarket market: bids, offers, depth.",
+        {"slug": {"type": "string", "description": "Market slug"}},
+    )
+    async def get_orderbook(args: dict) -> dict:
+        return _text(client.get_orderbook(args["slug"]))
+
+    @tool(
+        "get_event",
+        "Get a Polymarket event and all its nested markets by event slug.",
+        {"slug": {"type": "string", "description": "Event slug"}},
+    )
+    async def get_event(args: dict) -> dict:
+        return _text(client.get_event(args["slug"]))
+
+    @tool(
+        "get_trades",
+        "Get recent trade data for a Polymarket market.",
+        {
+            "slug": {"type": "string", "description": "Market slug"},
+            "limit": {
+                "type": "integer",
+                "description": "Max trades to return (default 50)",
+                "optional": True,
+            },
+        },
+    )
+    async def get_trades(args: dict) -> dict:
+        return _text(client.get_trades(args["slug"], limit=args.get("limit", 50)))
+
+    @tool(
+        "get_portfolio",
+        "Get Polymarket portfolio: cash balance and open positions.",
+        {},
+    )
+    async def get_portfolio(args: dict) -> dict:
+        data: dict[str, Any] = {}
+        data["balance"] = client.get_balance()
+        data["positions"] = client.get_positions()
+        return _text(data)
+
+    @tool(
+        "place_order",
+        "Place an order on Polymarket US. Requires user approval. "
+        "Prices in USD decimals (e.g. '0.55'). "
+        "Intents: ORDER_INTENT_BUY_LONG, ORDER_INTENT_SELL_LONG, "
+        "ORDER_INTENT_BUY_SHORT, ORDER_INTENT_SELL_SHORT. "
+        f"Max ${trading_config.polymarket_max_position_usd} per position.",
+        {
+            "slug": {"type": "string", "description": "Market slug"},
+            "intent": {
+                "type": "string",
+                "description": "Order intent: ORDER_INTENT_BUY_LONG, SELL_LONG, BUY_SHORT, SELL_SHORT",
+            },
+            "price": {
+                "type": "string",
+                "description": "Limit price in USD (e.g. '0.55')",
+            },
+            "quantity": {"type": "integer", "description": "Number of contracts"},
+            "order_type": {
+                "type": "string",
+                "description": "'ORDER_TYPE_LIMIT' or 'ORDER_TYPE_MARKET' (default LIMIT)",
+                "optional": True,
+            },
+            "tif": {
+                "type": "string",
+                "description": "Time-in-force: GTC, GTD, IOC, FOK (default GTC)",
+                "optional": True,
+            },
+        },
+    )
+    async def place_order(args: dict) -> dict:
+        return _text(
+            client.create_order(
+                slug=args["slug"],
+                intent=args["intent"],
+                price=args["price"],
+                quantity=args["quantity"],
+                order_type=args.get("order_type", "ORDER_TYPE_LIMIT"),
+                tif=args.get("tif", "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
+            )
+        )
+
+    @tool(
+        "cancel_order",
+        "Cancel an open order on Polymarket US by order ID.",
+        {
+            "order_id": {"type": "string", "description": "Order ID to cancel"},
+            "slug": {
+                "type": "string",
+                "description": "Market slug for the order",
+                "optional": True,
+            },
+        },
+    )
+    async def cancel_order(args: dict) -> dict:
+        return _text(client.cancel_order(args["order_id"], slug=args.get("slug", "")))
+
+    return [
+        search_markets,
+        get_market_details,
+        get_orderbook,
+        get_event,
+        get_trades,
+        get_portfolio,
         place_order,
         cancel_order,
     ]

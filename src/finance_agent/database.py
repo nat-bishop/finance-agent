@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     captured_at TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'collector',
+    exchange TEXT NOT NULL DEFAULT 'kalshi',
     ticker TEXT NOT NULL,
     event_ticker TEXT,
     series_ticker TEXT,
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     generated_at TEXT NOT NULL,
     scan_type TEXT NOT NULL,
+    exchange TEXT DEFAULT 'kalshi',
     ticker TEXT NOT NULL,
     event_ticker TEXT,
     signal_strength REAL,
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS signals (
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT 'kalshi',
     timestamp TEXT NOT NULL,
     ticker TEXT NOT NULL,
     action TEXT NOT NULL,
@@ -122,10 +125,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- Markets to track across sessions
 CREATE TABLE IF NOT EXISTS watchlist (
-    ticker TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT 'kalshi',
     added_at TEXT NOT NULL,
     reason TEXT,
-    alert_condition TEXT
+    alert_condition TEXT,
+    PRIMARY KEY (ticker, exchange)
 );
 
 -- Indexes
@@ -143,6 +148,8 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker
     ON trades(ticker);
 CREATE INDEX IF NOT EXISTS idx_predictions_unresolved
     ON predictions(outcome) WHERE outcome IS NULL;
+CREATE INDEX IF NOT EXISTS idx_snapshots_exchange
+    ON market_snapshots(exchange);
 """
 
 
@@ -165,10 +172,26 @@ class AgentDatabase:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
+        self._migrate_schema()
 
     def _init_schema(self) -> None:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add columns that may not exist in older databases."""
+        migrations = [
+            ("market_snapshots", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
+            ("trades", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
+            ("signals", "exchange", "TEXT DEFAULT 'kalshi'"),
+            ("watchlist", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
+        ]
+        for table, column, col_type in migrations:
+            try:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def close(self) -> None:
         self._conn.close()
@@ -241,17 +264,19 @@ class AgentDatabase:
         edge_pct: float | None = None,
         kelly_fraction: float | None = None,
         result_json: str | None = None,
+        exchange: str = "kalshi",
     ) -> int:
         """Insert a trade record, return its ID."""
         now = datetime.now(UTC).isoformat()
         cursor = self.execute(
             """INSERT INTO trades
-               (session_id, timestamp, ticker, action, side, count, price_cents,
+               (session_id, exchange, timestamp, ticker, action, side, count, price_cents,
                 order_type, order_id, status, thesis, strategy, edge_pct,
                 kelly_fraction, result_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
+                exchange,
                 now,
                 ticker,
                 action,
@@ -325,6 +350,7 @@ class AgentDatabase:
         cols = [
             "captured_at",
             "source",
+            "exchange",
             "ticker",
             "event_ticker",
             "series_ticker",
@@ -407,6 +433,7 @@ class AgentDatabase:
                 (
                     now,
                     row["scan_type"],
+                    row.get("exchange", "kalshi"),
                     row["ticker"],
                     row.get("event_ticker"),
                     row.get("signal_strength"),
@@ -416,9 +443,9 @@ class AgentDatabase:
             )
         self.executemany(
             """INSERT INTO signals
-               (generated_at, scan_type, ticker, event_ticker,
+               (generated_at, scan_type, exchange, ticker, event_ticker,
                 signal_strength, estimated_edge_pct, details_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             params_list,
         )
         return len(params_list)
@@ -437,16 +464,20 @@ class AgentDatabase:
     # ── Watchlist ────────────────────────────────────────────────
 
     def add_to_watchlist(
-        self, ticker: str, reason: str | None = None, alert_condition: str | None = None
+        self,
+        ticker: str,
+        reason: str | None = None,
+        alert_condition: str | None = None,
+        exchange: str = "kalshi",
     ) -> None:
         now = datetime.now(UTC).isoformat()
         self.execute(
-            """INSERT INTO watchlist (ticker, added_at, reason, alert_condition)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(ticker) DO UPDATE SET
+            """INSERT INTO watchlist (ticker, exchange, added_at, reason, alert_condition)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(ticker, exchange) DO UPDATE SET
                  reason = excluded.reason,
                  alert_condition = excluded.alert_condition""",
-            (ticker, now, reason, alert_condition),
+            (ticker, exchange, now, reason, alert_condition),
         )
 
     def remove_from_watchlist(self, ticker: str) -> None:

@@ -16,8 +16,8 @@ COPY src/ /app/src/
 RUN uv pip install --system --no-cache "/app[skills]"
 
 # Create isolated agent workspace
-RUN mkdir -p /workspace/{analysis,data,lib,backups,.claude/skills}
-COPY workspace/.claude/skills/ /workspace/.claude/skills/
+RUN mkdir -p /workspace/{analysis,data,lib,backups}
+COPY workspace/lib/ /workspace/lib/
 
 WORKDIR /workspace
 ENTRYPOINT ["python", "-m", "finance_agent.main"]

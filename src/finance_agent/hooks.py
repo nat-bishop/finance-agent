@@ -72,6 +72,28 @@ def create_audit_hooks(
             ),
         }
 
+    # ── 2b. Trade validation (Polymarket place_order) ────────────
+
+    async def validate_and_ask_pm_trade(
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict:
+        tool_input = input_data.get("tool_input", {})
+        price = float(tool_input.get("price", "0"))
+        quantity = tool_input.get("quantity", 0)
+        cost = quantity * price
+        slug = tool_input.get("slug", "?")
+        intent = tool_input.get("intent", "?")
+        order_type = tool_input.get("order_type", "LIMIT")
+        return {
+            "permissionDecision": "ask",
+            "systemMessage": (
+                f"POLYMARKET TRADE: {intent} {quantity}x on {slug} | "
+                f"Type: {order_type} | Price: ${price:.2f} | Cost: ${cost:.2f}"
+            ),
+        }
+
     # ── 3. Cancel order ──────────────────────────────────────────
 
     async def ask_cancel(
@@ -109,19 +131,37 @@ def create_audit_hooks(
 
         if "place_order" in tool_name:
             trade_count["placed"] += 1
+            exchange = "polymarket" if "polymarket" in tool_name else "kalshi"
+
             # Extract order_id from result if available
             order_id = None
             if isinstance(result, dict):
                 order = result.get("order", result)
                 order_id = order.get("order_id") or order.get("id")
 
+            # Normalize fields — Kalshi uses ticker/action/side/count,
+            # Polymarket uses slug/intent/quantity
+            if exchange == "polymarket":
+                ticker = tool_input.get("slug", "")
+                action = tool_input.get("intent", "")
+                side = ""
+                count = tool_input.get("quantity", 0)
+                price_cents = int(float(tool_input.get("price", "0")) * 100)
+            else:
+                ticker = tool_input.get("ticker", "")
+                action = tool_input.get("action", "")
+                side = tool_input.get("side", "")
+                count = tool_input.get("count", 0)
+                price_cents = _extract_price(tool_input)
+
             db.log_trade(
                 session_id=session_id,
-                ticker=tool_input.get("ticker", ""),
-                action=tool_input.get("action", ""),
-                side=tool_input.get("side", ""),
-                count=tool_input.get("count", 0),
-                price_cents=_extract_price(tool_input),
+                exchange=exchange,
+                ticker=ticker,
+                action=action,
+                side=side,
+                count=count,
+                price_cents=price_cents,
                 order_type=tool_input.get("order_type", "limit"),
                 order_id=order_id,
                 status="placed",
@@ -159,6 +199,7 @@ def create_audit_hooks(
             HookMatcher(
                 matcher=(
                     "mcp__kalshi__search_markets|mcp__kalshi__get_"
+                    "|mcp__polymarket__search_markets|mcp__polymarket__get_"
                     "|mcp__db__db_query|mcp__db__db_get_session_state"
                     "|Read|Glob|Grep"
                 ),
@@ -169,15 +210,23 @@ def create_audit_hooks(
                 matcher="mcp__kalshi__place_order",
                 hooks=[validate_and_ask_trade],
             ),
+            # 2b. Polymarket trade validation + user approval
+            HookMatcher(
+                matcher="mcp__polymarket__place_order",
+                hooks=[validate_and_ask_pm_trade],
+            ),
             # 3. Cancel order approval
             HookMatcher(
-                matcher="mcp__kalshi__cancel_order",
+                matcher="mcp__kalshi__cancel_order|mcp__polymarket__cancel_order",
                 hooks=[ask_cancel],
             ),
         ],
         "PostToolUse": [
             HookMatcher(
-                matcher="mcp__kalshi__place_order|mcp__kalshi__cancel_order",
+                matcher=(
+                    "mcp__kalshi__place_order|mcp__kalshi__cancel_order"
+                    "|mcp__polymarket__place_order|mcp__polymarket__cancel_order"
+                ),
                 hooks=[audit_trade_result],
             ),
         ],

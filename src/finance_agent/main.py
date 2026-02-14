@@ -19,7 +19,8 @@ from .database import AgentDatabase
 from .hooks import create_audit_hooks
 from .kalshi_client import KalshiAPIClient
 from .permissions import create_permission_handler
-from .tools import create_db_tools, create_kalshi_tools
+from .polymarket_client import PolymarketAPIClient
+from .tools import create_db_tools, create_kalshi_tools, create_polymarket_tools
 
 
 def build_options(
@@ -29,10 +30,28 @@ def build_options(
     db_mcp: dict,
     db: AgentDatabase,
     session_id: str,
+    polymarket_mcp: dict | None = None,
     workspace: str = "/workspace",
 ) -> ClaudeAgentOptions:
     """Assemble ClaudeAgentOptions from configs."""
     system_prompt_text = build_system_prompt(trading_config)
+
+    mcp_servers = {"kalshi": kalshi_mcp, "db": db_mcp}
+    if polymarket_mcp:
+        mcp_servers["polymarket"] = polymarket_mcp
+
+    polymarket_tools = []
+    if polymarket_mcp:
+        polymarket_tools = [
+            "mcp__polymarket__search_markets",
+            "mcp__polymarket__get_market_details",
+            "mcp__polymarket__get_orderbook",
+            "mcp__polymarket__get_event",
+            "mcp__polymarket__get_trades",
+            "mcp__polymarket__get_portfolio",
+            "mcp__polymarket__place_order",
+            "mcp__polymarket__cancel_order",
+        ]
 
     return ClaudeAgentOptions(
         system_prompt={
@@ -42,7 +61,7 @@ def build_options(
         },
         model=agent_config.model,
         cwd=workspace,
-        mcp_servers={"kalshi": kalshi_mcp, "db": db_mcp},
+        mcp_servers=mcp_servers,
         allowed_tools=[
             # Kalshi MCP tools
             "mcp__kalshi__search_markets",
@@ -55,6 +74,8 @@ def build_options(
             "mcp__kalshi__get_open_orders",
             "mcp__kalshi__place_order",
             "mcp__kalshi__cancel_order",
+            # Polymarket MCP tools (conditional)
+            *polymarket_tools,
             # Database MCP tools
             "mcp__db__db_query",
             "mcp__db__db_log_prediction",
@@ -117,6 +138,15 @@ async def run_repl() -> None:
         tools=create_db_tools(db),
     )
 
+    polymarket_mcp = None
+    if trading_config.polymarket_enabled and trading_config.polymarket_key_id:
+        pm_client = PolymarketAPIClient(trading_config)
+        polymarket_mcp = create_sdk_mcp_server(
+            name="polymarket",
+            version="1.0.0",
+            tools=create_polymarket_tools(pm_client, trading_config),
+        )
+
     options = build_options(
         agent_config,
         trading_config,
@@ -124,12 +154,17 @@ async def run_repl() -> None:
         db_mcp,
         db,
         session_id,
+        polymarket_mcp=polymarket_mcp,
     )
 
-    print("Kalshi Trading Agent")
+    print("Cross-Platform Prediction Market Arbitrage Agent")
     print(f"Profile: {agent_config.profile}  |  Model: {agent_config.model}")
-    print(f"Environment: {trading_config.kalshi_env}")
-    print(f"Max position: ${trading_config.max_position_usd}")
+    print(f"Kalshi: {trading_config.kalshi_env}")
+    if polymarket_mcp:
+        print("Polymarket: enabled")
+    print(f"Max position: ${trading_config.max_position_usd} (Kalshi)")
+    if polymarket_mcp:
+        print(f"Max position: ${trading_config.polymarket_max_position_usd} (Polymarket)")
     print(f"Max portfolio: ${trading_config.max_portfolio_usd}")
     print(f"Session: {session_id}")
     print("Type 'quit' or 'exit' to stop.\n")

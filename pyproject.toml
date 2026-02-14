@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "finance-agent"
 version = "0.1.0"
-description = "AI-powered Kalshi prediction market investment agent"
+description = "Cross-platform prediction market arbitrage agent"
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.1.33",
@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-settings>=2.12",
     "numpy>=2.4",
     "scipy>=1.17",
+    "polymarket-us>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -23,8 +24,6 @@ skills = [
     "pandas>=3.0",
     "matplotlib>=3.10",
     "scikit-learn>=1.8",
-    "statsmodels>=0.14.6",
-    "arch>=8.0",
 ]
 dev = [
     "pytest>=9.0",

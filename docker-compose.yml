@@ -4,6 +4,8 @@ services:
     env_file: .env
     environment:
       - ANTHROPIC_API_KEY
+      - POLYMARKET_KEY_ID
+      - POLYMARKET_SECRET_KEY
     volumes:
       - ./workspace:/workspace
     stdin_open: true

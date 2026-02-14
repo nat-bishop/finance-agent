@@ -48,6 +48,23 @@ class TradingConfig(BaseSettings):
     rate_limit_writes_per_sec: int = 10
     auto_scan_on_startup: bool = True
 
+    # Polymarket credentials
+    polymarket_key_id: str = ""
+    polymarket_secret_key: str = ""
+    polymarket_enabled: bool = False
+
+    # Polymarket limits & fees
+    polymarket_fee_rate: float = 0.001  # 0.10% taker, 0% maker
+    polymarket_max_position_usd: float = 50.0
+
+    @property
+    def polymarket_api_url(self) -> str:
+        return "https://api.polymarket.us"
+
+    @property
+    def polymarket_gateway_url(self) -> str:
+        return "https://gateway.polymarket.us"
+
     @property
     def kalshi_base_url(self) -> str:
         if self.kalshi_env == "prod":
@@ -64,9 +81,9 @@ class PermissionConfig(BaseSettings):
 
     model_config = {"extra": "ignore"}
 
-    readonly_patterns: list[str] = Field(default=[".claude/skills/"])
+    readonly_patterns: list[str] = Field(default=[])
     writable_patterns: list[str] = Field(default=["analysis/", "data/", "lib/"])
-    deny_patterns: list[str] = Field(default=[".env", ".claude/skills/"])
+    deny_patterns: list[str] = Field(default=[".env"])
 
 
 class AgentConfig(BaseSettings):
@@ -74,7 +91,7 @@ class AgentConfig(BaseSettings):
 
     model_config = {"env_prefix": "AGENT_", "env_file": ".env", "extra": "ignore"}
 
-    name: str = "kalshi-trader"
+    name: str = "arb-agent"
     profile: str = "demo"
     model: str = "claude-sonnet-4-5-20250929"
     max_budget_usd: float = 1.0
@@ -142,6 +159,9 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
         "{{MIN_EDGE_PCT}}": str(trading_config.min_edge_pct),
         "{{KALSHI_FEE_RATE}}": str(trading_config.kalshi_fee_rate),
         "{{KALSHI_ENV}}": trading_config.kalshi_env,
+        "{{POLYMARKET_FEE_RATE}}": str(trading_config.polymarket_fee_rate),
+        "{{POLYMARKET_MAX_POSITION_USD}}": str(trading_config.polymarket_max_position_usd),
+        "{{POLYMARKET_ENABLED}}": str(trading_config.polymarket_enabled),
     }
     for placeholder, value in replacements.items():
         raw = raw.replace(placeholder, value)

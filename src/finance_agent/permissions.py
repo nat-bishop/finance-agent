@@ -37,6 +37,13 @@ def create_permission_handler(
         "mcp__kalshi__get_recent_trades",
         "mcp__kalshi__get_portfolio",
         "mcp__kalshi__get_open_orders",
+        # Polymarket reads
+        "mcp__polymarket__search_markets",
+        "mcp__polymarket__get_market_details",
+        "mcp__polymarket__get_orderbook",
+        "mcp__polymarket__get_event",
+        "mcp__polymarket__get_trades",
+        "mcp__polymarket__get_portfolio",
         # Database reads
         "mcp__db__db_query",
         "mcp__db__db_get_session_state",
@@ -139,6 +146,42 @@ def create_permission_handler(
             if _ask_user("Approve this trade? (y/n): "):
                 return PermissionResultAllow(updated_input=input_data)
             return PermissionResultDeny(message="User rejected trade")
+
+        # ── Polymarket place_order: enforce trading limits ─────────
+        if tool_name == "mcp__polymarket__place_order":
+            price = float(input_data.get("price", "0"))
+            quantity = input_data.get("quantity", 0)
+            cost_usd = quantity * price
+
+            if cost_usd > trading_config.polymarket_max_position_usd:
+                return PermissionResultDeny(
+                    message=(
+                        f"Position cost ${cost_usd:.2f} exceeds Polymarket max "
+                        f"${trading_config.polymarket_max_position_usd:.2f}"
+                    ),
+                    interrupt=False,
+                )
+
+            slug = input_data.get("slug", "?")
+            intent = input_data.get("intent", "?")
+            order_type = input_data.get("order_type", "LIMIT")
+
+            print(f"\n{'=' * 50}")
+            print(f"  POLYMARKET: {intent} {quantity}x on {slug}")
+            print(f"  Type: {order_type}  |  Price: ${price:.2f}  |  Cost: ${cost_usd:.2f}")
+            print(f"{'=' * 50}")
+
+            if _ask_user("Approve this trade? (y/n): "):
+                return PermissionResultAllow(updated_input=input_data)
+            return PermissionResultDeny(message="User rejected Polymarket trade")
+
+        # ── Polymarket cancel_order: approval ─────────────────────
+        if tool_name == "mcp__polymarket__cancel_order":
+            order_id = input_data.get("order_id", "?")
+            print(f"\nPolymarket cancel order: {order_id}")
+            if _ask_user("Approve cancellation? (y/n): "):
+                return PermissionResultAllow(updated_input=input_data)
+            return PermissionResultDeny(message="User rejected Polymarket cancellation")
 
         # ── cancel_order: approval ────────────────────────────────
         if tool_name == "mcp__kalshi__cancel_order":

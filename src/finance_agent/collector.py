@@ -18,6 +18,7 @@ from typing import Any
 from .config import load_configs
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
+from .polymarket_client import PolymarketAPIClient
 from .rate_limiter import RateLimiter
 
 
@@ -53,6 +54,7 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
     return {
         "captured_at": now,
         "source": "collector",
+        "exchange": "kalshi",
         "ticker": market.get("ticker", ""),
         "event_ticker": market.get("event_ticker"),
         "series_ticker": market.get("series_ticker"),
@@ -181,6 +183,113 @@ def collect_events(
     return total
 
 
+def _compute_derived_polymarket(market: dict[str, Any], now: str) -> dict[str, Any]:
+    """Compute derived fields from Polymarket market data.
+
+    Prices are stored as cents for consistency with Kalshi.
+    """
+    # Polymarket prices are USD decimals; convert to cents
+    yes_price = market.get("yes_price") or market.get("lastTradePrice")
+
+    yes_bid_cents = None
+    yes_ask_cents = None
+    mid_cents = None
+    spread_cents = None
+    implied_prob = None
+
+    if yes_price is not None:
+        mid_cents = int(float(yes_price) * 100)
+        implied_prob = float(yes_price)
+
+    best_bid = market.get("bestBid") or market.get("best_bid")
+    best_ask = market.get("bestAsk") or market.get("best_ask")
+    if best_bid is not None:
+        yes_bid_cents = int(float(best_bid) * 100)
+    if best_ask is not None:
+        yes_ask_cents = int(float(best_ask) * 100)
+
+    if yes_bid_cents is not None and yes_ask_cents is not None:
+        spread_cents = yes_ask_cents - yes_bid_cents
+        mid_cents = (yes_bid_cents + yes_ask_cents) // 2
+        implied_prob = mid_cents / 100.0
+
+    # Days to expiration
+    days_to_exp = None
+    close_time = market.get("endDate") or market.get("end_date")
+    if close_time:
+        try:
+            if isinstance(close_time, str):
+                close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+            elif isinstance(close_time, int | float):
+                close_dt = datetime.fromtimestamp(close_time, tz=UTC)
+            else:
+                close_dt = None
+            if close_dt:
+                days_to_exp = max(0, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
+        except (ValueError, TypeError, OSError):
+            pass
+
+    volume = market.get("volume") or market.get("volumeNum")
+    slug = market.get("slug") or market.get("ticker_slug") or market.get("id", "")
+
+    return {
+        "captured_at": now,
+        "source": "collector",
+        "exchange": "polymarket",
+        "ticker": slug,
+        "event_ticker": market.get("eventSlug") or market.get("event_slug"),
+        "series_ticker": None,
+        "title": market.get("title") or market.get("question"),
+        "category": market.get("category"),
+        "status": "open" if market.get("active") else "closed",
+        "yes_bid": yes_bid_cents,
+        "yes_ask": yes_ask_cents,
+        "no_bid": None,
+        "no_ask": None,
+        "last_price": mid_cents,
+        "volume": int(volume) if volume else None,
+        "volume_24h": None,
+        "open_interest": market.get("openInterest") or market.get("open_interest"),
+        "spread_cents": spread_cents,
+        "mid_price_cents": mid_cents,
+        "implied_probability": implied_prob,
+        "days_to_expiration": days_to_exp,
+        "close_time": str(close_time) if close_time else None,
+        "settlement_value": None,
+        "markets_in_event": None,
+        "raw_json": json.dumps(market, default=str),
+    }
+
+
+def collect_polymarket_markets(
+    client: PolymarketAPIClient,
+    db: AgentDatabase,
+) -> int:
+    """Collect open markets from Polymarket US."""
+    now = _now_iso()
+    total = 0
+    batch: list[dict[str, Any]] = []
+
+    print("Collecting Polymarket markets...")
+    offset = 0
+    while True:
+        resp = client.search_markets(status="open", limit=100, offset=offset)
+        markets = resp if isinstance(resp, list) else resp.get("markets", resp.get("data", []))
+        if not markets:
+            break
+        for m in markets:
+            batch.append(_compute_derived_polymarket(m, now))
+        if len(batch) >= 500:
+            total += db.insert_market_snapshots(batch)
+            batch.clear()
+        offset += len(markets)
+
+    if batch:
+        total += db.insert_market_snapshots(batch)
+    print(f"  → {total} Polymarket market snapshots")
+    return total
+
+
 def run_collector() -> None:
     """Main entry point for the collector."""
     _, trading_config = load_configs()
@@ -201,9 +310,15 @@ def run_collector() -> None:
         settled_count = collect_settled_markets(client, db)
         event_count = collect_events(client, db)
 
+        pm_count = 0
+        if trading_config.polymarket_enabled and trading_config.polymarket_key_id:
+            pm_client = PolymarketAPIClient(trading_config, rate_limiter=limiter)
+            pm_count = collect_polymarket_markets(pm_client, db)
+
         elapsed = time.time() - start
         print(f"\nCollection complete in {elapsed:.1f}s")
         print(f"  Open: {open_count} | Settled: {settled_count} | Events: {event_count}")
+        print(f"  Polymarket: {pm_count}")
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
