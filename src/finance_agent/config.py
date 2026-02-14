@@ -150,19 +150,19 @@ def load_prompt(name: str) -> str:
 
 
 def build_system_prompt(trading_config: TradingConfig) -> str:
-    """Load system.md and substitute config values."""
+    """Load system.md and substitute {{VARIABLE}} placeholders from config."""
     raw = load_prompt("system")
-    replacements = {
-        "{{MAX_POSITION_USD}}": str(trading_config.max_position_usd),
-        "{{MAX_PORTFOLIO_USD}}": str(trading_config.max_portfolio_usd),
-        "{{MAX_ORDER_COUNT}}": str(trading_config.max_order_count),
-        "{{MIN_EDGE_PCT}}": str(trading_config.min_edge_pct),
-        "{{KALSHI_FEE_RATE}}": str(trading_config.kalshi_fee_rate),
-        "{{KALSHI_ENV}}": trading_config.kalshi_env,
-        "{{POLYMARKET_FEE_RATE}}": str(trading_config.polymarket_fee_rate),
-        "{{POLYMARKET_MAX_POSITION_USD}}": str(trading_config.polymarket_max_position_usd),
-        "{{POLYMARKET_ENABLED}}": str(trading_config.polymarket_enabled),
+    variables = {
+        "MAX_POSITION_USD": trading_config.max_position_usd,
+        "MAX_PORTFOLIO_USD": trading_config.max_portfolio_usd,
+        "MAX_ORDER_COUNT": trading_config.max_order_count,
+        "MIN_EDGE_PCT": trading_config.min_edge_pct,
+        "KALSHI_FEE_RATE": trading_config.kalshi_fee_rate,
+        "KALSHI_ENV": trading_config.kalshi_env,
+        "POLYMARKET_FEE_RATE": trading_config.polymarket_fee_rate,
+        "POLYMARKET_MAX_POSITION_USD": trading_config.polymarket_max_position_usd,
+        "POLYMARKET_ENABLED": trading_config.polymarket_enabled,
     }
-    for placeholder, value in replacements.items():
-        raw = raw.replace(placeholder, value)
+    for name, value in variables.items():
+        raw = raw.replace(f"{{{{{name}}}}}", str(value))
     return raw

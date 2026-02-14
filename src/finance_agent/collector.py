@@ -1,11 +1,11 @@
-"""Data collector — snapshots market data to SQLite.
+"""Data collector -- snapshots market data to SQLite.
 
 Standalone script, no LLM. Run via `make collect` or `python -m finance_agent.collector`.
 
 Collection schedule (all in one run):
-- All open markets (paginated) → market_snapshots
-- Event structure (paginated) → events
-- Recently settled markets → market_snapshots (for calibration)
+- All open markets (paginated) -> market_snapshots
+- Event structure (paginated) -> events
+- Recently settled markets -> market_snapshots (for calibration)
 """
 
 from __future__ import annotations
@@ -26,8 +26,34 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _parse_days_to_expiry(close_time: Any) -> float | None:
+    """Parse a close/expiration time into days remaining. Returns None on failure."""
+    if not close_time:
+        return None
+    try:
+        if isinstance(close_time, str):
+            close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+        elif isinstance(close_time, int | float):
+            close_dt = datetime.fromtimestamp(close_time, tz=UTC)
+        else:
+            return None
+        return max(0.0, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
+    except (ValueError, TypeError, OSError):
+        return None
+
+
+def _base_snapshot(now: str, exchange: str, market: dict[str, Any]) -> dict[str, Any]:
+    """Build a snapshot dict with fields common to both platforms."""
+    return {
+        "captured_at": now,
+        "source": "collector",
+        "exchange": exchange,
+        "raw_json": json.dumps(market, default=str),
+    }
+
+
 def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
-    """Compute derived fields from raw market data."""
+    """Compute derived fields from raw Kalshi market data."""
     yes_bid = market.get("yes_bid") or 0
     yes_ask = market.get("yes_ask") or 0
 
@@ -35,26 +61,10 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
     mid = (yes_bid + yes_ask) // 2 if yes_ask and yes_bid else None
     implied_prob = mid / 100.0 if mid else None
 
-    # Days to expiration
-    days_to_exp = None
     close_time = market.get("close_time") or market.get("expected_expiration_time")
-    if close_time:
-        try:
-            if isinstance(close_time, str):
-                close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-            elif isinstance(close_time, int | float):
-                close_dt = datetime.fromtimestamp(close_time, tz=UTC)
-            else:
-                close_dt = None
-            if close_dt:
-                days_to_exp = max(0, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
-        except (ValueError, TypeError, OSError):
-            pass
 
     return {
-        "captured_at": now,
-        "source": "collector",
-        "exchange": "kalshi",
+        **_base_snapshot(now, "kalshi", market),
         "ticker": market.get("ticker", ""),
         "event_ticker": market.get("event_ticker"),
         "series_ticker": market.get("series_ticker"),
@@ -72,11 +82,69 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
         "spread_cents": spread,
         "mid_price_cents": mid,
         "implied_probability": implied_prob,
-        "days_to_expiration": days_to_exp,
+        "days_to_expiration": _parse_days_to_expiry(close_time),
         "close_time": str(close_time) if close_time else None,
         "settlement_value": market.get("settlement_value"),
-        "markets_in_event": None,  # filled later if from event
-        "raw_json": json.dumps(market, default=str),
+        "markets_in_event": None,
+    }
+
+
+def _compute_derived_polymarket(market: dict[str, Any], now: str) -> dict[str, Any]:
+    """Compute derived fields from Polymarket market data.
+
+    Prices are stored as cents for consistency with Kalshi.
+    """
+    yes_price = market.get("yes_price") or market.get("lastTradePrice")
+
+    yes_bid_cents = None
+    yes_ask_cents = None
+    mid_cents = None
+    spread_cents = None
+    implied_prob = None
+
+    if yes_price is not None:
+        mid_cents = int(float(yes_price) * 100)
+        implied_prob = float(yes_price)
+
+    best_bid = market.get("bestBid") or market.get("best_bid")
+    best_ask = market.get("bestAsk") or market.get("best_ask")
+    if best_bid is not None:
+        yes_bid_cents = int(float(best_bid) * 100)
+    if best_ask is not None:
+        yes_ask_cents = int(float(best_ask) * 100)
+
+    if yes_bid_cents is not None and yes_ask_cents is not None:
+        spread_cents = yes_ask_cents - yes_bid_cents
+        mid_cents = (yes_bid_cents + yes_ask_cents) // 2
+        implied_prob = mid_cents / 100.0
+
+    close_time = market.get("endDate") or market.get("end_date")
+    volume = market.get("volume") or market.get("volumeNum")
+    slug = market.get("slug") or market.get("ticker_slug") or market.get("id", "")
+
+    return {
+        **_base_snapshot(now, "polymarket", market),
+        "ticker": slug,
+        "event_ticker": market.get("eventSlug") or market.get("event_slug"),
+        "series_ticker": None,
+        "title": market.get("title") or market.get("question"),
+        "category": market.get("category"),
+        "status": "open" if market.get("active") else "closed",
+        "yes_bid": yes_bid_cents,
+        "yes_ask": yes_ask_cents,
+        "no_bid": None,
+        "no_ask": None,
+        "last_price": mid_cents,
+        "volume": int(volume) if volume else None,
+        "volume_24h": None,
+        "open_interest": market.get("openInterest") or market.get("open_interest"),
+        "spread_cents": spread_cents,
+        "mid_price_cents": mid_cents,
+        "implied_probability": implied_prob,
+        "days_to_expiration": _parse_days_to_expiry(close_time),
+        "close_time": str(close_time) if close_time else None,
+        "settlement_value": None,
+        "markets_in_event": None,
     }
 
 
@@ -100,46 +168,35 @@ def _collect_markets_by_status(
         if not markets:
             break
 
-        for m in markets:
-            batch.append(_compute_derived(m, now))
+        batch.extend(_compute_derived(m, now) for m in markets)
 
         if len(batch) >= 500:
             total += db.insert_market_snapshots(batch)
             batch.clear()
 
         cursor = resp.get("cursor")
-        if not cursor:
-            break
-        if max_total and total + len(batch) >= max_total:
+        if not cursor or (max_total and total + len(batch) >= max_total):
             break
 
     if batch:
         total += db.insert_market_snapshots(batch)
 
-    print(f"  → {total} {label}")
+    print(f"  -> {total} {label}")
     return total
 
 
 def collect_open_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    """Collect all open markets via pagination."""
     return _collect_markets_by_status(client, db, "open", "open market snapshots")
 
 
 def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    """Collect recently settled markets for calibration data."""
     return _collect_markets_by_status(client, db, "settled", "settled market snapshots", 1000)
 
 
-def collect_events(
-    client: KalshiAPIClient,
-    db: AgentDatabase,
-) -> int:
+def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
     """Collect event structures with nested markets."""
-    # Get events that have open markets by searching open markets and extracting
-    # unique event tickers, then fetching each event
     print("Collecting events...")
 
-    # First, get distinct event tickers from recent open market snapshots
     event_tickers = db.query(
         """SELECT DISTINCT event_ticker FROM market_snapshots
            WHERE event_ticker IS NOT NULL
@@ -177,94 +234,12 @@ def collect_events(
             total += 1
         except Exception as e:
             print(f"  Warning: failed to fetch event {et}: {e}")
-            continue
 
-    print(f"  → {total} events")
+    print(f"  -> {total} events")
     return total
 
 
-def _compute_derived_polymarket(market: dict[str, Any], now: str) -> dict[str, Any]:
-    """Compute derived fields from Polymarket market data.
-
-    Prices are stored as cents for consistency with Kalshi.
-    """
-    # Polymarket prices are USD decimals; convert to cents
-    yes_price = market.get("yes_price") or market.get("lastTradePrice")
-
-    yes_bid_cents = None
-    yes_ask_cents = None
-    mid_cents = None
-    spread_cents = None
-    implied_prob = None
-
-    if yes_price is not None:
-        mid_cents = int(float(yes_price) * 100)
-        implied_prob = float(yes_price)
-
-    best_bid = market.get("bestBid") or market.get("best_bid")
-    best_ask = market.get("bestAsk") or market.get("best_ask")
-    if best_bid is not None:
-        yes_bid_cents = int(float(best_bid) * 100)
-    if best_ask is not None:
-        yes_ask_cents = int(float(best_ask) * 100)
-
-    if yes_bid_cents is not None and yes_ask_cents is not None:
-        spread_cents = yes_ask_cents - yes_bid_cents
-        mid_cents = (yes_bid_cents + yes_ask_cents) // 2
-        implied_prob = mid_cents / 100.0
-
-    # Days to expiration
-    days_to_exp = None
-    close_time = market.get("endDate") or market.get("end_date")
-    if close_time:
-        try:
-            if isinstance(close_time, str):
-                close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-            elif isinstance(close_time, int | float):
-                close_dt = datetime.fromtimestamp(close_time, tz=UTC)
-            else:
-                close_dt = None
-            if close_dt:
-                days_to_exp = max(0, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
-        except (ValueError, TypeError, OSError):
-            pass
-
-    volume = market.get("volume") or market.get("volumeNum")
-    slug = market.get("slug") or market.get("ticker_slug") or market.get("id", "")
-
-    return {
-        "captured_at": now,
-        "source": "collector",
-        "exchange": "polymarket",
-        "ticker": slug,
-        "event_ticker": market.get("eventSlug") or market.get("event_slug"),
-        "series_ticker": None,
-        "title": market.get("title") or market.get("question"),
-        "category": market.get("category"),
-        "status": "open" if market.get("active") else "closed",
-        "yes_bid": yes_bid_cents,
-        "yes_ask": yes_ask_cents,
-        "no_bid": None,
-        "no_ask": None,
-        "last_price": mid_cents,
-        "volume": int(volume) if volume else None,
-        "volume_24h": None,
-        "open_interest": market.get("openInterest") or market.get("open_interest"),
-        "spread_cents": spread_cents,
-        "mid_price_cents": mid_cents,
-        "implied_probability": implied_prob,
-        "days_to_expiration": days_to_exp,
-        "close_time": str(close_time) if close_time else None,
-        "settlement_value": None,
-        "markets_in_event": None,
-        "raw_json": json.dumps(market, default=str),
-    }
-
-
-def collect_polymarket_markets(
-    client: PolymarketAPIClient,
-    db: AgentDatabase,
-) -> int:
+def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -> int:
     """Collect open markets from Polymarket US."""
     now = _now_iso()
     total = 0
@@ -277,8 +252,7 @@ def collect_polymarket_markets(
         markets = resp if isinstance(resp, list) else resp.get("markets", resp.get("data", []))
         if not markets:
             break
-        for m in markets:
-            batch.append(_compute_derived_polymarket(m, now))
+        batch.extend(_compute_derived_polymarket(m, now) for m in markets)
         if len(batch) >= 500:
             total += db.insert_market_snapshots(batch)
             batch.clear()
@@ -286,7 +260,7 @@ def collect_polymarket_markets(
 
     if batch:
         total += db.insert_market_snapshots(batch)
-    print(f"  → {total} Polymarket market snapshots")
+    print(f"  -> {total} Polymarket market snapshots")
     return total
 
 

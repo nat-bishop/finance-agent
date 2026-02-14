@@ -6,11 +6,12 @@ from typing import Any
 
 from polymarket_us import PolymarketUS
 
+from .api_base import BaseAPIClient
 from .config import TradingConfig
 from .rate_limiter import RateLimiter
 
 
-class PolymarketAPIClient:
+class PolymarketAPIClient(BaseAPIClient):
     """Convenience wrapper providing typed methods around the Polymarket US SDK."""
 
     def __init__(
@@ -18,32 +19,14 @@ class PolymarketAPIClient:
         config: TradingConfig,
         rate_limiter: RateLimiter | None = None,
     ) -> None:
+        super().__init__(rate_limiter)
         self._config = config
         self._client = PolymarketUS(
             key_id=config.polymarket_key_id,
             secret_key=config.polymarket_secret_key,
         )
-        self._limiter = rate_limiter
 
-    def _to_dict(self, resp: Any) -> Any:
-        """Convert SDK response to dict if needed."""
-        if hasattr(resp, "to_dict"):
-            return resp.to_dict()
-        if hasattr(resp, "model_dump"):
-            return resp.model_dump()
-        return resp
-
-    def _rate_read(self) -> None:
-        """Block until a read token is available (if limiter configured)."""
-        if self._limiter:
-            self._limiter.acquire_read_sync()
-
-    def _rate_write(self) -> None:
-        """Block until a write token is available (if limiter configured)."""
-        if self._limiter:
-            self._limiter.acquire_write_sync()
-
-    # ── Market data (read) ──────────────────────────────────────
+    # -- Market data (read) --
 
     def search_markets(
         self,
@@ -59,8 +42,7 @@ class PolymarketAPIClient:
             params["active"] = status == "open"
         if query:
             params["query"] = query
-        result = self._client.markets.list(params)  # type: ignore[arg-type]
-        return self._to_dict(result)
+        return self._to_dict(self._client.markets.list(params))  # type: ignore[arg-type]
 
     def get_market(self, slug: str) -> dict[str, Any]:
         self._rate_read()
@@ -97,11 +79,10 @@ class PolymarketAPIClient:
         limit: int = 50,
     ) -> dict[str, Any]:
         self._rate_read()
-        # Trades may be accessible via market detail or a dedicated endpoint
-        # The SDK may expose this through markets or a trades resource
+        # Trades accessible via market detail endpoint
         return self._to_dict(self._client.markets.retrieve_by_slug(slug))
 
-    # ── Portfolio (read) ────────────────────────────────────────
+    # -- Portfolio (read) --
 
     def get_balance(self) -> dict[str, Any]:
         self._rate_read()
@@ -111,7 +92,7 @@ class PolymarketAPIClient:
         self._rate_read()
         return self._to_dict(self._client.portfolio.positions())
 
-    # ── Orders (write) ──────────────────────────────────────────
+    # -- Orders (write) --
 
     def create_order(
         self,
