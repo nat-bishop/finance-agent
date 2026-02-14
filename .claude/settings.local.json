@@ -12,7 +12,8 @@
       "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: finance agent with Kalshi trading integration\n\nClaude-powered prediction market agent using claude-agent-sdk with Kalshi API\nintegration. Includes 11 financial modeling skills \\(Kelly sizing, Monte Carlo,\nBayesian updating, etc.\\), Docker sandbox, and JSONL trade journaling.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(uv run ruff format:*)",
       "Bash(uv run ruff check:*)",
-      "Bash(uv run pre-commit:*)"
+      "Bash(uv run pre-commit:*)",
+      "WebFetch(domain:docs.polymarket.us)"
     ]
   }
 }

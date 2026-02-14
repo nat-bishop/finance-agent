@@ -18,32 +18,20 @@ def create_audit_hooks(
     """Return hooks dict for trade validation, auto-approve, audit, and session lifecycle.
 
     Hook order (PreToolUse):
-    1. Stream keepalive (all tools) — required for can_use_tool to work
-    2. Auto-approve reads — Kalshi read tools, DB read tools, filesystem reads
-    3. Trade validation — validates limits, forces user approval via 'ask'
-    4. Cancel order — forces user approval via 'ask'
+    1. Auto-approve reads — Kalshi read tools, DB read tools, filesystem reads
+    2. Trade validation — validates limits, forces user approval via 'ask'
+    3. Cancel order — forces user approval via 'ask'
 
     PostToolUse:
-    5. Trade audit — logs order/cancel results to SQLite
+    4. Trade audit — logs order/cancel results to SQLite
 
     Stop:
-    6. Session end — updates session record
+    5. Session end — updates session record
     """
     session_start = time.time()
     trade_count = {"placed": 0, "cancelled": 0}
 
-    # ── 1. Stream keepalive (all tools) ──────────────────────────
-    # Python SDK workaround: at least one PreToolUse hook must return
-    # {"continue_": True} for can_use_tool to function.
-
-    async def stream_keepalive(
-        input_data: dict[str, Any],
-        tool_use_id: str | None,
-        context: Any,
-    ) -> dict:
-        return {"continue_": True}
-
-    # ── 2. Auto-approve reads ────────────────────────────────────
+    # ── 1. Auto-approve reads ────────────────────────────────────
 
     async def auto_approve_reads(
         input_data: dict[str, Any],
@@ -52,7 +40,7 @@ def create_audit_hooks(
     ) -> dict:
         return {"permissionDecision": "allow"}
 
-    # ── 3. Trade validation (place_order) ────────────────────────
+    # ── 2. Trade validation (place_order) ────────────────────────
 
     async def validate_and_ask_trade(
         input_data: dict[str, Any],
@@ -80,7 +68,7 @@ def create_audit_hooks(
             ),
         }
 
-    # ── 4. Cancel order ──────────────────────────────────────────
+    # ── 3. Cancel order ──────────────────────────────────────────
 
     async def ask_cancel(
         input_data: dict[str, Any],
@@ -94,7 +82,7 @@ def create_audit_hooks(
             "systemMessage": f"CANCEL REQUEST: Order {order_id}",
         }
 
-    # ── 5. Trade audit (PostToolUse) ─────────────────────────────
+    # ── 4. Trade audit (PostToolUse) ─────────────────────────────
 
     async def audit_trade_result(
         input_data: dict[str, Any],
@@ -144,7 +132,7 @@ def create_audit_hooks(
 
         return {}
 
-    # ── 6. Session end (Stop) ────────────────────────────────────
+    # ── 5. Session end (Stop) ────────────────────────────────────
 
     async def session_end(
         input_data: dict[str, Any],
@@ -166,9 +154,7 @@ def create_audit_hooks(
 
     return {
         "PreToolUse": [
-            # 1. Keepalive for all tools
-            HookMatcher(hooks=[stream_keepalive]),
-            # 2. Auto-approve reads (Kalshi reads + DB reads + filesystem reads)
+            # 1. Auto-approve reads (Kalshi reads + DB reads + filesystem reads)
             HookMatcher(
                 matcher=(
                     "mcp__kalshi__search_markets|mcp__kalshi__get_"
@@ -177,12 +163,12 @@ def create_audit_hooks(
                 ),
                 hooks=[auto_approve_reads],
             ),
-            # 3. Trade validation + user approval
+            # 2. Trade validation + user approval
             HookMatcher(
                 matcher="mcp__kalshi__place_order",
                 hooks=[validate_and_ask_trade],
             ),
-            # 4. Cancel order approval
+            # 3. Cancel order approval
             HookMatcher(
                 matcher="mcp__kalshi__cancel_order",
                 hooks=[ask_cancel],
