@@ -40,7 +40,6 @@ class DashboardScreen(Screen):
         services: TUIServices,
         startup_msg: str,
         session_id: str,
-        profile: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -48,7 +47,6 @@ class DashboardScreen(Screen):
         self._services = services
         self._startup_msg = startup_msg
         self._session_id = session_id
-        self._profile = profile
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main-content"):
@@ -61,7 +59,6 @@ class DashboardScreen(Screen):
     async def on_mount(self) -> None:
         bar = self.query_one("#status-bar", StatusBar)
         bar.session_id = self._session_id
-        bar.profile = self._profile
 
         # Initial data load
         self.set_interval(30, self._poll_state)

@@ -25,7 +25,7 @@ def db(tmp_path):
 @pytest.fixture
 def session_id(db):
     """Create a test session and return its ID."""
-    return db.create_session("test")
+    return db.create_session()
 
 
 # ── Sample data factories ────────────────────────────────────────

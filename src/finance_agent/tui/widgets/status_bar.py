@@ -9,7 +9,7 @@ from textual.widgets import Static
 
 
 class StatusBar(Static):
-    """Persistent bottom bar: session, cost, rec count, profile."""
+    """Persistent bottom bar: session, cost, rec count."""
 
     DEFAULT_CSS = """
     StatusBar {
@@ -24,7 +24,6 @@ class StatusBar(Static):
     session_id: reactive[str] = reactive("")
     total_cost: reactive[float] = reactive(0.0)
     rec_count: reactive[int] = reactive(0)
-    profile: reactive[str] = reactive("")
 
     def render(self) -> str:
         now = datetime.now(UTC).strftime("%H:%M")
@@ -32,6 +31,5 @@ class StatusBar(Static):
             f" Session: {self.session_id}"
             f" | Cost: ${self.total_cost:.4f}"
             f" | Recs: {self.rec_count}"
-            f" | {self.profile}"
             f" | {now}"
         )

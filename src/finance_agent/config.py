@@ -2,27 +2,9 @@
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
-from typing import Literal
 
 from pydantic_settings import BaseSettings
-
-_TOML_CANDIDATES = [
-    Path(__file__).resolve().parents[2] / "config.toml",  # repo root
-    Path("/app/config.toml"),  # Docker
-]
-
-
-def _load_profile(profile: str) -> dict:
-    """Read a named profile from config.toml, return its values as a dict."""
-    for path in _TOML_CANDIDATES:
-        if path.is_file():
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            if profile in data:
-                return data[profile]
-            break
-    return {}
 
 
 class TradingConfig(BaseSettings):
@@ -32,12 +14,11 @@ class TradingConfig(BaseSettings):
 
     kalshi_api_key_id: str = ""
     kalshi_private_key_path: str = "/workspace/keys/private_key.pem"
-    kalshi_env: Literal["demo", "prod"] = "demo"
 
-    kalshi_max_position_usd: float = 50.0
-    max_portfolio_usd: float = 500.0
-    max_order_count: int = 100
-    min_edge_pct: float = 5.0
+    kalshi_max_position_usd: float = 100.0
+    max_portfolio_usd: float = 1000.0
+    max_order_count: int = 50
+    min_edge_pct: float = 7.0
     kalshi_fee_rate: float = 0.03
 
     db_path: str = "/workspace/data/agent.db"
@@ -69,9 +50,7 @@ class TradingConfig(BaseSettings):
 
     @property
     def kalshi_base_url(self) -> str:
-        if self.kalshi_env == "prod":
-            return "https://api.elections.kalshi.com"
-        return "https://demo-api.kalshi.co"
+        return "https://api.elections.kalshi.com"
 
     @property
     def kalshi_api_url(self) -> str:
@@ -84,53 +63,14 @@ class AgentConfig(BaseSettings):
     model_config = {"env_prefix": "AGENT_", "env_file": ".env", "extra": "ignore"}
 
     name: str = "arb-agent"
-    profile: str = "demo"
     model: str = "claude-sonnet-4-5-20250929"
-    max_budget_usd: float = 1.0
+    max_budget_usd: float = 2.0
     permission_mode: str = "acceptEdits"
 
 
 def load_configs() -> tuple[AgentConfig, TradingConfig]:
-    """Build AgentConfig and TradingConfig with TOML profile defaults.
-
-    Priority: env vars / .env > TOML profile values > class defaults.
-
-    Pydantic BaseSettings reads env vars automatically, so we only inject
-    TOML values for fields that weren't set by env vars.  We detect which
-    fields were explicitly set by comparing a bare BaseSettings instance
-    (env-only) against its class defaults.
-    """
-    # First pass: resolve profile name from env
-    agent_pre = AgentConfig()
-    profile_defaults = _load_profile(agent_pre.profile)
-
-    # Split TOML keys into agent-level vs trading-level
-    agent_keys = set(AgentConfig.model_fields)
-    trading_toml = {
-        k: v
-        for k, v in profile_defaults.items()
-        if k not in agent_keys and k in TradingConfig.model_fields
-    }
-    agent_toml = {k: v for k, v in profile_defaults.items() if k in agent_keys}
-
-    # For each config class, only apply TOML value if env didn't set the field.
-    # We detect "env set" by checking if the env-loaded value differs from the
-    # class default.  If it does, the user explicitly set it via env.
-    def _merge(cls: type[BaseSettings], toml_vals: dict) -> dict:
-        env_instance = cls()
-        merged: dict = {}
-        for key, toml_val in toml_vals.items():
-            field_default = cls.model_fields[key].default
-            env_val = getattr(env_instance, key)
-            # If env value matches class default, no env override → use TOML
-            if env_val == field_default:
-                merged[key] = toml_val
-        return merged
-
-    trading_config = TradingConfig(**_merge(TradingConfig, trading_toml))
-    agent_config = AgentConfig(**_merge(AgentConfig, agent_toml))
-
-    return agent_config, trading_config
+    """Build AgentConfig and TradingConfig from env vars / .env file."""
+    return AgentConfig(), TradingConfig()
 
 
 def load_prompt(name: str) -> str:
@@ -148,7 +88,6 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
         "MAX_ORDER_COUNT": trading_config.max_order_count,
         "MIN_EDGE_PCT": trading_config.min_edge_pct,
         "KALSHI_FEE_RATE": trading_config.kalshi_fee_rate,
-        "KALSHI_ENV": trading_config.kalshi_env,
         "POLYMARKET_FEE_RATE": trading_config.polymarket_fee_rate,
         "POLYMARKET_MAX_POSITION_USD": trading_config.polymarket_max_position_usd,
         "POLYMARKET_ENABLED": trading_config.polymarket_enabled,

@@ -61,7 +61,7 @@ class FinanceApp(App):
         if backup_result:
             self.log(f"DB backup: {backup_result}")
 
-        session_id = db.create_session(profile=agent_config.profile)
+        session_id = db.create_session()
 
         # Auto-resolve predictions
         resolved = db.auto_resolve_predictions()
@@ -161,7 +161,6 @@ class FinanceApp(App):
                 services=services,
                 startup_msg=startup_msg,
                 session_id=session_id,
-                profile=agent_config.profile,
             ),
             name="dashboard",
         )

@@ -352,7 +352,7 @@ def run_collector() -> None:
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()
-    print(f"Data collector starting ({trading_config.kalshi_env})")
+    print("Data collector starting")
     print(f"DB: {trading_config.db_path}")
 
     try:

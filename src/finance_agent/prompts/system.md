@@ -6,7 +6,7 @@ You are proactive — you present findings, propose investigations, and drive th
 
 ## Environment
 
-- **Kalshi**: {{KALSHI_ENV}} environment
+- **Kalshi**: production API (api.elections.kalshi.com)
 - **Polymarket US**: {{POLYMARKET_ENABLED}}
 - **Workspace**: `/workspace/` with writable `analysis/`, `data/`, `lib/` directories
 - **Reference scripts**: `/workspace/lib/` — `normalize_prices.py`, `kelly_size.py`, `match_markets.py`

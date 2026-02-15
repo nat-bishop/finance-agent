@@ -31,7 +31,12 @@
       "Bash(uv run:*)",
       "Bash(git commit:*)",
       "Bash(wc:*)",
-      "Bash(uv run pytest:*)"
+      "Bash(uv run pytest:*)",
+      "WebFetch(domain:help.kalshi.com)",
+      "WebFetch(domain:amiable.dev)",
+      "WebFetch(domain:www.polymarketexchange.com)",
+      "WebFetch(domain:isvdocs.polymarket.us)",
+      "WebFetch(domain:apidocs.polymarketexchange.com)"
     ]
   }
 }

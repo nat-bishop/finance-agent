@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN uv pip install --system --no-cache claude-code
 
 # Install project deps — copy source before install so -e works
-COPY pyproject.toml uv.lock config.toml /app/
+COPY pyproject.toml uv.lock /app/
 COPY src/ /app/src/
 RUN uv pip install --system --no-cache "/app[skills]"
 

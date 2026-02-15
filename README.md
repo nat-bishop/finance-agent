@@ -133,21 +133,19 @@ Discovery → Investigation → Verification → Sizing → Recommendation
 
 ## Configuration
 
-`config.toml` with `[demo]` and `[prod]` profiles. Select via `AGENT_PROFILE` env var.
+All settings are configured via environment variables (`.env` file) with sensible defaults.
 
-| Parameter | Demo | Prod |
+| Parameter | Default | Env var |
 |---|---|---|
-| Kalshi max position | $50 | $100 |
-| Polymarket max position | $50 | $50 |
-| Max portfolio | $500 | $1,000 |
-| Max contracts/order | 100 | 50 |
-| Min edge required | 5% | 7% |
-| Kalshi fee rate | 3% | 3% |
-| Polymarket fee rate | 0% | 0% |
-| Claude budget/session | $1 | $2 |
-| Recommendation TTL | 60 min | 60 min |
-
-Environment variables override TOML values.
+| Kalshi max position | $100 | `KALSHI_MAX_POSITION_USD` |
+| Polymarket max position | $50 | `POLYMARKET_MAX_POSITION_USD` |
+| Max portfolio | $1,000 | `MAX_PORTFOLIO_USD` |
+| Max contracts/order | 50 | `MAX_ORDER_COUNT` |
+| Min edge required | 7% | `MIN_EDGE_PCT` |
+| Kalshi fee rate | 3% | `KALSHI_FEE_RATE` |
+| Polymarket fee rate | 0% | `POLYMARKET_FEE_RATE` |
+| Claude budget/session | $2 | `AGENT_MAX_BUDGET_USD` |
+| Recommendation TTL | 60 min | `RECOMMENDATION_TTL_MINUTES` |
 
 ## Database Schema
 
@@ -187,7 +185,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 ```
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
-  config.py            # Pydantic settings, TOML profile loading
+  config.py            # Pydantic settings (env vars override defaults)
   database.py          # SQLite (WAL mode), Alembic migrations, recommendation + trade CRUD
   tools.py             # Unified MCP tool factories (8 market + 2 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)

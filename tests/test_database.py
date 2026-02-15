@@ -45,10 +45,10 @@ def test_db_foreign_keys_enabled(db):
 
 
 def test_query_select_returns_dicts(db, session_id):
-    rows = db.query("SELECT id, profile FROM sessions WHERE id = ?", (session_id,))
+    rows = db.query("SELECT id, started_at FROM sessions WHERE id = ?", (session_id,))
     assert len(rows) == 1
     assert rows[0]["id"] == session_id
-    assert rows[0]["profile"] == "test"
+    assert rows[0]["started_at"] is not None
 
 
 def test_query_with_cte(db, session_id):
@@ -83,8 +83,8 @@ def test_query_empty_result(db):
 
 def test_execute_returns_cursor(db):
     cursor = db.execute(
-        "INSERT INTO sessions (id, started_at, profile) VALUES (?, ?, ?)",
-        ("test-ex", _now(), "demo"),
+        "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+        ("test-ex", _now()),
     )
     assert cursor.lastrowid is not None
 
@@ -106,15 +106,14 @@ def test_executemany_inserts(db, sample_market_snapshot):
 
 
 def test_create_session_returns_8_char_id(db):
-    sid = db.create_session("demo")
+    sid = db.create_session()
     assert isinstance(sid, str)
     assert len(sid) == 8
 
 
-def test_create_session_stores_profile(db):
-    sid = db.create_session("prod")
-    rows = db.query("SELECT profile, started_at FROM sessions WHERE id = ?", (sid,))
-    assert rows[0]["profile"] == "prod"
+def test_create_session_stores_started_at(db):
+    sid = db.create_session()
+    rows = db.query("SELECT started_at FROM sessions WHERE id = ?", (sid,))
     assert rows[0]["started_at"] is not None
 
 
@@ -630,7 +629,7 @@ def test_get_trades_with_filter(db, session_id):
 
 
 def test_get_sessions(db):
-    db.create_session("a")
-    db.create_session("b")
+    db.create_session()
+    db.create_session()
     sessions = db.get_sessions()
     assert len(sessions) == 2

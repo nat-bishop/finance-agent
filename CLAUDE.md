@@ -58,7 +58,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 ### Module roles
 
 - **main.py** — Assembles `ClaudeAgentOptions`, initializes DB, creates session, auto-resolves predictions, injects startup context into `BEGIN_SESSION`, runs the REPL loop.
-- **config.py** — Pydantic settings with TOML profile support (`config.toml` has `[demo]`/`[prod]` sections). Env vars override TOML values. `kalshi_max_position_usd`, `polymarket_max_position_usd`, `polymarket_fee_rate = 0.0`, `recommendation_ttl_minutes = 60`. Also loads and templates `prompts/system.md`.
+- **config.py** — Pydantic settings. Env vars override defaults. `kalshi_max_position_usd`, `polymarket_max_position_usd`, `polymarket_fee_rate = 0.0`, `recommendation_ttl_minutes = 60`. Also loads and templates `prompts/system.md`.
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 8 read-only tools, `create_db_tools(db, session_id)` → 2 tools (`log_prediction`, `recommend_trade`). Exchange is a parameter, not a namespace.
 - **kalshi_client.py** — Thin wrapper around `kalshi-python` SDK with rate limiting. Auth is RSA-PSS signing. Includes batch_create/cancel, amend_order, get_events (paginated).
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.
@@ -75,7 +75,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **Factory + closure** for tools: `create_market_tools(kalshi, polymarket)` returns a list of `@tool`-decorated functions closed over both clients.
 - **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 10 tools total.
 - **Unified conventions**: Exchange is a param, prices in cents, action+side for both platforms.
-- **Config priority**: env vars > TOML profile > Pydantic defaults. Profile selected by `AGENT_PROFILE` env var.
+- **Config**: env vars > Pydantic defaults.
 - **Hook ordering**: catch-all auto-approve → PostToolUse rec audit → Stop session end.
 - **Startup context injection**: `main.py` calls `db.get_session_state()` and injects result into `BEGIN_SESSION` message. Agent starts with full context — no tool call needed.
 - **Watchlist**: `/workspace/data/watchlist.md` — markdown file the agent reads/writes directly (replaces former DB watchlist tools).

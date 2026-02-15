@@ -42,9 +42,7 @@ class HistoryScreen(Screen):
 
     async def on_mount(self) -> None:
         sess_table = self.query_one("#sessions-table", DataTable)
-        sess_table.add_columns(
-            "ID", "Started", "Ended", "Profile", "Trades", "Recs", "PnL", "Summary"
-        )
+        sess_table.add_columns("ID", "Started", "Ended", "Trades", "Recs", "PnL", "Summary")
         sess_table.cursor_type = "row"
 
         # Detail tables
@@ -70,7 +68,6 @@ class HistoryScreen(Screen):
                 str(sess.get("id", "")),
                 started,
                 ended,
-                str(sess.get("profile", "")),
                 str(sess.get("trades_placed", 0)),
                 str(sess.get("recommendations_made", 0)),
                 pnl,

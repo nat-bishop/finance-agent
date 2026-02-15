@@ -86,12 +86,12 @@ class AgentDatabase:
 
     # ── Sessions ─────────────────────────────────────────────────
 
-    def create_session(self, profile: str = "demo") -> str:
+    def create_session(self) -> str:
         """Create a new session, return its ID."""
         session_id = str(uuid.uuid4())[:8]
         self.execute(
-            "INSERT INTO sessions (id, started_at, profile) VALUES (?, ?, ?)",
-            (session_id, _now(), profile),
+            "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+            (session_id, _now()),
         )
         return session_id
 
@@ -612,7 +612,7 @@ class AgentDatabase:
     def get_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         """Session listing for history screen."""
         return self.query(
-            """SELECT id, started_at, ended_at, profile, summary,
+            """SELECT id, started_at, ended_at, summary,
                       trades_placed, recommendations_made, pnl_usd
                FROM sessions ORDER BY started_at DESC LIMIT ?""",
             (limit,),
