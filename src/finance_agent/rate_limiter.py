@@ -13,7 +13,7 @@ class RateLimiter:
     Thread-safe: used from ThreadPoolExecutor in TUIServices.
     """
 
-    def __init__(self, reads_per_sec: int = 20, writes_per_sec: int = 10) -> None:
+    def __init__(self, reads_per_sec: int = 30, writes_per_sec: int = 30) -> None:
         self._tokens = {"read": float(reads_per_sec), "write": float(writes_per_sec)}
         self._max = {"read": float(reads_per_sec), "write": float(writes_per_sec)}
         self._last_refill = time.monotonic()
@@ -28,19 +28,19 @@ class RateLimiter:
             )
         self._last_refill = now
 
-    def _try_acquire(self, bucket: Literal["read", "write"]) -> float | None:
-        """Try to consume a token. Returns None on success, or wait time if unavailable."""
+    def _try_acquire(self, bucket: Literal["read", "write"], cost: float = 1.0) -> float | None:
+        """Try to consume `cost` tokens. Returns None on success, or wait time if unavailable."""
         with self._lock:
             self._refill()
-            if self._tokens[bucket] >= 1.0:
-                self._tokens[bucket] -= 1.0
+            if self._tokens[bucket] >= cost:
+                self._tokens[bucket] -= cost
                 return None
-            return (1.0 - self._tokens[bucket]) / self._max[bucket]
+            return (cost - self._tokens[bucket]) / self._max[bucket]
 
-    def acquire_read_sync(self) -> None:
-        while (wait := self._try_acquire("read")) is not None:
+    def acquire_read_sync(self, cost: float = 1.0) -> None:
+        while (wait := self._try_acquire("read", cost)) is not None:
             time.sleep(wait)
 
-    def acquire_write_sync(self) -> None:
-        while (wait := self._try_acquire("write")) is not None:
+    def acquire_write_sync(self, cost: float = 1.0) -> None:
+        while (wait := self._try_acquire("write", cost)) is not None:
             time.sleep(wait)

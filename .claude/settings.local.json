@@ -1,18 +1,4 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python .claude/hooks/security_reminder_hook.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  },
   "permissions": {
     "allow": [
       "WebSearch",
@@ -52,7 +38,23 @@
       "WebFetch(domain:isvdocs.polymarket.us)",
       "WebFetch(domain:apidocs.polymarketexchange.com)",
       "WebFetch(domain:kalshi.com)",
-      "Bash(git show:*)"
+      "Bash(git show:*)",
+      "Bash(make:*)",
+      "Bash(make lint:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/security_reminder_hook.py",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

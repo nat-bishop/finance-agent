@@ -6,7 +6,7 @@ from typing import Any
 
 from polymarket_us import PolymarketUS
 
-from .api_base import BaseAPIClient
+from .api_base import BaseAPIClient, _thread_safe
 from .config import Credentials, TradingConfig
 
 # Map agent action+side to Polymarket intent
@@ -42,6 +42,7 @@ class PolymarketAPIClient(BaseAPIClient):
 
     # -- Market data (read) --
 
+    @_thread_safe
     def search_markets(
         self,
         *,
@@ -58,22 +59,27 @@ class PolymarketAPIClient(BaseAPIClient):
             params["query"] = query
         return self._to_dict(self._client.markets.list(params))  # type: ignore[arg-type]
 
+    @_thread_safe
     def get_market(self, slug: str) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.markets.retrieve_by_slug(slug))
 
+    @_thread_safe
     def get_orderbook(self, slug: str) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.markets.book(slug))
 
+    @_thread_safe
     def get_bbo(self, slug: str) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.markets.bbo(slug))
 
+    @_thread_safe
     def get_event(self, slug: str) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.events.retrieve_by_slug(slug))
 
+    @_thread_safe
     def list_events(
         self,
         *,
@@ -86,6 +92,7 @@ class PolymarketAPIClient(BaseAPIClient):
             self._client.events.list({"active": active, "limit": limit, "offset": offset})
         )
 
+    @_thread_safe
     def get_trades(
         self,
         slug: str,
@@ -97,14 +104,17 @@ class PolymarketAPIClient(BaseAPIClient):
 
     # -- Portfolio (read) --
 
+    @_thread_safe
     def get_balance(self) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.account.balances())
 
+    @_thread_safe
     def get_positions(self) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.portfolio.positions())
 
+    @_thread_safe
     def get_orders(
         self,
         *,
@@ -121,6 +131,7 @@ class PolymarketAPIClient(BaseAPIClient):
 
     # -- Orders (write) --
 
+    @_thread_safe
     def create_order(
         self,
         *,
@@ -142,6 +153,7 @@ class PolymarketAPIClient(BaseAPIClient):
         }
         return self._to_dict(self._client.orders.create(order_params))  # type: ignore[arg-type]
 
+    @_thread_safe
     def cancel_order(self, order_id: str, slug: str = "") -> dict[str, Any]:
         self._rate_write()
         params = {"marketSlug": slug} if slug else {}

@@ -88,3 +88,42 @@ def test_acquire_read_sync():
 def test_acquire_write_sync():
     rl = RateLimiter(reads_per_sec=100, writes_per_sec=100)
     rl.acquire_write_sync()
+
+
+# ── Cost parameter ──────────────────────────────────────────────
+
+
+def test_try_acquire_multi_token_cost():
+    rl = RateLimiter(reads_per_sec=10, writes_per_sec=10)
+    with patch("finance_agent.rate_limiter.time.monotonic", return_value=0.0):
+        rl._last_refill = 0.0
+        rl._tokens["write"] = 10.0
+        result = rl._try_acquire("write", cost=5.0)
+    assert result is None
+    assert rl._tokens["write"] == 5.0
+
+
+def test_try_acquire_fractional_cost():
+    rl = RateLimiter(reads_per_sec=10, writes_per_sec=10)
+    with patch("finance_agent.rate_limiter.time.monotonic", return_value=0.0):
+        rl._last_refill = 0.0
+        rl._tokens["write"] = 1.0
+        result = rl._try_acquire("write", cost=0.2)
+    assert result is None
+    assert abs(rl._tokens["write"] - 0.8) < 0.001
+
+
+def test_try_acquire_insufficient_for_cost():
+    rl = RateLimiter(reads_per_sec=10, writes_per_sec=10)
+    with patch("finance_agent.rate_limiter.time.monotonic", return_value=0.0):
+        rl._last_refill = 0.0
+        rl._tokens["write"] = 1.5
+        wait = rl._try_acquire("write", cost=3.0)
+    assert wait is not None
+    # wait = (3.0 - 1.5) / 10 = 0.15
+    assert abs(wait - 0.15) < 0.001
+
+
+def test_acquire_write_sync_with_cost():
+    rl = RateLimiter(reads_per_sec=100, writes_per_sec=100)
+    rl.acquire_write_sync(cost=5.0)  # Should succeed immediately (100 tokens available)

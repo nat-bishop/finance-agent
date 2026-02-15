@@ -5,37 +5,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Development
+# Docker
 make build          # docker compose build
-make run            # run agent REPL in Docker
-make dev            # run with workspace volume mount (live edits)
+make run            # run agent TUI in Docker
 make shell          # bash into container
+make clean          # stop containers (workspace data preserved)
 make logs           # tail the agent log file (workspace/data/agent.log)
 
-# Data pipeline
+# Data pipeline (Docker)
 make collect        # snapshot market data to SQLite (both platforms)
 make signals        # run quantitative scans on collected data
 make scan           # collect + signals (full pipeline)
 make backup         # backup SQLite database
+make startup        # dump session state JSON (debug)
 
-# Testing
+# Code quality (local)
+make lint           # ruff check + format check + mypy
+make format         # ruff fix + format
+
+# Testing (local)
 make test           # run all tests
 make test-cov       # run tests with coverage report
 
-# Code quality
-uv run ruff check --fix src/       # auto-fix lint
-uv run ruff format src/            # auto-format
-uv run ruff check src/             # check lint (no auto-fix)
-uv run ruff format --check src/    # check format (no auto-fix)
-uv run mypy src/                   # type check
-uv run pre-commit run --all-files  # run all hooks
-
-# Dependencies
-uv sync --extra dev # install with dev deps
-uv lock             # regenerate lockfile
-
-# Run locally (outside Docker)
-uv run python -m finance_agent.main
+# Dangerous resets
+make nuke-db        # delete database file (with confirmation)
+make nuke-data      # delete all workspace data (with confirmation)
 ```
 
 ## Architecture

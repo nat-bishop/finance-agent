@@ -36,8 +36,8 @@ class TradingConfig:
     db_path: str = "/workspace/data/agent.db"
     backup_dir: str = "/workspace/backups"
     backup_max_age_hours: int = 24
-    kalshi_rate_limit_reads_per_sec: int = 20  # Kalshi Basic tier
-    kalshi_rate_limit_writes_per_sec: int = 10  # Kalshi Basic tier
+    kalshi_rate_limit_reads_per_sec: int = 30  # Kalshi Basic tier
+    kalshi_rate_limit_writes_per_sec: int = 30  # Kalshi Basic tier
     polymarket_rate_limit_reads_per_sec: int = 15  # tightest: /positions (150/10s)
     polymarket_rate_limit_writes_per_sec: int = 50  # tightest: DELETE /order (500/10s)
     recommendation_ttl_minutes: int = 60

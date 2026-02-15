@@ -164,7 +164,12 @@ def _collect_markets_by_status(
 
     logger.info("Collecting %s...", label)
     while True:
-        resp = client.search_markets(status=status, limit=200, cursor=cursor)
+        try:
+            resp = client.search_markets(status=status, limit=1000, cursor=cursor)
+        except Exception:
+            logger.warning("SDK validation error during %s collection, skipping page", label)
+            break
+
         markets = resp.get("markets", [])
         if not markets:
             break
@@ -210,7 +215,11 @@ def _collect_and_process_events(
     cursor: Any = None
 
     while True:
-        events, cursor = fetch_page(cursor)
+        try:
+            events, cursor = fetch_page(cursor)
+        except Exception:
+            logger.warning("SDK validation error during %s collection, skipping page", label)
+            break
         if not events:
             break
         for event in events:
@@ -229,7 +238,9 @@ def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
     """Collect event structures with nested markets via paginated GET /events."""
 
     def fetch_page(cursor: str | None) -> tuple[list, str | None]:
-        resp = client.get_events(status="open", with_nested_markets=True, limit=200, cursor=cursor)
+        resp = client.get_events(
+            status="open", with_nested_markets=True, limit=1000, cursor=cursor
+        )
         return resp.get("events", []), resp.get("cursor")
 
     def process_event(event: dict[str, Any]) -> dict[str, Any] | None:

@@ -8,7 +8,7 @@ from typing import Any
 from kalshi_python import Configuration, KalshiClient
 from kalshi_python.models import CreateOrderRequest
 
-from .api_base import BaseAPIClient
+from .api_base import BaseAPIClient, _thread_safe
 from .config import Credentials, TradingConfig
 
 
@@ -43,6 +43,7 @@ class KalshiAPIClient(BaseAPIClient):
 
     # -- Market data (read) --
 
+    @_thread_safe
     def search_markets(
         self,
         *,
@@ -68,20 +69,24 @@ class KalshiAPIClient(BaseAPIClient):
             kwargs["query"] = query
         return self._to_dict(self._client.get_markets(**kwargs))
 
+    @_thread_safe
     def get_market(self, ticker: str) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.get_market(ticker))
 
+    @_thread_safe
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.get_market_orderbook(ticker, depth=depth))
 
+    @_thread_safe
     def get_event(self, event_ticker: str, with_nested_markets: bool = True) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(
             self._client.get_event(event_ticker, with_nested_markets=with_nested_markets)
         )
 
+    @_thread_safe
     def get_trades(
         self,
         ticker: str | None = None,
@@ -93,6 +98,7 @@ class KalshiAPIClient(BaseAPIClient):
         kwargs: dict[str, Any] = {"limit": limit, **_optional(ticker=ticker, cursor=cursor)}
         return self._to_dict(self._client.get_trades(**kwargs))
 
+    @_thread_safe
     def get_candlesticks(
         self,
         ticker: str,
@@ -112,10 +118,12 @@ class KalshiAPIClient(BaseAPIClient):
 
     # -- Portfolio (read) --
 
+    @_thread_safe
     def get_balance(self) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.get_balance())
 
+    @_thread_safe
     def get_positions(
         self,
         *,
@@ -132,6 +140,7 @@ class KalshiAPIClient(BaseAPIClient):
         }
         return self._to_dict(self._client.get_positions(**kwargs))
 
+    @_thread_safe
     def get_fills(
         self,
         *,
@@ -143,6 +152,7 @@ class KalshiAPIClient(BaseAPIClient):
         kwargs: dict[str, Any] = {"limit": limit, **_optional(ticker=ticker, cursor=cursor)}
         return self._to_dict(self._client.get_fills(**kwargs))
 
+    @_thread_safe
     def get_settlements(
         self,
         *,
@@ -155,6 +165,7 @@ class KalshiAPIClient(BaseAPIClient):
 
     # -- Orders (write) --
 
+    @_thread_safe
     def get_orders(
         self,
         *,
@@ -166,6 +177,7 @@ class KalshiAPIClient(BaseAPIClient):
         kwargs: dict[str, Any] = {"limit": limit, **_optional(ticker=ticker, status=status)}
         return self._to_dict(self._client.get_orders(**kwargs))
 
+    @_thread_safe
     def create_order(
         self,
         *,
@@ -195,22 +207,27 @@ class KalshiAPIClient(BaseAPIClient):
         }
         return self._to_dict(self._client.create_order(CreateOrderRequest(**kwargs)))
 
+    @_thread_safe
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         self._rate_write()
         return self._to_dict(self._client.cancel_order(order_id))
 
     # -- Batch operations --
 
+    @_thread_safe
     def batch_create_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
-        """Batch create up to 20 orders. Each dict follows CreateOrderRequest fields."""
-        self._rate_write()
+        """Batch create up to 20 orders. Each order counts as 1 write transaction."""
+        self._rate_write(cost=len(orders))
         reqs = [CreateOrderRequest(**o) for o in orders]
         return self._to_dict(self._client.batch_create_orders(reqs))
 
+    @_thread_safe
     def batch_cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
-        self._rate_write()
+        """Batch cancel orders. Each cancel counts as 0.2 write transactions."""
+        self._rate_write(cost=len(order_ids) * 0.2)
         return self._to_dict(self._client.batch_cancel_orders(order_ids))
 
+    @_thread_safe
     def amend_order(
         self,
         order_id: str,
@@ -224,12 +241,14 @@ class KalshiAPIClient(BaseAPIClient):
 
     # -- Exchange status --
 
+    @_thread_safe
     def get_exchange_status(self) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.get_exchange_status())
 
     # -- Events (paginated) --
 
+    @_thread_safe
     def get_events(
         self,
         *,

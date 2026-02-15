@@ -20,4 +20,4 @@ RUN mkdir -p /workspace/{analysis,data,lib,backups}
 COPY workspace/lib/ /workspace/lib/
 
 WORKDIR /workspace
-ENTRYPOINT ["python", "-m", "finance_agent.main"]
+CMD ["python", "-m", "finance_agent.main"]

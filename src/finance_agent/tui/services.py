@@ -55,15 +55,30 @@ class TUIServices:
         loop = asyncio.get_running_loop()
         data: dict[str, Any] = {}
 
-        data["kalshi"] = {
-            "balance": await loop.run_in_executor(self._executor, self._kalshi.get_balance),
-            "positions": await loop.run_in_executor(self._executor, self._kalshi.get_positions),
-        }
+        # Fire all calls in parallel — per-exchange locks serialize same-exchange
+        coros = [
+            loop.run_in_executor(self._executor, self._kalshi.get_balance),
+            loop.run_in_executor(self._executor, self._kalshi.get_positions),
+        ]
+        labels = ["k_balance", "k_positions"]
+        if self._pm:
+            coros.extend(
+                [
+                    loop.run_in_executor(self._executor, self._pm.get_balance),
+                    loop.run_in_executor(self._executor, self._pm.get_positions),
+                ]
+            )
+            labels.extend(["pm_balance", "pm_positions"])
 
+        results = dict(zip(labels, await asyncio.gather(*coros), strict=True))
+        data["kalshi"] = {
+            "balance": results["k_balance"],
+            "positions": results["k_positions"],
+        }
         if self._pm:
             data["polymarket"] = {
-                "balance": await loop.run_in_executor(self._executor, self._pm.get_balance),
-                "positions": await loop.run_in_executor(self._executor, self._pm.get_positions),
+                "balance": results["pm_balance"],
+                "positions": results["pm_positions"],
             }
 
         return data
@@ -71,21 +86,25 @@ class TUIServices:
     async def get_orders(self, exchange: str | None = None) -> dict[str, Any]:
         """Fetch resting orders from exchange(s)."""
         loop = asyncio.get_running_loop()
-        data: dict[str, Any] = {}
 
+        coros: list = []
+        keys: list[str] = []
         if exchange in ("kalshi", None):
-            data["kalshi"] = await loop.run_in_executor(
-                self._executor,
-                lambda: self._kalshi.get_orders(status="resting"),
+            coros.append(
+                loop.run_in_executor(
+                    self._executor, lambda: self._kalshi.get_orders(status="resting")
+                )
             )
+            keys.append("kalshi")
         if exchange in ("polymarket", None) and self._pm:
             pm = self._pm
-            data["polymarket"] = await loop.run_in_executor(
-                self._executor,
-                lambda: pm.get_orders(status="resting"),
+            coros.append(
+                loop.run_in_executor(self._executor, lambda: pm.get_orders(status="resting"))
             )
+            keys.append("polymarket")
 
-        return data
+        values = await asyncio.gather(*coros)
+        return dict(zip(keys, values, strict=True))
 
     # ── Recommendations ───────────────────────────────────────────
 

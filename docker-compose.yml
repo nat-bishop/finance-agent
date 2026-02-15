@@ -8,5 +8,6 @@ services:
       - POLYMARKET_SECRET_KEY
     volumes:
       - ./workspace:/workspace
+      - ~/.kalshi/private_key.pem:/workspace/keys/private_key.pem:ro
     stdin_open: true
     tty: true
