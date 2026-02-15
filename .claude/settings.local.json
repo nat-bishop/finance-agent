@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/security_reminder_hook.py\"",
+            "command": "python .claude/hooks/security_reminder_hook.py",
             "timeout": 5
           }
         ]
