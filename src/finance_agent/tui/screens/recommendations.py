@@ -41,54 +41,43 @@ class RecommendationsScreen(Screen):
 
     async def _refresh(self) -> None:
         container = self.query_one("#recs-container", VerticalScroll)
+        await container.remove_children()
 
-        # Clear existing cards and messages
-        for card in container.query(RecCard):
-            card.remove()
-        for static in container.query(".rec-status-msg"):
-            static.remove()
-
-        # Get pending groups
+        # Pending groups
         pending = self._services.get_pending_groups()
-
         if not pending:
-            container.mount(Static("[dim]No pending recommendations[/]", classes="rec-status-msg"))
-
+            await container.mount(
+                Static("[dim]No pending recommendations[/]", classes="rec-status-msg")
+            )
         for group in pending:
-            container.mount(RecCard(group))
+            await container.mount(RecCard(group))
 
-        # Show recent non-pending
+        # Recent non-pending
         recent = self._services.get_recommendations(limit=20)
         non_pending = [g for g in recent if g.get("status") != "pending"]
         if non_pending:
-            container.mount(Static("\n[bold]Recent[/]", classes="rec-status-msg"))
+            await container.mount(Static("\n[bold]Recent[/]", classes="rec-status-msg"))
             for group in non_pending[:10]:
                 status = group.get("status", "?")
-                legs = group.get("legs", [])
                 leg_summary = ", ".join(
                     f"{lg.get('exchange', '?').upper()}: {lg.get('action', '?').upper()} "
                     f"{lg.get('side', '?').upper()}"
-                    for lg in legs[:3]
+                    for lg in group.get("legs", [])[:3]
                 )
-                container.mount(
-                    Static(
-                        f"  [{status}] {leg_summary}",
-                        classes="rec-status-msg",
-                    )
+                await container.mount(
+                    Static(f"  [{status}] {leg_summary}", classes="rec-status-msg")
                 )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id or ""
 
         if btn_id.startswith("exec-group-"):
-            group_id = int(btn_id[len("exec-group-") :])
-            group = self._services.db.get_group(group_id)
+            group = self._services.db.get_group(int(btn_id.removeprefix("exec-group-")))
             if group:
                 await self._confirm_and_execute(group)
 
         elif btn_id.startswith("reject-group-"):
-            group_id = int(btn_id[len("reject-group-") :])
-            await self._services.reject_group(group_id)
+            await self._services.reject_group(int(btn_id.removeprefix("reject-group-")))
             await self._refresh()
 
     async def _confirm_and_execute(self, group: dict[str, Any]) -> None:

@@ -348,22 +348,16 @@ def create_db_tools(
         },
     )
     async def recommend_trade(args: dict) -> dict:
-        group_id = db.log_recommendation_group(
+        legs = args.get("legs", [])
+        group_id, expires_at = db.log_recommendation_group(
             session_id=session_id,
             thesis=args.get("thesis"),
             estimated_edge_pct=args.get("estimated_edge_pct"),
             equivalence_notes=args.get("equivalence_notes"),
             signal_id=args.get("signal_id"),
-            legs=args.get("legs", []),
+            legs=legs,
             ttl_minutes=recommendation_ttl_minutes,
         )
-        group = db.get_group(group_id)
-        return _text(
-            {
-                "group_id": group_id,
-                "leg_count": len(args.get("legs", [])),
-                "expires_at": group["expires_at"] if group else None,
-            }
-        )
+        return _text({"group_id": group_id, "leg_count": len(legs), "expires_at": expires_at})
 
     return [recommend_trade]

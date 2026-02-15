@@ -142,29 +142,19 @@ class TUIServices:
         if not group:
             return []
 
+        legs = group.get("legs", [])
+
         # Validate limits
         error = self.validate_execution(group)
         if error:
             self.db.update_group_status(group_id, "rejected")
-            return [
-                {"leg_id": leg["id"], "status": "rejected", "error": error}
-                for leg in group.get("legs", [])
-            ]
+            return [{"leg_id": leg["id"], "status": "rejected", "error": error} for leg in legs]
 
         results = []
-        executed_count = 0
-        failed_count = 0
-
-        for leg in group.get("legs", []):
+        for leg in legs:
             try:
                 result = await self.execute_order(leg)
-                order_id = ""
-                # Try to extract order_id from exchange response
-                if isinstance(result, dict):
-                    order = result.get("order", result)
-                    order_id = str(
-                        order.get("order_id", order.get("id", order.get("orderId", "")))
-                    )
+                order_id = self._extract_order_id(result)
 
                 self.db.log_trade(
                     session_id=self._session_id,
@@ -180,35 +170,30 @@ class TUIServices:
                     exchange=leg["exchange"],
                 )
                 self.db.update_leg_status(leg["id"], "executed", order_id)
-                executed_count += 1
-                results.append(
-                    {
-                        "leg_id": leg["id"],
-                        "status": "executed",
-                        "order_id": order_id,
-                    }
-                )
+                results.append({"leg_id": leg["id"], "status": "executed", "order_id": order_id})
             except Exception as e:
                 self.db.update_leg_status(leg["id"], "rejected")
-                failed_count += 1
-                results.append(
-                    {
-                        "leg_id": leg["id"],
-                        "status": "failed",
-                        "error": str(e),
-                    }
-                )
+                results.append({"leg_id": leg["id"], "status": "failed", "error": str(e)})
 
-        # Determine group status
-        if executed_count == len(group.get("legs", [])):
+        # Derive group status from results
+        executed = sum(1 for r in results if r["status"] == "executed")
+        if executed == len(legs):
             group_status = "executed"
-        elif failed_count == len(group.get("legs", [])):
+        elif executed == 0:
             group_status = "rejected"
         else:
             group_status = "partial"
         self.db.update_group_status(group_id, group_status)
 
         return results
+
+    @staticmethod
+    def _extract_order_id(result: Any) -> str:
+        """Extract order_id from an exchange API response."""
+        if not isinstance(result, dict):
+            return ""
+        order = result.get("order", result)
+        return str(order.get("order_id", order.get("id", order.get("orderId", ""))))
 
     async def reject_group(self, group_id: int) -> None:
         """Mark an entire recommendation group as rejected."""

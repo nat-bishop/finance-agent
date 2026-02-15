@@ -8,11 +8,11 @@ Finds price discrepancies between platforms, verifies market equivalence, and pr
 
 **Three-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates `active_markets.md` (category-grouped listings), `signals.py` runs 5 quantitative scans to surface opportunities: arbitrage, wide spreads, theta decay, momentum, and calibration.
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates `active_markets.md` (category-grouped listings), `signals.py` runs 4 quantitative scans to surface opportunities: arbitrage, wide spreads, theta decay, and momentum.
 
-2. **Agent layer** (Claude) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade`. All state persists in SQLite for continuity across sessions.
+2. **Agent layer** (Claude) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade` with a `legs` array. All state persists in SQLite for continuity across sessions.
 
-3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. Replaces the raw REPL with 5 navigable screens.
+3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 5 navigable screens.
 
 ### TUI Screens
 
@@ -21,7 +21,7 @@ Finds price discrepancies between platforms, verifies market equivalence, and pr
 | F1 | Dashboard | Agent chat (left) + portfolio summary & pending recs sidebar (right) |
 | F2 | Recommendations | Full recommendation review with grouped execution and rejection |
 | F3 | Portfolio | Balances, positions, resting orders, recent trades across both exchanges |
-| F4 | Signals | Pending signals, calibration summary (Brier score), signal history |
+| F4 | Signals | Pending signal table |
 | F5 | History | Session list with drill-down to per-session trades and recommendations |
 
 ## Quickstart
@@ -60,9 +60,10 @@ Or locally: `make scan && uv run python -m finance_agent.main`
 
 ```bash
 make collect    # snapshot markets + events from both platforms to SQLite, generate active_markets.md
-make signals    # run 5 quantitative scans on collected data
+make signals    # run 4 quantitative scans on collected data
 make scan       # both in sequence
 make backup     # backup the database
+make startup    # print startup context JSON (debug)
 ```
 
 The collector and signal generator are standalone scripts with no LLM dependency. Run them on a schedule (e.g. hourly cron) to keep signals fresh.
@@ -75,13 +76,12 @@ The collector and signal generator are standalone scripts with no LLM dependency
 | `wide_spread` | Wide bid-ask with volume — limit order at mid captures half-spread |
 | `theta_decay` | Near-expiry (<3 days) markets with uncertain prices (20-80c) |
 | `momentum` | Consistent directional movement (3+ snapshots, >5c move) |
-| `calibration` | Meta-signal from prediction accuracy (Brier score, 10+ resolved) |
 
-Cross-platform matching (formerly `cross_platform_mismatch` and `structural_arb`) is now handled by the agent via semantic analysis of `active_markets.md`.
+Cross-platform matching is handled by the agent via semantic analysis of `active_markets.md`.
 
 ## Agent Tools
 
-10 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
+9 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
 
 ### Market Tools (8)
 
@@ -96,12 +96,11 @@ Cross-platform matching (formerly `cross_platform_mismatch` and `structural_arb`
 | `get_portfolio` | `exchange?`, `include_fills?`, `include_settlements?` | Omit exchange = both |
 | `get_orders` | `exchange?`, `market_id?`, `status?` | Omit exchange = all platforms |
 
-### Database Tools (2)
+### Database Tools (1)
 
 | Tool | Notes |
 |------|-------|
-| `log_prediction` | Record probability prediction for calibration (market_ticker, prediction, context) |
-| `recommend_trade` | Record trade recommendation with thesis, edge, confidence. Use `group_id` for paired arb legs. |
+| `recommend_trade` | Record a trade recommendation with `thesis`, `estimated_edge_pct`, optional `equivalence_notes`, and a `legs` array. Each leg specifies exchange, market_id, action, side, quantity, price_cents. |
 
 **Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`.
 
@@ -111,13 +110,13 @@ Cross-platform matching (formerly `cross_platform_mismatch` and `structural_arb`
 Agent recommends → TUI review → Execute or Reject
 ```
 
-1. **Agent calls `recommend_trade`** — creates a pending recommendation in SQLite with thesis, edge estimate, confidence, and optional `group_id` for paired arb legs. Recommendations expire after `recommendation_ttl_minutes` (default 60).
+1. **Agent calls `recommend_trade`** — creates a recommendation group with legs in SQLite. Group-level fields: thesis, estimated edge, equivalence notes. Per-leg fields: exchange, market, action, side, quantity, price. Recommendations expire after `recommendation_ttl_minutes` (default 60).
 
-2. **TUI displays pending recs** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Grouped by `group_id` for multi-leg arbs. Shows edge, confidence, expiry countdown.
+2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Shows edge, thesis, expiry countdown, and per-leg details.
 
-3. **Execute** — confirmation modal shows order details and cost. On confirm, the TUI service layer validates position limits, places orders via the exchange clients, logs trades for audit, and updates recommendation status.
+3. **Execute** — confirmation modal shows order details and cost. On confirm, the TUI service layer validates position limits, places orders via the exchange clients per leg, logs trades for audit, and updates leg + group status.
 
-4. **Reject** — marks the recommendation as rejected. Visible in history.
+4. **Reject** — marks all legs and the group as rejected. Visible in history.
 
 ## Analysis Flow
 
@@ -128,8 +127,8 @@ Discovery → Investigation → Verification → Sizing → Recommendation
 1. **Discovery** — Agent reads `active_markets.md`, finds cross-platform connections by category; also reviews pre-computed arithmetic signals
 2. **Investigation** — Agent follows per-signal protocol (semantic matching, arbitrage, etc.)
 3. **Verification** — Settlement equivalence, executable orderbook prices
-4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, `kelly_size.py` for position size
-5. **Recommendation** — Agent calls `recommend_trade` for each leg, stored in DB for review
+4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, orderbook depth for position size
+5. **Recommendation** — Agent calls `recommend_trade` with all legs in one call, stored in DB for review
 
 ## Configuration
 
@@ -149,7 +148,7 @@ All settings are configured via environment variables (`.env` file) with sensibl
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto-migrated on startup). 9 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (single migration, auto-run on startup). 9 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
@@ -157,8 +156,8 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 | `events` | collector | signals, agent | (event_ticker, exchange) PK, markets_json |
 | `signals` | signals | agent, TUI | scan_type, exchange, signal_strength, status |
 | `trades` | TUI executor | agent, TUI | exchange, ticker, action, side, price_cents |
-| `recommendations` | agent | TUI | exchange, market_id, action, side, status, group_id |
-| `predictions` | agent | signals, startup | prediction, outcome, market_ticker |
+| `recommendation_groups` | agent | TUI | session_id, thesis, estimated_edge_pct, status |
+| `recommendation_legs` | agent | TUI | group_id FK, exchange, market_id, action, side, price_cents |
 | `portfolio_snapshots` | TUI | TUI | balance_usd, positions_json |
 | `sessions` | main | agent, TUI | started_at, summary, trades_placed, recommendations_made |
 | `watchlist` | legacy | — | (ticker, exchange) PK — migrated to `/workspace/data/watchlist.md` |
@@ -169,7 +168,6 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 /workspace/
   lib/
     normalize_prices.py   # Cross-platform price comparison with fee-adjusted edge
-    kelly_size.py         # Kelly criterion position sizing
     match_markets.py      # Bulk title similarity matching across platforms
   analysis/               # Agent-written analysis (writable)
   data/
@@ -186,13 +184,13 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
   config.py            # Pydantic settings (env vars override defaults)
-  database.py          # SQLite (WAL mode), Alembic migrations, recommendation + trade CRUD
-  tools.py             # Unified MCP tool factories (8 market + 2 DB)
+  database.py          # SQLite (WAL mode), Alembic migrations, recommendation groups+legs CRUD
+  tools.py             # Unified MCP tool factories (8 market + 1 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
   polymarket_client.py # Polymarket US SDK wrapper, intent maps
   hooks.py             # Recommendation counting, session lifecycle
   collector.py         # Market data collector (both platforms, market listings)
-  signals.py           # Signal generator (5 scan types)
+  signals.py           # Signal generator (4 scan types)
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations
@@ -206,12 +204,12 @@ src/finance_agent/
       dashboard.py     # F1: agent chat + sidebar (portfolio + pending recs)
       recommendations.py # F2: full recommendation review + execution
       portfolio.py     # F3: balances, positions, orders
-      signals.py       # F4: signal table + calibration
+      signals.py       # F4: signal table
       history.py       # F5: session history with drill-down
     widgets/
       agent_chat.py    # RichLog + Input with async streaming
-      rec_card.py      # Single recommendation card
-      rec_list.py      # Grouped recommendation list
+      rec_card.py      # Single recommendation group card
+      rec_list.py      # Recommendation group list
       portfolio_panel.py # Compact balance summary
       status_bar.py    # Session info bar
       ask_modal.py     # Agent question dialog

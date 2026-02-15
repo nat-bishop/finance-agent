@@ -176,8 +176,8 @@ class AgentDatabase:
         signal_id: int | None = None,
         legs: list[dict[str, Any]] | None = None,
         ttl_minutes: int = 60,
-    ) -> int:
-        """Insert a recommendation group + legs atomically. Returns group_id."""
+    ) -> tuple[int, str]:
+        """Insert a recommendation group + legs atomically. Returns (group_id, expires_at)."""
         now = _now()
         expires_at = (datetime.fromisoformat(now) + timedelta(minutes=ttl_minutes)).isoformat()
         cursor = self.execute(
@@ -214,41 +214,33 @@ class AgentDatabase:
                     leg["price_cents"],
                 ),
             )
-        return group_id
+        return group_id, expires_at
+
+    def _attach_legs(self, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fetch and attach legs to each group dict."""
+        for group in groups:
+            group["legs"] = self.query(
+                """SELECT * FROM recommendation_legs
+                   WHERE group_id = ? ORDER BY leg_index""",
+                (group["id"],),
+            )
+        return groups
 
     def get_pending_groups(self) -> list[dict[str, Any]]:
         """Return pending groups with nested legs list."""
         groups = self.query(
-            """SELECT id, session_id, created_at, thesis, equivalence_notes,
-                      estimated_edge_pct, signal_id, status, expires_at
-               FROM recommendation_groups
+            """SELECT * FROM recommendation_groups
                WHERE status = 'pending'
                ORDER BY created_at DESC"""
         )
-        for group in groups:
-            group["legs"] = self.query(
-                """SELECT id, leg_index, exchange, market_id, market_title,
-                          action, side, quantity, price_cents, order_type,
-                          status, order_id
-                   FROM recommendation_legs
-                   WHERE group_id = ?
-                   ORDER BY leg_index""",
-                (group["id"],),
-            )
-        return groups
+        return self._attach_legs(groups)
 
     def get_group(self, group_id: int) -> dict[str, Any] | None:
         """Return a single group with legs."""
         rows = self.query("SELECT * FROM recommendation_groups WHERE id = ?", (group_id,))
         if not rows:
             return None
-        group = rows[0]
-        group["legs"] = self.query(
-            """SELECT * FROM recommendation_legs
-               WHERE group_id = ? ORDER BY leg_index""",
-            (group_id,),
-        )
-        return group
+        return self._attach_legs(rows)[0]
 
     def update_leg_status(self, leg_id: int, status: str, order_id: str | None = None) -> None:
         """Update a single leg's status after exchange API call."""
@@ -434,13 +426,7 @@ class AgentDatabase:
                 WHERE {where} ORDER BY g.created_at DESC LIMIT ?""",
             (*params, limit),
         )
-        for group in groups:
-            group["legs"] = self.query(
-                """SELECT * FROM recommendation_legs
-                   WHERE group_id = ? ORDER BY leg_index""",
-                (group["id"],),
-            )
-        return groups
+        return self._attach_legs(groups)
 
     def get_trades(
         self,

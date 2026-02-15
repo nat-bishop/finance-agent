@@ -107,19 +107,18 @@ class DashboardScreen(Screen):
         btn_id = event.button.id or ""
 
         if btn_id.startswith("exec-group-"):
-            group_id = int(btn_id[len("exec-group-") :])
+            group_id = int(btn_id.removeprefix("exec-group-"))
             group = self._services.db.get_group(group_id)
             if group:
-                self.app.push_screen(
-                    ConfirmModal(group),
-                    callback=lambda ok: (
-                        self.run_worker(self._execute_and_refresh(group_id)) if ok else None
-                    ),
-                )
+
+                def on_confirm(ok: bool) -> None:
+                    if ok:
+                        self.run_worker(self._execute_and_refresh(group_id))
+
+                self.app.push_screen(ConfirmModal(group), callback=on_confirm)
 
         elif btn_id.startswith("reject-group-"):
-            group_id = int(btn_id[len("reject-group-") :])
-            await self._services.reject_group(group_id)
+            await self._services.reject_group(int(btn_id.removeprefix("reject-group-")))
             groups = self._services.get_pending_groups()
             self.query_one("#rec-list", RecList).update_recs(groups)
 
@@ -131,10 +130,7 @@ class DashboardScreen(Screen):
     def on_ask_user_question_request(self, event: AskUserQuestionRequest) -> None:
         from ..widgets.ask_modal import AskModal
 
-        def handle_result(answers: dict[str, str] | None) -> None:
-            if answers is not None:
-                event.future.set_result(answers)
-            else:
-                event.future.set_result({})
-
-        self.app.push_screen(AskModal(event.questions), callback=handle_result)
+        self.app.push_screen(
+            AskModal(event.questions),
+            callback=lambda answers: event.future.set_result(answers or {}),
+        )

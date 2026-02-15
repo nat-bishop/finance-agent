@@ -64,31 +64,22 @@ class RecCard(Vertical):
             )
 
         # Group-level details
-        details = []
         if self.group.get("estimated_edge_pct"):
-            details.append(f"Edge: {self.group['estimated_edge_pct']:.1f}%")
-        if self.group.get("thesis"):
-            thesis = self.group["thesis"][:80]
-            if len(self.group["thesis"]) > 80:
-                thesis += "..."
-            details.append(thesis)
-        if details:
-            yield Static(" | ".join(details[:1]), classes="rec-detail")
-            if len(details) > 1:
-                yield Static(details[1], classes="rec-detail")
+            yield Static(f"Edge: {self.group['estimated_edge_pct']:.1f}%", classes="rec-detail")
+        if thesis := self.group.get("thesis"):
+            yield Static(
+                f"{thesis[:80]}..." if len(thesis) > 80 else thesis,
+                classes="rec-detail",
+            )
 
         # Expiry
-        expires_at = self.group.get("expires_at")
-        if expires_at:
+        if expires_at := self.group.get("expires_at"):
             try:
-                exp = datetime.fromisoformat(expires_at)
-                now = datetime.now(UTC)
-                remaining = exp - now
-                mins = int(remaining.total_seconds() / 60)
-                if mins > 0:
-                    yield Static(f"Expires in {mins}m", classes="rec-detail")
-                else:
-                    yield Static("[bold red]EXPIRED[/]", classes="rec-detail")
+                mins = int(
+                    (datetime.fromisoformat(expires_at) - datetime.now(UTC)).total_seconds() / 60
+                )
+                label = f"Expires in {mins}m" if mins > 0 else "[bold red]EXPIRED[/]"
+                yield Static(label, classes="rec-detail")
             except (ValueError, TypeError):
                 pass
 

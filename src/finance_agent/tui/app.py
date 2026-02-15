@@ -73,11 +73,11 @@ class FinanceApp(App):
         )
         active_markets = Path("/workspace/data/active_markets.md")
         startup_state["data_freshness"] = {
-            "active_markets_updated_at": (
-                datetime.fromtimestamp(active_markets.stat().st_mtime, tz=UTC).isoformat()
-                if active_markets.exists()
-                else None
-            ),
+            "active_markets_updated_at": datetime.fromtimestamp(
+                active_markets.stat().st_mtime, tz=UTC
+            ).isoformat()
+            if active_markets.exists()
+            else None,
         }
 
         # Clear session scratch file
@@ -160,31 +160,20 @@ class FinanceApp(App):
         startup_msg = f"BEGIN_SESSION\n\n{json.dumps(startup_state, indent=2)}"
 
         # Install all screens
-        self.install_screen(
-            DashboardScreen(
+        screens = {
+            "dashboard": DashboardScreen(
                 client=client,
                 services=services,
                 startup_msg=startup_msg,
                 session_id=session_id,
             ),
-            name="dashboard",
-        )
-        self.install_screen(
-            RecommendationsScreen(services=services),
-            name="recommendations",
-        )
-        self.install_screen(
-            PortfolioScreen(services=services),
-            name="portfolio",
-        )
-        self.install_screen(
-            SignalsScreen(services=services),
-            name="signals",
-        )
-        self.install_screen(
-            HistoryScreen(services=services),
-            name="history",
-        )
+            "recommendations": RecommendationsScreen(services=services),
+            "portfolio": PortfolioScreen(services=services),
+            "signals": SignalsScreen(services=services),
+            "history": HistoryScreen(services=services),
+        }
+        for name, screen in screens.items():
+            self.install_screen(screen, name=name)
         self.push_screen("dashboard")
 
     async def on_unmount(self) -> None:
