@@ -1,4 +1,7 @@
-"""SQLite database for agent state, market data, signals, and trades."""
+"""SQLite database for agent state, market data, signals, and trades.
+
+Uses SQLAlchemy ORM with Alembic autogenerate migrations.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,21 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import create_engine, event, insert, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import sessionmaker
+
+from finance_agent.models import (
+    Event,
+    MarketSnapshot,
+    PortfolioSnapshot,
+    RecommendationGroup,
+    RecommendationLeg,
+    Session,
+    Signal,
+    Trade,
+)
 
 
 def _now() -> str:
@@ -24,15 +42,22 @@ class AgentDatabase:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=30,
-            check_same_thread=False,
+
+        self._engine = create_engine(
+            f"sqlite:///{self.db_path}",
+            connect_args={"timeout": 30, "check_same_thread": False},
+            echo=False,
         )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
+
+        @event.listens_for(self._engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
+
+        self._session_factory = sessionmaker(bind=self._engine)
         self._run_migrations()
 
     def _run_migrations(self) -> None:
@@ -43,56 +68,30 @@ class AgentDatabase:
         config = Config()
         config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
         config.set_main_option("sqlalchemy.url", f"sqlite:///{self.db_path}")
-
-        # If tables exist but no alembic_version, stamp with initial revision
-        cursor = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
-        )
-        has_alembic = cursor.fetchone() is not None
-        if not has_alembic:
-            cursor2 = self._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
-            )
-            has_tables = cursor2.fetchone() is not None
-            if has_tables:
-                command.stamp(config, "0001")
-
         command.upgrade(config, "head")
 
     def close(self) -> None:
-        self._conn.close()
+        self._engine.dispose()
 
-    # ── Generic query ────────────────────────────────────────────
+    # ── Generic query (escape hatch for raw SQL) ──────────────
 
     def query(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         """Execute a read-only SELECT query. Returns list of dicts."""
         sql_stripped = sql.strip().upper()
         if not sql_stripped.startswith("SELECT") and not sql_stripped.startswith("WITH"):
             raise ValueError("Only SELECT / WITH queries allowed via db_query")
-        cursor = self._conn.execute(sql, params)
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
+        with self._engine.connect() as conn:
+            result = conn.exec_driver_sql(sql, params)
+            return [dict(row._mapping) for row in result]
 
-    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
-        """Execute a write query (INSERT/UPDATE/DELETE)."""
-        cursor = self._conn.execute(sql, params)
-        self._conn.commit()
-        return cursor
-
-    def executemany(self, sql: str, params_list: list[tuple]) -> None:
-        """Execute a parameterized query for many rows."""
-        self._conn.executemany(sql, params_list)
-        self._conn.commit()
-
-    # ── Sessions ─────────────────────────────────────────────────
+    # ── Sessions ──────────────────────────────────────────────
 
     def create_session(self) -> str:
         """Create a new session, return its ID."""
         session_id = str(uuid.uuid4())[:8]
-        self.execute(
-            "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
-            (session_id, _now()),
-        )
+        with self._session_factory() as session:
+            session.add(Session(id=session_id, started_at=_now()))
+            session.commit()
         return session_id
 
     def end_session(
@@ -103,15 +102,17 @@ class AgentDatabase:
         recommendations_made: int = 0,
         pnl_usd: float | None = None,
     ) -> None:
-        self.execute(
-            """UPDATE sessions
-               SET ended_at = ?, summary = ?, trades_placed = ?,
-                   recommendations_made = ?, pnl_usd = ?
-               WHERE id = ?""",
-            (_now(), summary, trades_placed, recommendations_made, pnl_usd, session_id),
-        )
+        with self._session_factory() as session:
+            row = session.get(Session, session_id)
+            if row:
+                row.ended_at = _now()
+                row.summary = summary
+                row.trades_placed = trades_placed
+                row.recommendations_made = recommendations_made
+                row.pnl_usd = pnl_usd
+                session.commit()
 
-    # ── Trades (lean schema) ─────────────────────────────────────
+    # ── Trades (lean schema) ──────────────────────────────────
 
     def log_trade(
         self,
@@ -127,29 +128,26 @@ class AgentDatabase:
         result_json: str | None = None,
         exchange: str = "kalshi",
     ) -> int:
-        cursor = self.execute(
-            """INSERT INTO trades
-               (session_id, exchange, timestamp, ticker, action, side, count, price_cents,
-                order_type, order_id, status, result_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id,
-                exchange,
-                _now(),
-                ticker,
-                action,
-                side,
-                count,
-                price_cents,
-                order_type,
-                order_id,
-                status,
-                result_json,
-            ),
+        trade = Trade(
+            session_id=session_id,
+            exchange=exchange,
+            timestamp=_now(),
+            ticker=ticker,
+            action=action,
+            side=side,
+            count=count,
+            price_cents=price_cents,
+            order_type=order_type,
+            order_id=order_id,
+            status=status,
+            result_json=result_json,
         )
-        return cursor.lastrowid or 0
+        with self._session_factory() as session:
+            session.add(trade)
+            session.commit()
+            return trade.id  # type: ignore[return-value]
 
-    # ── Portfolio snapshots ──────────────────────────────────────
+    # ── Portfolio snapshots ───────────────────────────────────
 
     def log_portfolio_snapshot(
         self,
@@ -158,14 +156,19 @@ class AgentDatabase:
         positions_json: str | None = None,
         open_orders_json: str | None = None,
     ) -> None:
-        self.execute(
-            """INSERT INTO portfolio_snapshots
-               (captured_at, session_id, balance_usd, positions_json, open_orders_json)
-               VALUES (?, ?, ?, ?, ?)""",
-            (_now(), session_id, balance_usd, positions_json, open_orders_json),
-        )
+        with self._session_factory() as session:
+            session.add(
+                PortfolioSnapshot(
+                    captured_at=_now(),
+                    session_id=session_id,
+                    balance_usd=balance_usd,
+                    positions_json=positions_json,
+                    open_orders_json=open_orders_json,
+                )
+            )
+            session.commit()
 
-    # ── Recommendation Groups ────────────────────────────────────
+    # ── Recommendation Groups ─────────────────────────────────
 
     def log_recommendation_group(
         self,
@@ -180,129 +183,91 @@ class AgentDatabase:
         """Insert a recommendation group + legs atomically. Returns (group_id, expires_at)."""
         now = _now()
         expires_at = (datetime.fromisoformat(now) + timedelta(minutes=ttl_minutes)).isoformat()
-        cursor = self.execute(
-            """INSERT INTO recommendation_groups
-               (session_id, created_at, thesis, equivalence_notes,
-                estimated_edge_pct, signal_id, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id,
-                now,
-                thesis,
-                equivalence_notes,
-                estimated_edge_pct,
-                signal_id,
-                expires_at,
-            ),
-        )
-        group_id = cursor.lastrowid or 0
-        for i, leg in enumerate(legs or []):
-            self.execute(
-                """INSERT INTO recommendation_legs
-                   (group_id, leg_index, exchange, market_id, market_title,
-                    action, side, quantity, price_cents)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    group_id,
-                    i,
-                    leg["exchange"],
-                    leg["market_id"],
-                    leg.get("market_title"),
-                    leg["action"],
-                    leg["side"],
-                    leg["quantity"],
-                    leg["price_cents"],
-                ),
-            )
-        return group_id, expires_at
 
-    def _attach_legs(self, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Fetch and attach legs to each group dict."""
-        for group in groups:
-            group["legs"] = self.query(
-                """SELECT * FROM recommendation_legs
-                   WHERE group_id = ? ORDER BY leg_index""",
-                (group["id"],),
+        group = RecommendationGroup(
+            session_id=session_id,
+            created_at=now,
+            thesis=thesis,
+            equivalence_notes=equivalence_notes,
+            estimated_edge_pct=estimated_edge_pct,
+            signal_id=signal_id,
+            expires_at=expires_at,
+        )
+        for i, leg in enumerate(legs or []):
+            group.legs.append(
+                RecommendationLeg(
+                    leg_index=i,
+                    exchange=leg["exchange"],
+                    market_id=leg["market_id"],
+                    market_title=leg.get("market_title"),
+                    action=leg["action"],
+                    side=leg["side"],
+                    quantity=leg["quantity"],
+                    price_cents=leg["price_cents"],
+                )
             )
-        return groups
+
+        with self._session_factory() as session:
+            session.add(group)
+            session.commit()
+            group_id = group.id
+
+        return group_id, expires_at  # type: ignore[return-value]
 
     def get_pending_groups(self) -> list[dict[str, Any]]:
         """Return pending groups with nested legs list."""
-        groups = self.query(
-            """SELECT * FROM recommendation_groups
-               WHERE status = 'pending'
-               ORDER BY created_at DESC"""
-        )
-        return self._attach_legs(groups)
+        with self._session_factory() as session:
+            stmt = (
+                select(RecommendationGroup)
+                .where(RecommendationGroup.status == "pending")
+                .order_by(RecommendationGroup.created_at.desc())
+            )
+            groups = session.scalars(stmt).all()
+            return [g.to_dict() for g in groups]
 
     def get_group(self, group_id: int) -> dict[str, Any] | None:
         """Return a single group with legs."""
-        rows = self.query("SELECT * FROM recommendation_groups WHERE id = ?", (group_id,))
-        if not rows:
-            return None
-        return self._attach_legs(rows)[0]
+        with self._session_factory() as session:
+            group = session.get(RecommendationGroup, group_id)
+            if not group:
+                return None
+            return group.to_dict()
 
     def update_leg_status(self, leg_id: int, status: str, order_id: str | None = None) -> None:
         """Update a single leg's status after exchange API call."""
-        self.execute(
-            """UPDATE recommendation_legs
-               SET status = ?, order_id = ?, executed_at = ?
-               WHERE id = ?""",
-            (status, order_id, _now() if status == "executed" else None, leg_id),
-        )
+        with self._session_factory() as session:
+            leg = session.get(RecommendationLeg, leg_id)
+            if leg:
+                leg.status = status
+                leg.order_id = order_id
+                leg.executed_at = _now() if status == "executed" else None
+                session.commit()
 
     def update_group_status(self, group_id: int, status: str) -> None:
         """Set group status. Also sets reviewed_at or executed_at timestamp."""
-        ts_col = "executed_at" if status == "executed" else "reviewed_at"
-        self.execute(
-            f"""UPDATE recommendation_groups
-               SET status = ?, {ts_col} = ?
-               WHERE id = ?""",
-            (status, _now(), group_id),
-        )
+        with self._session_factory() as session:
+            group = session.get(RecommendationGroup, group_id)
+            if group:
+                group.status = status
+                ts_col = "executed_at" if status == "executed" else "reviewed_at"
+                setattr(group, ts_col, _now())
+                session.commit()
 
-    # ── Market snapshots (bulk insert for collector) ─────────────
+    # ── Market snapshots (bulk insert for collector) ──────────
+
+    _SNAPSHOT_COLS = {c.name for c in MarketSnapshot.__table__.columns} - {"id"}
 
     def insert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
         """Bulk insert market snapshots. Returns count inserted."""
         if not rows:
             return 0
-        cols = [
-            "captured_at",
-            "source",
-            "exchange",
-            "ticker",
-            "event_ticker",
-            "series_ticker",
-            "title",
-            "category",
-            "status",
-            "yes_bid",
-            "yes_ask",
-            "no_bid",
-            "no_ask",
-            "last_price",
-            "volume",
-            "volume_24h",
-            "open_interest",
-            "spread_cents",
-            "mid_price_cents",
-            "implied_probability",
-            "days_to_expiration",
-            "close_time",
-            "settlement_value",
-            "markets_in_event",
-            "raw_json",
-        ]
-        placeholders = ", ".join(["?"] * len(cols))
-        params_list = [tuple(row.get(c) for c in cols) for row in rows]
-        self.executemany(
-            f"INSERT INTO market_snapshots ({', '.join(cols)}) VALUES ({placeholders})",
-            params_list,
-        )
-        return len(params_list)
+        filtered = [{k: v for k, v in row.items() if k in self._SNAPSHOT_COLS} for row in rows]
+        with self._session_factory() as session:
+            session.execute(insert(MarketSnapshot), filtered)
+            session.commit()
+        return len(filtered)
 
-    # ── Events (upsert for collector) ────────────────────────────
+    # ── Events (upsert for collector) ─────────────────────────
 
     def upsert_event(
         self,
@@ -314,95 +279,103 @@ class AgentDatabase:
         mutually_exclusive: bool | None = None,
         markets_json: str | None = None,
     ) -> None:
-        self.execute(
-            """INSERT INTO events
-               (event_ticker, exchange, series_ticker, title, category, mutually_exclusive,
-                last_updated, markets_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(event_ticker, exchange) DO UPDATE SET
-                 series_ticker = excluded.series_ticker,
-                 title = excluded.title,
-                 category = excluded.category,
-                 mutually_exclusive = excluded.mutually_exclusive,
-                 last_updated = excluded.last_updated,
-                 markets_json = excluded.markets_json""",
-            (
-                event_ticker,
-                exchange,
-                series_ticker,
-                title,
-                category,
-                1 if mutually_exclusive else 0,
-                _now(),
-                markets_json,
-            ),
+        values = {
+            "event_ticker": event_ticker,
+            "exchange": exchange,
+            "series_ticker": series_ticker,
+            "title": title,
+            "category": category,
+            "mutually_exclusive": 1 if mutually_exclusive else 0,
+            "last_updated": _now(),
+            "markets_json": markets_json,
+        }
+        stmt = sqlite_insert(Event).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["event_ticker", "exchange"],
+            set_={
+                "series_ticker": stmt.excluded.series_ticker,
+                "title": stmt.excluded.title,
+                "category": stmt.excluded.category,
+                "mutually_exclusive": stmt.excluded.mutually_exclusive,
+                "last_updated": stmt.excluded.last_updated,
+                "markets_json": stmt.excluded.markets_json,
+            },
         )
+        with self._session_factory() as session:
+            session.execute(stmt)
+            session.commit()
 
-    # ── Signals (bulk insert for signal generator) ───────────────
+    # ── Signals (bulk insert for signal generator) ────────────
 
     def insert_signals(self, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
         now = _now()
-        params_list = []
+        mapped_rows = []
         for row in rows:
             details = row.get("details_json")
             if isinstance(details, dict):
                 details = json.dumps(details)
-            params_list.append(
-                (
-                    now,
-                    row["scan_type"],
-                    row.get("exchange", "kalshi"),
-                    row["ticker"],
-                    row.get("event_ticker"),
-                    row.get("signal_strength"),
-                    row.get("estimated_edge_pct"),
-                    details,
-                )
+            mapped_rows.append(
+                {
+                    "generated_at": now,
+                    "scan_type": row["scan_type"],
+                    "exchange": row.get("exchange", "kalshi"),
+                    "ticker": row["ticker"],
+                    "event_ticker": row.get("event_ticker"),
+                    "signal_strength": row.get("signal_strength"),
+                    "estimated_edge_pct": row.get("estimated_edge_pct"),
+                    "details_json": details,
+                }
             )
-        self.executemany(
-            """INSERT INTO signals
-               (generated_at, scan_type, exchange, ticker, event_ticker,
-                signal_strength, estimated_edge_pct, details_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            params_list,
-        )
-        return len(params_list)
+        with self._session_factory() as session:
+            session.execute(insert(Signal), mapped_rows)
+            session.commit()
+        return len(mapped_rows)
 
     def expire_old_signals(self, max_age_hours: int = 48) -> int:
-        cursor = self.execute(
-            """UPDATE signals SET status = 'expired'
-               WHERE status = 'pending'
-               AND generated_at < datetime(?, '-' || ? || ' hours')""",
-            (_now(), max_age_hours),
-        )
-        return cursor.rowcount
+        cutoff = (datetime.now(UTC) - timedelta(hours=max_age_hours)).isoformat()
+        with self._session_factory() as session:
+            result = session.execute(
+                update(Signal)
+                .where(Signal.status == "pending", Signal.generated_at < cutoff)
+                .values(status="expired")
+            )
+            session.commit()
+            return result.rowcount  # type: ignore[return-value]
 
-    # ── Session state (for startup) ──────────────────────────────
+    # ── Session state (for startup) ───────────────────────────
 
     def get_session_state(self) -> dict[str, Any]:
-        last_sessions = self.query(
-            """SELECT id, ended_at, summary, trades_placed, pnl_usd
-               FROM sessions WHERE ended_at IS NOT NULL
-               ORDER BY ended_at DESC LIMIT 1"""
-        )
-        return {
-            "last_session": last_sessions[0] if last_sessions else None,
-            "pending_signals": self.query(
-                """SELECT scan_type, exchange, ticker, event_ticker,
-                          signal_strength, estimated_edge_pct
-                   FROM signals WHERE status = 'pending'
-                   ORDER BY signal_strength DESC LIMIT 10"""
-            ),
-            "unreconciled_trades": self.query(
-                """SELECT exchange, ticker, action, side, count, price_cents, order_id
-                   FROM trades WHERE status = 'placed'
-                   ORDER BY timestamp DESC LIMIT 10"""
-            ),
-        }
+        with self._session_factory() as session:
+            last_session_row = session.scalars(
+                select(Session)
+                .where(Session.ended_at.isnot(None))
+                .order_by(Session.ended_at.desc())
+                .limit(1)
+            ).first()
 
-    # ── TUI query methods ────────────────────────────────────────
+            pending_signals = session.scalars(
+                select(Signal)
+                .where(Signal.status == "pending")
+                .order_by(Signal.signal_strength.desc())
+                .limit(10)
+            ).all()
+
+            unreconciled_trades = session.scalars(
+                select(Trade)
+                .where(Trade.status == "placed")
+                .order_by(Trade.timestamp.desc())
+                .limit(10)
+            ).all()
+
+            return {
+                "last_session": last_session_row.to_dict() if last_session_row else None,
+                "pending_signals": [s.to_dict() for s in pending_signals],
+                "unreconciled_trades": [t.to_dict() for t in unreconciled_trades],
+            }
+
+    # ── TUI query methods ─────────────────────────────────────
 
     def get_recommendations(
         self,
@@ -412,21 +385,15 @@ class AgentDatabase:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Filtered group query for TUI screens. Returns groups with nested legs."""
-        clauses: list[str] = ["1=1"]
-        params: list[Any] = []
-        if status:
-            clauses.append("g.status = ?")
-            params.append(status)
-        if session_id:
-            clauses.append("g.session_id = ?")
-            params.append(session_id)
-        where = " AND ".join(clauses)
-        groups = self.query(
-            f"""SELECT g.* FROM recommendation_groups g
-                WHERE {where} ORDER BY g.created_at DESC LIMIT ?""",
-            (*params, limit),
-        )
-        return self._attach_legs(groups)
+        with self._session_factory() as session:
+            stmt = select(RecommendationGroup).order_by(RecommendationGroup.created_at.desc())
+            if status:
+                stmt = stmt.where(RecommendationGroup.status == status)
+            if session_id:
+                stmt = stmt.where(RecommendationGroup.session_id == session_id)
+            stmt = stmt.limit(limit)
+            groups = session.scalars(stmt).all()
+            return [g.to_dict() for g in groups]
 
     def get_trades(
         self,
@@ -437,31 +404,24 @@ class AgentDatabase:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Filtered trade query for TUI screens."""
-        clauses, params = ["1=1"], []
-        if session_id:
-            clauses.append("session_id = ?")
-            params.append(session_id)
-        if exchange:
-            clauses.append("exchange = ?")
-            params.append(exchange)
-        if status:
-            clauses.append("status = ?")
-            params.append(status)
-        where = " AND ".join(clauses)
-        return self.query(
-            f"""SELECT * FROM trades WHERE {where}
-                ORDER BY timestamp DESC LIMIT ?""",
-            (*params, limit),
-        )
+        with self._session_factory() as session:
+            stmt = select(Trade).order_by(Trade.timestamp.desc())
+            if session_id:
+                stmt = stmt.where(Trade.session_id == session_id)
+            if exchange:
+                stmt = stmt.where(Trade.exchange == exchange)
+            if status:
+                stmt = stmt.where(Trade.status == status)
+            stmt = stmt.limit(limit)
+            trades = session.scalars(stmt).all()
+            return [t.to_dict() for t in trades]
 
     def get_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         """Session listing for history screen."""
-        return self.query(
-            """SELECT id, started_at, ended_at, summary,
-                      trades_placed, recommendations_made, pnl_usd
-               FROM sessions ORDER BY started_at DESC LIMIT ?""",
-            (limit,),
-        )
+        with self._session_factory() as session:
+            stmt = select(Session).order_by(Session.started_at.desc()).limit(limit)
+            rows = session.scalars(stmt).all()
+            return [r.to_dict() for r in rows]
 
     def get_signals(
         self,
@@ -471,19 +431,15 @@ class AgentDatabase:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Filtered signal query for TUI screen."""
-        clauses, params = ["1=1"], []
-        if status:
-            clauses.append("status = ?")
-            params.append(status)
-        if scan_type:
-            clauses.append("scan_type = ?")
-            params.append(scan_type)
-        where = " AND ".join(clauses)
-        return self.query(
-            f"""SELECT * FROM signals WHERE {where}
-                ORDER BY signal_strength DESC LIMIT ?""",
-            (*params, limit),
-        )
+        with self._session_factory() as session:
+            stmt = select(Signal).order_by(Signal.signal_strength.desc())
+            if status:
+                stmt = stmt.where(Signal.status == status)
+            if scan_type:
+                stmt = stmt.where(Signal.scan_type == scan_type)
+            stmt = stmt.limit(limit)
+            rows = session.scalars(stmt).all()
+            return [r.to_dict() for r in rows]
 
     def update_trade_status(
         self,
@@ -492,12 +448,15 @@ class AgentDatabase:
         result_json: str | None = None,
     ) -> None:
         """Update trade status after order fills/cancels."""
-        self.execute(
-            "UPDATE trades SET status = ?, result_json = COALESCE(?, result_json) WHERE id = ?",
-            (status, result_json, trade_id),
-        )
+        with self._session_factory() as session:
+            trade = session.get(Trade, trade_id)
+            if trade:
+                trade.status = status
+                if result_json is not None:
+                    trade.result_json = result_json
+                session.commit()
 
-    # ── Backup ───────────────────────────────────────────────────
+    # ── Backup ────────────────────────────────────────────────
 
     def backup_if_needed(
         self,
@@ -516,9 +475,14 @@ class AgentDatabase:
 
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"agent_{ts}.db"
-        backup_conn = sqlite3.connect(str(backup_path))
-        self._conn.backup(backup_conn)
-        backup_conn.close()
+
+        raw_conn = self._engine.raw_connection()
+        try:
+            backup_conn = sqlite3.connect(str(backup_path))
+            raw_conn.driver_connection.backup(backup_conn)
+            backup_conn.close()
+        finally:
+            raw_conn.close()
 
         backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
         for old in backups[:-max_backups]:

@@ -1,7 +1,9 @@
-"""Alembic environment — programmatic configuration, no alembic.ini needed."""
+"""Alembic environment — programmatic configuration with autogenerate support."""
 
 from alembic import context
 from sqlalchemy import create_engine
+
+from finance_agent.models import Base
 
 
 def run_migrations_online() -> None:
@@ -10,7 +12,12 @@ def run_migrations_online() -> None:
     engine = create_engine(url)
 
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=None)
+        context.configure(
+            connection=connection,
+            target_metadata=Base.metadata,
+            render_as_batch=True,
+            compare_type=True,
+        )
         with context.begin_transaction():
             context.run_migrations()
 

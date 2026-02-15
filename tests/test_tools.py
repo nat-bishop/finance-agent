@@ -144,78 +144,82 @@ async def test_get_orders_both(mock_kalshi, mock_polymarket):
 # ── DB tools ─────────────────────────────────────────────────────
 
 
-async def test_log_prediction_tool(db, session_id):
-    tools = create_db_tools(db, session_id)
-    result = await _call(tools, 0)({"market_ticker": "K-MKT-1", "prediction": 0.65})
-    data = json.loads(result["content"][0]["text"])
-    assert data["status"] == "logged"
-    assert data["prediction_id"] > 0
-
-
 async def test_recommend_trade_tool(db, session_id):
     tools = create_db_tools(db, session_id, recommendation_ttl_minutes=30)
-    result = await _call(tools, 1)(
+    result = await _call(tools, 0)(
         {
-            "exchange": "kalshi",
-            "market_id": "K-MKT-1",
-            "market_title": "Test Market",
-            "action": "buy",
-            "side": "yes",
-            "quantity": 10,
-            "price_cents": 45,
-            "thesis": "Test thesis",
+            "thesis": "Cross-platform arbitrage on presidential election",
             "estimated_edge_pct": 7.5,
+            "equivalence_notes": "Both resolve based on AP call, same timing",
+            "legs": [
+                {
+                    "exchange": "kalshi",
+                    "market_id": "K-MKT-1",
+                    "market_title": "Test Market Kalshi",
+                    "action": "buy",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 45,
+                },
+                {
+                    "exchange": "polymarket",
+                    "market_id": "PM-MKT-1",
+                    "market_title": "Test Market PM",
+                    "action": "sell",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 52,
+                },
+            ],
         }
     )
     data = json.loads(result["content"][0]["text"])
-    assert data["status"] == "pending"
-    assert data["recommendation_id"] > 0
+    assert data["group_id"] > 0
+    assert data["leg_count"] == 2
     assert data["expires_at"] is not None
 
 
-async def test_recommend_trade_paired_legs(db, session_id):
+async def test_recommend_trade_creates_group_with_legs(db, session_id):
     tools = create_db_tools(db, session_id)
-    handler = _call(tools, 1)
-    await handler(
+    await _call(tools, 0)(
         {
-            "exchange": "kalshi",
-            "market_id": "K-1",
-            "market_title": "Leg 1",
-            "action": "buy",
-            "side": "yes",
-            "quantity": 10,
-            "price_cents": 45,
-            "thesis": "Arb leg 1",
-            "estimated_edge_pct": 7.0,
-            "group_id": "ARB-1",
-            "leg_index": 0,
+            "thesis": "Bracket arb: prices sum to 112",
+            "estimated_edge_pct": 6.0,
+            "equivalence_notes": "Same mutually exclusive event, verified resolution source",
+            "legs": [
+                {
+                    "exchange": "kalshi",
+                    "market_id": "K-1",
+                    "market_title": "Leg 1",
+                    "action": "buy",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 45,
+                },
+                {
+                    "exchange": "polymarket",
+                    "market_id": "PM-1",
+                    "market_title": "Leg 2",
+                    "action": "sell",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 52,
+                },
+            ],
         }
     )
-    await handler(
-        {
-            "exchange": "polymarket",
-            "market_id": "PM-1",
-            "market_title": "Leg 2",
-            "action": "sell",
-            "side": "yes",
-            "quantity": 10,
-            "price_cents": 52,
-            "thesis": "Arb leg 2",
-            "estimated_edge_pct": 7.0,
-            "group_id": "ARB-1",
-            "leg_index": 1,
-        }
-    )
-    recs = db.get_pending_recommendations()
-    assert len(recs) == 2
-    assert recs[0]["group_id"] == recs[1]["group_id"] == "ARB-1"
+    groups = db.get_pending_groups()
+    assert len(groups) == 1
+    assert len(groups[0]["legs"]) == 2
+    assert groups[0]["legs"][0]["exchange"] == "kalshi"
+    assert groups[0]["legs"][1]["exchange"] == "polymarket"
 
 
 async def test_recommend_trade_ttl_override(db, session_id):
     tools_30 = create_db_tools(db, session_id, recommendation_ttl_minutes=30)
     tools_120 = create_db_tools(db, session_id, recommendation_ttl_minutes=120)
 
-    r1 = await _call(tools_30, 1)(
+    leg_pair = [
         {
             "exchange": "kalshi",
             "market_id": "K-1",
@@ -224,26 +228,70 @@ async def test_recommend_trade_ttl_override(db, session_id):
             "side": "yes",
             "quantity": 10,
             "price_cents": 45,
-            "thesis": "t",
-            "estimated_edge_pct": 5.0,
-        }
-    )
-    r2 = await _call(tools_120, 1)(
+        },
         {
-            "exchange": "kalshi",
-            "market_id": "K-2",
+            "exchange": "polymarket",
+            "market_id": "PM-1",
             "market_title": "T2",
-            "action": "buy",
+            "action": "sell",
             "side": "yes",
             "quantity": 10,
-            "price_cents": 45,
-            "thesis": "t",
+            "price_cents": 52,
+        },
+    ]
+
+    r1 = await _call(tools_30, 0)(
+        {
+            "thesis": "Short TTL arb opportunity test",
             "estimated_edge_pct": 5.0,
+            "equivalence_notes": "Verified same resolution",
+            "legs": leg_pair,
+        }
+    )
+    r2 = await _call(tools_120, 0)(
+        {
+            "thesis": "Long TTL arb opportunity test",
+            "estimated_edge_pct": 5.0,
+            "equivalence_notes": "Verified same resolution",
+            "legs": leg_pair,
         }
     )
     d1 = json.loads(r1["content"][0]["text"])
     d2 = json.loads(r2["content"][0]["text"])
     assert d1["expires_at"] < d2["expires_at"]
+
+
+async def test_recommend_trade_warns_on_missing_equivalence(db, session_id):
+    tools = create_db_tools(db, session_id)
+    result = await _call(tools, 0)(
+        {
+            "thesis": "Missing equivalence notes test",
+            "estimated_edge_pct": 5.0,
+            "equivalence_notes": "",
+            "legs": [
+                {
+                    "exchange": "kalshi",
+                    "market_id": "K-1",
+                    "market_title": "L1",
+                    "action": "buy",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 45,
+                },
+                {
+                    "exchange": "polymarket",
+                    "market_id": "PM-1",
+                    "market_title": "L2",
+                    "action": "sell",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 52,
+                },
+            ],
+        }
+    )
+    data = json.loads(result["content"][0]["text"])
+    assert "warnings" in data
 
 
 # ── Tool count verification ──────────────────────────────────────
@@ -256,4 +304,4 @@ def test_market_tools_count(mock_kalshi, mock_polymarket):
 
 def test_db_tools_count(db, session_id):
     tools = create_db_tools(db, session_id)
-    assert len(tools) == 2
+    assert len(tools) == 1

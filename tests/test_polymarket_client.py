@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from finance_agent.config import TradingConfig
+from finance_agent.config import Credentials, TradingConfig
 from finance_agent.polymarket_client import (
     PM_INTENT_MAP,
     PM_INTENT_REVERSE,
@@ -43,17 +43,16 @@ def test_cents_to_usd(cents, expected):
 
 @pytest.fixture
 def pm_client(monkeypatch):
-    for key in list(TradingConfig.model_fields):
-        monkeypatch.delenv(key.upper(), raising=False)
-        monkeypatch.delenv(key, raising=False)
+    for key in Credentials.model_fields:
+        monkeypatch.setenv(key.upper(), "")
 
-    config = TradingConfig(
+    credentials = Credentials(
         polymarket_key_id="test-key",
         polymarket_secret_key="test-secret",
-        polymarket_enabled=True,
     )
+    config = TradingConfig(polymarket_enabled=True)
     with patch("finance_agent.polymarket_client.PolymarketUS") as mock_sdk:
-        client = PolymarketAPIClient(config)
+        client = PolymarketAPIClient(credentials, config)
         client._client = mock_sdk.return_value
         yield client
 

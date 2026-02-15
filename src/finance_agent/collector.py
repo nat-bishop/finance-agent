@@ -368,9 +368,9 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
 
 def run_collector() -> None:
     """Main entry point for the collector."""
-    _, trading_config = load_configs()
+    _, credentials, trading_config = load_configs()
 
-    client = KalshiAPIClient(trading_config)
+    client = KalshiAPIClient(credentials, trading_config)
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()
@@ -384,8 +384,8 @@ def run_collector() -> None:
 
         pm_count = 0
         pm_event_count = 0
-        if trading_config.polymarket_enabled and trading_config.polymarket_key_id:
-            pm_client = PolymarketAPIClient(trading_config)
+        if trading_config.polymarket_enabled and credentials.polymarket_key_id:
+            pm_client = PolymarketAPIClient(credentials, trading_config)
             pm_count = collect_polymarket_markets(pm_client, db)
             pm_event_count = collect_polymarket_events(pm_client, db)
 

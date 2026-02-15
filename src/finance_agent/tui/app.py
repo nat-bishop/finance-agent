@@ -52,7 +52,7 @@ class FinanceApp(App):
 
     async def on_mount(self) -> None:
         """Initialize clients, DB, session, SDK client, then push dashboard."""
-        agent_config, trading_config = load_configs()
+        agent_config, credentials, trading_config = load_configs()
 
         # Database
         db = AgentDatabase(trading_config.db_path)
@@ -86,11 +86,13 @@ class FinanceApp(App):
         session_log.write_text("", encoding="utf-8")
 
         # Exchange clients
-        kalshi = KalshiAPIClient(trading_config)
+        kalshi = KalshiAPIClient(credentials, trading_config)
         polymarket_enabled = trading_config.polymarket_enabled and bool(
-            trading_config.polymarket_key_id
+            credentials.polymarket_key_id
         )
-        pm_client = PolymarketAPIClient(trading_config) if polymarket_enabled else None
+        pm_client = (
+            PolymarketAPIClient(credentials, trading_config) if polymarket_enabled else None
+        )
 
         # Services
         services = TUIServices(

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from finance_agent.config import TradingConfig
+from finance_agent.config import Credentials, TradingConfig
 from finance_agent.kalshi_client import KalshiAPIClient, _optional
 
 # ── _optional helper ─────────────────────────────────────────────
@@ -30,19 +30,19 @@ def test_optional_empty():
 @pytest.fixture
 def kalshi_client(monkeypatch):
     """KalshiAPIClient with mocked SDK and key file."""
-    for key in list(TradingConfig.model_fields):
-        monkeypatch.delenv(key.upper(), raising=False)
-        monkeypatch.delenv(key, raising=False)
+    for key in Credentials.model_fields:
+        monkeypatch.setenv(key.upper(), "")
 
-    config = TradingConfig(
+    credentials = Credentials(
         kalshi_api_key_id="test-key",
         kalshi_private_key_path="/fake/key.pem",
     )
+    config = TradingConfig()
     with (
         patch("finance_agent.kalshi_client.KalshiClient") as mock_sdk,
         patch("builtins.open", mock_open(read_data="FAKE_PEM_KEY")),
     ):
-        client = KalshiAPIClient(config)
+        client = KalshiAPIClient(credentials, config)
         client._client = mock_sdk.return_value
         yield client
 

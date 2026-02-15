@@ -1,19 +1,32 @@
-"""Agent and trading configuration via Pydantic settings."""
+"""Agent and trading configuration.
+
+Credentials (API keys) load from .env / environment variables.
+Everything else is a plain dataclass — edit this file to change defaults.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
 
-class TradingConfig(BaseSettings):
-    """Domain configuration for Kalshi trading."""
+class Credentials(BaseSettings):
+    """API keys and secrets — loaded from .env / environment."""
 
     model_config = {"env_prefix": "", "env_file": ".env", "extra": "ignore"}
 
     kalshi_api_key_id: str = ""
+    kalshi_private_key: str = ""  # PEM content directly (newlines as \n)
     kalshi_private_key_path: str = "/workspace/keys/private_key.pem"
+    polymarket_key_id: str = ""
+    polymarket_secret_key: str = ""
+
+
+@dataclass
+class TradingConfig:
+    """Trading parameters — edit this file to change."""
 
     kalshi_max_position_usd: float = 100.0
     max_portfolio_usd: float = 1000.0
@@ -30,12 +43,7 @@ class TradingConfig(BaseSettings):
     polymarket_rate_limit_writes_per_sec: int = 50  # tightest: DELETE /order (500/10s)
     recommendation_ttl_minutes: int = 60
 
-    # Polymarket credentials
-    polymarket_key_id: str = ""
-    polymarket_secret_key: str = ""
     polymarket_enabled: bool = False
-
-    # Polymarket limits & fees
     polymarket_fee_rate: float = 0.0  # 0% maker, 0% taker on Polymarket US
     polymarket_max_position_usd: float = 50.0
 
@@ -56,20 +64,17 @@ class TradingConfig(BaseSettings):
         return f"{self.kalshi_base_url}/trade-api/v2"
 
 
-class AgentConfig(BaseSettings):
+@dataclass
+class AgentConfig:
     """SDK-level agent configuration."""
 
-    model_config = {"env_prefix": "AGENT_", "env_file": ".env", "extra": "ignore"}
-
-    name: str = "arb-agent"
     model: str = "claude-sonnet-4-5-20250929"
     max_budget_usd: float = 2.0
-    permission_mode: str = "acceptEdits"
 
 
-def load_configs() -> tuple[AgentConfig, TradingConfig]:
-    """Build AgentConfig and TradingConfig from env vars / .env file."""
-    return AgentConfig(), TradingConfig()
+def load_configs() -> tuple[AgentConfig, Credentials, TradingConfig]:
+    """Build configs. Credentials from env vars, everything else from defaults."""
+    return AgentConfig(), Credentials(), TradingConfig()
 
 
 def load_prompt(name: str) -> str:

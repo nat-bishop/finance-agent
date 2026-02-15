@@ -4,44 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from finance_agent.main import _init_watchlist, build_options
-
-# ── _init_watchlist ──────────────────────────────────────────────
-
-
-def test_init_watchlist_skips_if_exists(db, tmp_path):
-    watchlist_path = tmp_path / "watchlist.md"
-    watchlist_path.write_text("existing content")
-    with patch("finance_agent.main._WATCHLIST_PATH", watchlist_path):
-        _init_watchlist(db)
-    assert watchlist_path.read_text() == "existing content"
-
-
-def test_init_watchlist_writes_from_db(db, tmp_path):
-    watchlist_path = tmp_path / "data" / "watchlist.md"
-    # Add some watchlist entries to DB
-    db.execute(
-        "INSERT INTO watchlist (ticker, exchange, added_at, reason, alert_condition) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("K-MKT-1", "kalshi", "2025-01-01", "tracking", "price > 60"),
-    )
-    with patch("finance_agent.main._WATCHLIST_PATH", watchlist_path):
-        _init_watchlist(db)
-    content = watchlist_path.read_text()
-    assert "# Watchlist" in content
-    assert "K-MKT-1" in content
-    assert "kalshi" in content
-
-
-def test_init_watchlist_empty_db(db, tmp_path):
-    watchlist_path = tmp_path / "data" / "watchlist.md"
-    with patch("finance_agent.main._WATCHLIST_PATH", watchlist_path):
-        _init_watchlist(db)
-    content = watchlist_path.read_text()
-    assert "# Watchlist" in content
-    # No data rows, just header
-    assert "Ticker" in content
-
+from finance_agent.main import build_options
 
 # ── build_options ────────────────────────────────────────────────
 

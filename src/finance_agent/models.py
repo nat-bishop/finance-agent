@@ -1,0 +1,257 @@
+"""SQLAlchemy ORM models — canonical schema definition for all 9 tables."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import Float, ForeignKey, Index, Integer, Text, text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+# ── Market Snapshots ──────────────────────────────────────────
+
+
+class MarketSnapshot(Base):
+    __tablename__ = "market_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="collector")
+    exchange: Mapped[str] = mapped_column(Text, nullable=False, server_default="kalshi")
+    ticker: Mapped[str] = mapped_column(Text, nullable=False)
+    event_ticker: Mapped[str | None] = mapped_column(Text)
+    series_ticker: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text)
+    yes_bid: Mapped[int | None] = mapped_column(Integer)
+    yes_ask: Mapped[int | None] = mapped_column(Integer)
+    no_bid: Mapped[int | None] = mapped_column(Integer)
+    no_ask: Mapped[int | None] = mapped_column(Integer)
+    last_price: Mapped[int | None] = mapped_column(Integer)
+    volume: Mapped[int | None] = mapped_column(Integer)
+    volume_24h: Mapped[int | None] = mapped_column(Integer)
+    open_interest: Mapped[int | None] = mapped_column(Integer)
+    spread_cents: Mapped[int | None] = mapped_column(Integer)
+    mid_price_cents: Mapped[int | None] = mapped_column(Integer)
+    implied_probability: Mapped[float | None] = mapped_column(Float)
+    days_to_expiration: Mapped[float | None] = mapped_column(Float)
+    close_time: Mapped[str | None] = mapped_column(Text)
+    settlement_value: Mapped[int | None] = mapped_column(Integer)
+    markets_in_event: Mapped[int | None] = mapped_column(Integer)
+    raw_json: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_snapshots_ticker_time", "ticker", "captured_at"),
+        Index("idx_snapshots_series", "series_ticker"),
+        Index("idx_snapshots_category", "category"),
+        Index("idx_snapshots_exchange", "exchange"),
+        Index("idx_snapshots_exchange_status", "exchange", "status"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Events ────────────────────────────────────────────────────
+
+
+class Event(Base):
+    __tablename__ = "events"
+
+    event_ticker: Mapped[str] = mapped_column(Text, primary_key=True)
+    exchange: Mapped[str] = mapped_column(Text, primary_key=True, server_default="kalshi")
+    series_ticker: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
+    mutually_exclusive: Mapped[int | None] = mapped_column(Integer)
+    last_updated: Mapped[str | None] = mapped_column(Text)
+    markets_json: Mapped[str | None] = mapped_column(Text)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Signals ───────────────────────────────────────────────────
+
+
+class Signal(Base):
+    __tablename__ = "signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    generated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    scan_type: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange: Mapped[str | None] = mapped_column(Text, server_default="kalshi")
+    ticker: Mapped[str] = mapped_column(Text, nullable=False)
+    event_ticker: Mapped[str | None] = mapped_column(Text)
+    signal_strength: Mapped[float | None] = mapped_column(Float)
+    estimated_edge_pct: Mapped[float | None] = mapped_column(Float)
+    details_json: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text, server_default="pending")
+    acted_at: Mapped[str | None] = mapped_column(Text)
+    session_id: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index(
+            "idx_signals_pending",
+            "status",
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index("idx_signals_type", "scan_type"),
+        Index("idx_signals_exchange", "exchange"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Trades ────────────────────────────────────────────────────
+
+
+class Trade(Base):
+    __tablename__ = "trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, ForeignKey("sessions.id"), nullable=False)
+    exchange: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[str] = mapped_column(Text, nullable=False)
+    ticker: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    side: Mapped[str] = mapped_column(Text, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    price_cents: Mapped[int | None] = mapped_column(Integer)
+    order_type: Mapped[str | None] = mapped_column(Text)
+    order_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_trades_ticker", "ticker"),
+        Index("idx_trades_session", "session_id"),
+        Index("idx_trades_status", "status"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Portfolio Snapshots ───────────────────────────────────────
+
+
+class PortfolioSnapshot(Base):
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Text)
+    balance_usd: Mapped[float | None] = mapped_column(Float)
+    positions_json: Mapped[str | None] = mapped_column(Text)
+    open_orders_json: Mapped[str | None] = mapped_column(Text)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Sessions ──────────────────────────────────────────────────
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    ended_at: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    trades_placed: Mapped[int] = mapped_column(Integer, server_default="0")
+    recommendations_made: Mapped[int] = mapped_column(Integer, server_default="0")
+    pnl_usd: Mapped[float | None] = mapped_column(Float)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Watchlist ─────────────────────────────────────────────────
+
+
+class Watchlist(Base):
+    __tablename__ = "watchlist"
+
+    ticker: Mapped[str] = mapped_column(Text, primary_key=True)
+    exchange: Mapped[str] = mapped_column(Text, primary_key=True, server_default="kalshi")
+    added_at: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    alert_condition: Mapped[str | None] = mapped_column(Text)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
+# ── Recommendation Groups ────────────────────────────────────
+
+
+class RecommendationGroup(Base):
+    __tablename__ = "recommendation_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    thesis: Mapped[str | None] = mapped_column(Text)
+    equivalence_notes: Mapped[str | None] = mapped_column(Text)
+    estimated_edge_pct: Mapped[float | None] = mapped_column(Float)
+    signal_id: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str | None] = mapped_column(Text, server_default="pending")
+    expires_at: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[str | None] = mapped_column(Text)
+    executed_at: Mapped[str | None] = mapped_column(Text)
+
+    legs: Mapped[list[RecommendationLeg]] = relationship(
+        back_populates="group",
+        order_by="RecommendationLeg.leg_index",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        Index("idx_group_status", "status"),
+        Index("idx_rec_session", "session_id"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {c.name: getattr(self, c.name) for c in self.__table__.columns}
+        d["legs"] = [leg.to_dict() for leg in self.legs]
+        return d
+
+
+# ── Recommendation Legs ──────────────────────────────────────
+
+
+class RecommendationLeg(Base):
+    __tablename__ = "recommendation_legs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("recommendation_groups.id"), nullable=False
+    )
+    leg_index: Mapped[int] = mapped_column(Integer, server_default="0")
+    exchange: Mapped[str] = mapped_column(Text, nullable=False)
+    market_id: Mapped[str] = mapped_column(Text, nullable=False)
+    market_title: Mapped[str | None] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    side: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    order_type: Mapped[str | None] = mapped_column(Text, server_default="limit")
+    status: Mapped[str | None] = mapped_column(Text, server_default="pending")
+    order_id: Mapped[str | None] = mapped_column(Text)
+    executed_at: Mapped[str | None] = mapped_column(Text)
+
+    group: Mapped[RecommendationGroup] = relationship(back_populates="legs")
+
+    __table_args__ = (Index("idx_leg_group", "group_id"),)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}

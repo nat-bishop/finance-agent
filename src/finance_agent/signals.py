@@ -210,7 +210,7 @@ _SCANS: list[tuple[str, Any]] = [
 
 def run_signals() -> None:
     """Main entry point for the signal generator."""
-    _, trading_config = load_configs()
+    _, _, trading_config = load_configs()
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()

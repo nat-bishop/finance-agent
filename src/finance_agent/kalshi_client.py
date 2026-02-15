@@ -8,7 +8,7 @@ from kalshi_python import Configuration, KalshiClient
 from kalshi_python.models import CreateOrderRequest
 
 from .api_base import BaseAPIClient
-from .config import TradingConfig
+from .config import Credentials, TradingConfig
 
 
 def _optional(**kwargs: Any) -> dict[str, Any]:
@@ -19,21 +19,24 @@ def _optional(**kwargs: Any) -> dict[str, Any]:
 class KalshiAPIClient(BaseAPIClient):
     """Convenience wrapper providing typed methods around the Kalshi SDK."""
 
-    def __init__(self, config: TradingConfig) -> None:
+    def __init__(self, credentials: Credentials, config: TradingConfig) -> None:
         super().__init__(
             reads_per_sec=config.kalshi_rate_limit_reads_per_sec,
             writes_per_sec=config.kalshi_rate_limit_writes_per_sec,
         )
         self._config = config
-        self._client = self._build_client(config)
+        self._client = self._build_client(credentials, config)
 
     @staticmethod
-    def _build_client(config: TradingConfig) -> KalshiClient:
+    def _build_client(credentials: Credentials, config: TradingConfig) -> KalshiClient:
         cfg = Configuration(host=config.kalshi_api_url)
-        cfg.api_key_id = config.kalshi_api_key_id
+        cfg.api_key_id = credentials.kalshi_api_key_id
 
-        with open(config.kalshi_private_key_path) as f:
-            cfg.private_key_pem = f.read()
+        if credentials.kalshi_private_key:
+            cfg.private_key_pem = credentials.kalshi_private_key.replace("\\n", "\n")
+        else:
+            with open(credentials.kalshi_private_key_path) as f:
+                cfg.private_key_pem = f.read()
 
         return KalshiClient(cfg)
 

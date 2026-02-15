@@ -146,7 +146,7 @@ All settings are configured via environment variables (`.env` file) with sensibl
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (single migration, auto-run on startup). 9 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 9 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
@@ -182,7 +182,8 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (sing
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
   config.py            # Pydantic settings (env vars override defaults)
-  database.py          # SQLite (WAL mode), Alembic migrations, recommendation groups+legs CRUD
+  models.py            # SQLAlchemy ORM models (canonical schema for all 9 tables)
+  database.py          # AgentDatabase: ORM queries, Alembic migration runner, backup
   tools.py             # Unified MCP tool factories (8 market + 1 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
   polymarket_client.py # Polymarket US SDK wrapper, intent maps

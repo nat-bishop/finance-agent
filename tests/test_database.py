@@ -1,4 +1,4 @@
-"""Tests for finance_agent.database -- AgentDatabase."""
+"""Tests for finance_agent.database -- AgentDatabase (ORM-backed)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from finance_agent.database import _now
 
 # ── Schema / Init ────────────────────────────────────────────────
 
@@ -20,11 +18,11 @@ def test_db_creates_all_tables(db):
         "events",
         "signals",
         "trades",
-        "predictions",
         "portfolio_snapshots",
         "sessions",
         "watchlist",
-        "recommendations",
+        "recommendation_groups",
+        "recommendation_legs",
         "alembic_version",
     }
     assert expected.issubset(names)
@@ -32,7 +30,6 @@ def test_db_creates_all_tables(db):
 
 def test_db_wal_mode(db):
     rows = db.query("SELECT * FROM pragma_journal_mode")
-    # pragma_journal_mode returns a single row with a single column
     assert rows[0][next(iter(rows[0].keys()))] == "wal"
 
 
@@ -64,7 +61,7 @@ def test_query_with_cte(db, session_id):
     [
         "INSERT INTO sessions (id) VALUES ('x')",
         "DELETE FROM sessions WHERE id = 'x'",
-        "UPDATE sessions SET profile = 'x'",
+        "UPDATE sessions SET summary = 'x'",
         "DROP TABLE sessions",
     ],
 )
@@ -76,30 +73,6 @@ def test_query_rejects_writes(db, sql):
 def test_query_empty_result(db):
     rows = db.query("SELECT id FROM sessions WHERE id = 'nonexistent'")
     assert rows == []
-
-
-# ── execute / executemany ────────────────────────────────────────
-
-
-def test_execute_returns_cursor(db):
-    cursor = db.execute(
-        "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
-        ("test-ex", _now()),
-    )
-    assert cursor.lastrowid is not None
-
-
-def test_executemany_inserts(db, sample_market_snapshot):
-    rows = [sample_market_snapshot(ticker=f"T-{i}") for i in range(3)]
-    cols = list(rows[0].keys())
-    placeholders = ", ".join(["?"] * len(cols))
-    params_list = [tuple(r[c] for c in cols) for r in rows]
-    db.executemany(
-        f"INSERT INTO market_snapshots ({', '.join(cols)}) VALUES ({placeholders})",
-        params_list,
-    )
-    result = db.query("SELECT COUNT(*) as cnt FROM market_snapshots")
-    assert result[0]["cnt"] == 3
 
 
 # ── Sessions ─────────────────────────────────────────────────────
@@ -138,6 +111,13 @@ def test_end_session_sets_fields(db, session_id):
     assert r["pnl_usd"] == 12.50
 
 
+def test_get_sessions(db):
+    db.create_session()
+    db.create_session()
+    sessions = db.get_sessions()
+    assert len(sessions) == 2
+
+
 # ── Trades ───────────────────────────────────────────────────────
 
 
@@ -172,135 +152,238 @@ def test_log_trade_stores_all_fields(db, session_id):
 @pytest.mark.parametrize("exchange", ["kalshi", "polymarket"])
 def test_log_trade_exchange(db, session_id, exchange):
     db.log_trade(session_id, "T-1", "buy", "yes", 1, exchange=exchange)
-    rows = db.query("SELECT exchange FROM trades WHERE ticker = 'T-1'")
+    rows = db.query(
+        "SELECT exchange FROM trades WHERE ticker = 'T-1' AND exchange = ?", (exchange,)
+    )
     assert rows[0]["exchange"] == exchange
 
 
-# ── Predictions ──────────────────────────────────────────────────
+def test_get_trades_with_filter(db, session_id):
+    db.log_trade(session_id, "T-1", "buy", "yes", 10, exchange="kalshi")
+    db.log_trade(session_id, "T-2", "sell", "no", 5, exchange="polymarket")
+    trades = db.get_trades(exchange="kalshi")
+    assert len(trades) == 1
+    assert trades[0]["ticker"] == "T-1"
 
 
-def test_log_prediction_returns_id(db):
-    pid = db.log_prediction("MKT-1", 0.65)
-    assert isinstance(pid, int)
-    assert pid > 0
+def test_update_trade_status(db, session_id):
+    tid = db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
+    db.update_trade_status(tid, "filled", result_json='{"filled": true}')
+    rows = db.query("SELECT status, result_json FROM trades WHERE id = ?", (tid,))
+    assert rows[0]["status"] == "filled"
+    assert json.loads(rows[0]["result_json"])["filled"] is True
 
 
-def test_resolve_prediction_sets_outcome(db):
-    pid = db.log_prediction("MKT-1", 0.75)
-    db.resolve_prediction(pid, 1)
-    rows = db.query("SELECT outcome, resolved_at FROM predictions WHERE id = ?", (pid,))
-    assert rows[0]["outcome"] == 1
-    assert rows[0]["resolved_at"] is not None
-
-
-def test_log_prediction_with_extras(db):
-    pid = db.log_prediction(
-        "MKT-1", 0.70, market_price_cents=65, methodology="orderbook", notes="test"
+def test_update_trade_status_preserves_result_json(db, session_id):
+    tid = db.log_trade(
+        session_id, "T-1", "buy", "yes", 10, status="placed", result_json='{"orig": true}'
     )
-    rows = db.query("SELECT methodology, notes FROM predictions WHERE id = ?", (pid,))
-    assert rows[0]["methodology"] == "orderbook"
-    assert rows[0]["notes"] == "test"
+    db.update_trade_status(tid, "filled")  # no result_json
+    rows = db.query("SELECT result_json FROM trades WHERE id = ?", (tid,))
+    assert json.loads(rows[0]["result_json"])["orig"] is True
 
 
-# ── auto_resolve_predictions ─────────────────────────────────────
+# ── Recommendation Groups ────────────────────────────────────────
 
 
-def test_auto_resolve_no_unresolved(db):
-    result = db.auto_resolve_predictions()
-    assert result == []
-
-
-def test_auto_resolve_matches_settled(db, sample_market_snapshot):
-    pid = db.log_prediction("TICKER-A", 0.70)
-    db.insert_market_snapshots(
-        [
-            sample_market_snapshot(
-                ticker="TICKER-A",
-                status="settled",
-                settlement_value=1,
-            )
-        ]
+def test_log_recommendation_group_returns_id(db, session_id):
+    group_id, expires_at = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test thesis",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "market_title": "Test Leg",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
     )
-    resolved = db.auto_resolve_predictions()
-    assert len(resolved) == 1
-    assert resolved[0]["prediction_id"] == pid
-    assert resolved[0]["outcome"] == 1
+    assert isinstance(group_id, int)
+    assert group_id > 0
+    assert expires_at is not None
 
 
-@pytest.mark.parametrize(
-    "prediction,outcome,expected_correct",
-    [
-        (0.7, 1, True),
-        (0.3, 1, False),
-        (0.7, 0, False),
-        (0.3, 0, True),
-    ],
-)
-def test_auto_resolve_correctness(
-    db, sample_market_snapshot, prediction, outcome, expected_correct
-):
-    db.log_prediction("TICKER-A", prediction)
-    db.insert_market_snapshots(
-        [sample_market_snapshot(ticker="TICKER-A", status="settled", settlement_value=outcome)]
+def test_log_recommendation_group_with_multiple_legs(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Arb opportunity",
+        estimated_edge_pct=7.0,
+        equivalence_notes="Same event",
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "market_title": "Leg 1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+            {
+                "exchange": "polymarket",
+                "market_id": "PM-1",
+                "market_title": "Leg 2",
+                "action": "sell",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 52,
+            },
+        ],
     )
-    resolved = db.auto_resolve_predictions()
-    assert resolved[0]["correct"] is expected_correct
+    group = db.get_group(group_id)
+    assert group is not None
+    assert len(group["legs"]) == 2
+    assert group["legs"][0]["leg_index"] == 0
+    assert group["legs"][1]["leg_index"] == 1
+    assert group["legs"][0]["exchange"] == "kalshi"
+    assert group["legs"][1]["exchange"] == "polymarket"
 
 
-def test_auto_resolve_skips_unsettled(db, sample_market_snapshot):
-    db.log_prediction("TICKER-A", 0.70)
-    db.insert_market_snapshots([sample_market_snapshot(ticker="TICKER-A", status="open")])
-    resolved = db.auto_resolve_predictions()
-    assert resolved == []
+def test_log_recommendation_group_ttl(db, session_id):
+    _, expires_at = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        ttl_minutes=30,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    group = db.get_pending_groups()[0]
+    created = datetime.fromisoformat(group["created_at"])
+    expires = datetime.fromisoformat(expires_at)
+    delta = (expires - created).total_seconds() / 60
+    assert 29 <= delta <= 31
 
 
-# ── _compute_calibration ─────────────────────────────────────────
+def test_get_pending_groups(db, session_id):
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    groups = db.get_pending_groups()
+    assert len(groups) == 1
+    assert groups[0]["status"] == "pending"
+    assert "legs" in groups[0]
 
 
-def test_compute_calibration_no_data(db):
-    assert db._compute_calibration() is None
+def test_get_group_not_found(db):
+    assert db.get_group(9999) is None
 
 
-def test_compute_calibration_perfect(db):
-    # 10 predictions: all 1.0 with outcome 1, all 0.0 with outcome 0
-    for _ in range(5):
-        pid = db.log_prediction("M-A", 1.0)
-        db.resolve_prediction(pid, 1)
-    for _ in range(5):
-        pid = db.log_prediction("M-B", 0.0)
-        db.resolve_prediction(pid, 0)
-    cal = db._compute_calibration()
-    assert cal is not None
-    assert cal["brier_score"] == 0.0
-    assert cal["correct"] == 10
-    assert cal["total"] == 10
+def test_update_leg_status(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    group = db.get_group(group_id)
+    leg_id = group["legs"][0]["id"]
+    db.update_leg_status(leg_id, "executed", order_id="ORD-123")
+    updated = db.get_group(group_id)
+    assert updated["legs"][0]["status"] == "executed"
+    assert updated["legs"][0]["order_id"] == "ORD-123"
+    assert updated["legs"][0]["executed_at"] is not None
 
 
-def test_compute_calibration_brier_math(db):
-    # 4 predictions with known Brier: (0.7-1)^2 + (0.3-0)^2 + (0.6-1)^2 + (0.4-0)^2
-    # = 0.09 + 0.09 + 0.16 + 0.16 = 0.50 / 4 = 0.125
-    data = [(0.7, 1), (0.3, 0), (0.6, 1), (0.4, 0)]
-    for pred, outcome in data:
-        pid = db.log_prediction("M-X", pred)
-        db.resolve_prediction(pid, outcome)
-    cal = db._compute_calibration()
-    assert cal is not None
-    assert cal["brier_score"] == 0.125
+def test_update_group_status_executed(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    db.update_group_status(group_id, "executed")
+    group = db.get_group(group_id)
+    assert group["status"] == "executed"
+    assert group["executed_at"] is not None
 
 
-def test_compute_calibration_has_buckets(db):
-    # predictions in different ranges
-    data = [(0.1, 0), (0.3, 0), (0.5, 1), (0.7, 1), (0.9, 1)]
-    for pred, outcome in data:
-        pid = db.log_prediction("M-X", pred)
-        db.resolve_prediction(pid, outcome)
-    cal = db._compute_calibration()
-    assert cal is not None
-    assert len(cal["buckets"]) > 0
-    for bucket in cal["buckets"]:
-        assert "range" in bucket
-        assert "count" in bucket
-        assert "accuracy" in bucket
+def test_update_group_status_rejected(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    db.update_group_status(group_id, "rejected")
+    group = db.get_group(group_id)
+    assert group["status"] == "rejected"
+    assert group["reviewed_at"] is not None
+
+
+def test_get_recommendations_with_filter(db, session_id):
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    recs = db.get_recommendations(status="pending")
+    assert len(recs) == 1
+    assert "legs" in recs[0]
+    recs_empty = db.get_recommendations(status="executed")
+    assert len(recs_empty) == 0
 
 
 # ── Market snapshots ─────────────────────────────────────────────
@@ -314,6 +397,13 @@ def test_insert_market_snapshots_batch(db, sample_market_snapshot):
     rows = [sample_market_snapshot(ticker=f"T-{i}") for i in range(3)]
     count = db.insert_market_snapshots(rows)
     assert count == 3
+
+
+def test_insert_market_snapshots_ignores_extra_keys(db, sample_market_snapshot):
+    row = sample_market_snapshot(ticker="T-EXTRA")
+    row["extra_key_not_in_schema"] = "should_be_ignored"
+    count = db.insert_market_snapshots([row])
+    assert count == 1
 
 
 # ── Events upsert ────────────────────────────────────────────────
@@ -380,128 +470,28 @@ def test_insert_signals_string_details(db):
 
 
 def test_expire_old_signals(db, sample_signal):
-    # Insert a signal, then manually backdate its generated_at
     db.insert_signals([sample_signal()])
-    old_time = (datetime.now(UTC) - timedelta(hours=100)).strftime("%Y-%m-%d %H:%M:%S")
-    db.execute(
-        "UPDATE signals SET generated_at = ? WHERE ticker = 'TICKER-A'",
-        (old_time,),
-    )
+    # Backdate via raw SQL through the query escape hatch won't work (SELECT only).
+    # Instead, insert a signal with an old generated_at by manipulating the data.
+    old_time = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
+    with db._session_factory() as session:
+        from finance_agent.models import Signal
+
+        sig = session.query(Signal).filter(Signal.ticker == "TICKER-A").first()
+        sig.generated_at = old_time
+        session.commit()
     count = db.expire_old_signals(max_age_hours=48)
     assert count == 1
     rows = db.query("SELECT status FROM signals WHERE ticker = 'TICKER-A'")
     assert rows[0]["status"] == "expired"
 
 
-# ── Recommendations ──────────────────────────────────────────────
-
-
-def test_log_recommendation_returns_id(db, session_id):
-    rec_id = db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-MKT-1",
-        market_title="Test Market",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-    )
-    assert isinstance(rec_id, int)
-    assert rec_id > 0
-
-
-def test_log_recommendation_sets_expires_at(db, session_id):
-    rec_id = db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-MKT-1",
-        market_title="Test",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-        ttl_minutes=30,
-    )
-    rec = db.get_recommendation(rec_id)
-    assert rec is not None
-    assert rec["expires_at"] is not None
-    # expires_at should be ~30 minutes after created_at
-    created = datetime.fromisoformat(rec["created_at"])
-    expires = datetime.fromisoformat(rec["expires_at"])
-    delta = (expires - created).total_seconds() / 60
-    assert 29 <= delta <= 31
-
-
-def test_get_pending_recommendations(db, session_id):
-    db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-1",
-        market_title="Leg 1",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-        group_id="G-1",
-        leg_index=0,
-    )
-    db.log_recommendation(
-        session_id=session_id,
-        exchange="polymarket",
-        market_id="P-1",
-        market_title="Leg 2",
-        action="sell",
-        side="yes",
-        quantity=10,
-        price_cents=52,
-        group_id="G-1",
-        leg_index=1,
-    )
-    recs = db.get_pending_recommendations()
-    assert len(recs) == 2
-    assert recs[0]["leg_index"] == 0
-    assert recs[1]["leg_index"] == 1
-    assert recs[0]["group_id"] == recs[1]["group_id"] == "G-1"
-
-
-def test_update_recommendation_status_executed(db, session_id):
-    rec_id = db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-1",
-        market_title="Test",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-    )
-    db.update_recommendation_status(rec_id, "executed", order_id="ORD-123")
-    rec = db.get_recommendation(rec_id)
-    assert rec["status"] == "executed"
-    assert rec["executed_at"] is not None
-    assert rec["order_id"] == "ORD-123"
-
-
-def test_update_recommendation_status_rejected(db, session_id):
-    rec_id = db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-1",
-        market_title="Test",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-    )
-    db.update_recommendation_status(rec_id, "rejected")
-    rec = db.get_recommendation(rec_id)
-    assert rec["status"] == "rejected"
-    assert rec["reviewed_at"] is not None
-
-
-def test_get_recommendation_not_found(db):
-    assert db.get_recommendation(9999) is None
+def test_get_signals_with_filter(db, sample_signal):
+    db.insert_signals([sample_signal(scan_type="arbitrage")])
+    db.insert_signals([sample_signal(scan_type="cross_platform_candidate", ticker="T-2")])
+    signals = db.get_signals(scan_type="arbitrage")
+    assert len(signals) == 1
+    assert signals[0]["scan_type"] == "arbitrage"
 
 
 # ── get_session_state ────────────────────────────────────────────
@@ -509,62 +499,21 @@ def test_get_recommendation_not_found(db):
 
 def test_get_session_state_empty_db(db):
     state = db.get_session_state()
-    expected_keys = {
-        "last_session",
-        "pending_signals",
-        "unresolved_predictions",
-        "calibration",
-        "signal_history",
-        "portfolio_delta",
-        "recent_trades",
-        "unreconciled_trades",
-        "pending_recommendations",
-        "recent_recommendations",
-    }
+    expected_keys = {"last_session", "pending_signals", "unreconciled_trades"}
     assert set(state.keys()) == expected_keys
     assert state["last_session"] is None
     assert state["pending_signals"] == []
-    assert state["calibration"] is None
+    assert state["unreconciled_trades"] == []
 
 
-def test_get_session_state_populated(db, session_id, sample_market_snapshot, sample_signal):
-    # End a session so last_session is populated
+def test_get_session_state_populated(db, session_id, sample_signal):
     db.end_session(session_id, summary="s1")
-
-    # Add signals
     db.insert_signals([sample_signal()])
-
-    # Add a prediction
-    db.log_prediction("T-1", 0.65)
-
-    # Add a trade
     db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
-
-    # Add a recommendation
-    db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-1",
-        market_title="Test",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-    )
-
-    # Add portfolio
-    db.log_portfolio_snapshot(session_id, 100.0)
-
     state = db.get_session_state()
     assert state["last_session"] is not None
     assert len(state["pending_signals"]) == 1
-    assert len(state["unresolved_predictions"]) == 1
-    assert len(state["recent_trades"]) == 1
     assert len(state["unreconciled_trades"]) == 1
-    assert len(state["pending_recommendations"]) == 1
-    assert len(state["recent_recommendations"]) == 1
-    assert state["signal_history"] != []
-    assert state["portfolio_delta"] is not None
 
 
 # ── Backup ───────────────────────────────────────────────────────
@@ -587,49 +536,12 @@ def test_backup_skips_recent(db, tmp_path):
 def test_backup_prunes_old(db, tmp_path):
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
-    # Create initial backup, then make it old by setting max_age_hours very low
     first = db.backup_if_needed(str(backup_dir), max_age_hours=24)
     assert first is not None
-    # Repeatedly force backups by using max_age_hours=0
     for _ in range(4):
         import time as _time
 
-        _time.sleep(0.01)  # ensure different timestamps
+        _time.sleep(0.01)
         db.backup_if_needed(str(backup_dir), max_age_hours=0, max_backups=3)
     remaining = list(backup_dir.glob("agent_*.db"))
     assert len(remaining) <= 3
-
-
-# ── TUI query methods ────────────────────────────────────────────
-
-
-def test_get_recommendations_with_filter(db, session_id):
-    db.log_recommendation(
-        session_id=session_id,
-        exchange="kalshi",
-        market_id="K-1",
-        market_title="Test",
-        action="buy",
-        side="yes",
-        quantity=10,
-        price_cents=45,
-    )
-    recs = db.get_recommendations(status="pending")
-    assert len(recs) == 1
-    recs_empty = db.get_recommendations(status="executed")
-    assert len(recs_empty) == 0
-
-
-def test_get_trades_with_filter(db, session_id):
-    db.log_trade(session_id, "T-1", "buy", "yes", 10, exchange="kalshi")
-    db.log_trade(session_id, "T-2", "sell", "no", 5, exchange="polymarket")
-    trades = db.get_trades(exchange="kalshi")
-    assert len(trades) == 1
-    assert trades[0]["ticker"] == "T-1"
-
-
-def test_get_sessions(db):
-    db.create_session()
-    db.create_session()
-    sessions = db.get_sessions()
-    assert len(sessions) == 2
