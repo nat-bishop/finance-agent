@@ -1,1 +1,1 @@
-"""Cross-platform prediction market arbitrage agent (Kalshi + Polymarket US)."""
+"""Cross-platform arbitrage agent (Kalshi + Polymarket US)."""

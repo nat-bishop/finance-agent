@@ -43,18 +43,10 @@ class RecCard(Vertical):
         legs = self.group.get("legs", [])
         group_id = self.group["id"]
 
-        if len(legs) > 1:
-            yield Static(
-                f"Group #{group_id} ({len(legs)} legs)",
-                classes="rec-title",
-            )
-        elif legs:
-            yield Static(
-                f"{legs[0]['exchange'].upper()}: {(legs[0].get('market_title') or '')[:50]}",
-                classes="rec-title",
-            )
-        else:
-            yield Static("Empty recommendation", classes="rec-title")
+        yield Static(
+            f"Group #{group_id} ({len(legs)} legs)",
+            classes="rec-title",
+        )
 
         for leg in legs:
             exch = "K" if leg["exchange"] == "kalshi" else "PM"
@@ -86,7 +78,7 @@ class RecCard(Vertical):
         # Action buttons
         with Horizontal(classes="rec-actions"):
             yield Button(
-                "Execute" if len(legs) <= 1 else "Execute All",
+                "Execute All",
                 id=f"exec-group-{group_id}",
                 variant="success",
             )

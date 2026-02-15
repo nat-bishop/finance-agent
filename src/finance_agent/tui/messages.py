@@ -31,14 +31,6 @@ class RecommendationExecuted(Message):
     """A recommendation was executed through the TUI."""
 
 
-class OrderCancelled(Message):
-    """An order was cancelled."""
-
-
-class OrderAmended(Message):
-    """An order was amended."""
-
-
 class AskUserQuestionRequest(Message):
     """Agent needs user input via AskUserQuestion tool."""
 

@@ -50,7 +50,9 @@ class HistoryScreen(Screen):
         trades_table.add_columns("Exchange", "Ticker", "Action", "Side", "Qty", "Price", "Status")
 
         recs_table = self.query_one("#detail-recs-table", DataTable)
-        recs_table.add_columns("Exchange", "Market", "Action", "Side", "Qty", "Price", "Status")
+        recs_table.add_columns(
+            "Group", "Exchange", "Market", "Action", "Side", "Qty", "Price", "Status"
+        )
 
         await self._refresh()
 
@@ -97,17 +99,21 @@ class HistoryScreen(Screen):
                 str(t.get("status", "")),
             )
 
-        # Load recs for session
-        recs = self._services.get_recommendations(session_id=session_id, limit=20)
+        # Load recs for session (groups with nested legs)
+        groups = self._services.get_recommendations(session_id=session_id, limit=20)
         recs_table = self.query_one("#detail-recs-table", DataTable)
         recs_table.clear()
-        for r in recs:
-            recs_table.add_row(
-                str(r.get("exchange", ""))[:2].upper(),
-                str(r.get("market_title", r.get("market_id", "")))[:30],
-                str(r.get("action", "")),
-                str(r.get("side", "")),
-                str(r.get("quantity", "")),
-                str(r.get("price_cents", "")),
-                str(r.get("status", "")),
-            )
+        for group in groups:
+            gid = str(group.get("id", ""))
+            g_status = str(group.get("status", ""))
+            for leg in group.get("legs", []):
+                recs_table.add_row(
+                    gid,
+                    str(leg.get("exchange", ""))[:2].upper(),
+                    str(leg.get("market_title", leg.get("market_id", "")))[:30],
+                    str(leg.get("action", "")),
+                    str(leg.get("side", "")),
+                    str(leg.get("quantity", "")),
+                    str(leg.get("price_cents", "")),
+                    g_status,
+                )

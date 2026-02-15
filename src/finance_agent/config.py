@@ -28,7 +28,6 @@ class TradingConfig(BaseSettings):
     kalshi_rate_limit_writes_per_sec: int = 10  # Kalshi Basic tier
     polymarket_rate_limit_reads_per_sec: int = 15  # tightest: /positions (150/10s)
     polymarket_rate_limit_writes_per_sec: int = 50  # tightest: DELETE /order (500/10s)
-    auto_scan_on_startup: bool = True
     recommendation_ttl_minutes: int = 60
 
     # Polymarket credentials
