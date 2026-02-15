@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from helpers import get_row, raw_select
 
-from finance_agent.models import Event, Session, Signal, Trade
+from finance_agent.models import Event, Session, Signal
 
 # ── Schema / Init ────────────────────────────────────────────────
 
@@ -123,23 +123,6 @@ def test_get_trades_with_filter(db, session_id):
     trades = db.get_trades(exchange="kalshi")
     assert len(trades) == 1
     assert trades[0]["ticker"] == "T-1"
-
-
-def test_update_trade_status(db, session_id):
-    tid = db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
-    db.update_trade_status(tid, "filled", result_json='{"filled": true}')
-    row = get_row(db, Trade, tid)
-    assert row["status"] == "filled"
-    assert json.loads(row["result_json"])["filled"] is True
-
-
-def test_update_trade_status_preserves_result_json(db, session_id):
-    tid = db.log_trade(
-        session_id, "T-1", "buy", "yes", 10, status="placed", result_json='{"orig": true}'
-    )
-    db.update_trade_status(tid, "filled")  # no result_json
-    row = get_row(db, Trade, tid)
-    assert json.loads(row["result_json"])["orig"] is True
 
 
 # ── Recommendation Groups ────────────────────────────────────────

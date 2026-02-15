@@ -34,12 +34,6 @@ def test_trading_config_urls():
     assert config.kalshi_api_url.endswith("/trade-api/v2")
 
 
-def test_polymarket_urls():
-    config = TradingConfig()
-    assert config.polymarket_api_url == "https://api.polymarket.us"
-    assert config.polymarket_gateway_url == "https://gateway.polymarket.us"
-
-
 # ── Credentials ──────────────────────────────────────────────────
 
 

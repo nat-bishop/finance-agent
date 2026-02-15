@@ -36,7 +36,7 @@ def create_audit_hooks(
     rec_count = 0
 
     async def auto_approve(
-        input_data: HookInput, tool_use_id: str | None, context: HookContext
+        input_data: HookInput, _tool_use_id: str | None, _context: HookContext
     ) -> HookJSONOutput:
         """Auto-approve all tools except AskUserQuestion (handled by canUseTool)."""
         data: dict[str, Any] = input_data  # type: ignore[assignment]
@@ -45,7 +45,7 @@ def create_audit_hooks(
         )
 
     async def audit_recommendation(
-        input_data: HookInput, tool_use_id: str | None, context: HookContext
+        _input_data: HookInput, _tool_use_id: str | None, _context: HookContext
     ) -> HookJSONOutput:
         nonlocal rec_count
         rec_count += 1
@@ -55,7 +55,7 @@ def create_audit_hooks(
         return _EMPTY
 
     async def session_end(
-        input_data: HookInput, tool_use_id: str | None, context: HookContext
+        _input_data: HookInput, _tool_use_id: str | None, _context: HookContext
     ) -> HookJSONOutput:
         duration = time.time() - session_start
         logger.info("Session ending: %ds, %d recommendations", int(duration), rec_count)

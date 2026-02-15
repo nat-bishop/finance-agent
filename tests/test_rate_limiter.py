@@ -77,19 +77,6 @@ def test_separate_read_write_buckets():
     assert rl._tokens["write"] == 1.0  # unaffected
 
 
-# ── Async methods ────────────────────────────────────────────────
-
-
-async def test_acquire_read_async():
-    rl = RateLimiter(reads_per_sec=100, writes_per_sec=100)
-    await rl.acquire_read()  # Should succeed immediately with full bucket
-
-
-async def test_acquire_write_async():
-    rl = RateLimiter(reads_per_sec=100, writes_per_sec=100)
-    await rl.acquire_write()
-
-
 # ── Sync methods ─────────────────────────────────────────────────
 
 

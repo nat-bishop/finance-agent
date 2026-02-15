@@ -49,14 +49,6 @@ class TradingConfig:
     max_slippage_cents: int = 3  # reject execution if orderbook moved >N cents
 
     @property
-    def polymarket_api_url(self) -> str:
-        return "https://api.polymarket.us"
-
-    @property
-    def polymarket_gateway_url(self) -> str:
-        return "https://gateway.polymarket.us"
-
-    @property
     def kalshi_base_url(self) -> str:
         return "https://api.elections.kalshi.com"
 

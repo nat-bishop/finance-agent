@@ -513,21 +513,6 @@ class AgentDatabase:
             rows = session.scalars(stmt).all()
             return [r.to_dict() for r in rows]
 
-    def update_trade_status(
-        self,
-        trade_id: int,
-        status: str,
-        result_json: str | None = None,
-    ) -> None:
-        """Update trade status after order fills/cancels."""
-        with self._session_factory() as session:
-            trade = session.get(Trade, trade_id)
-            if trade:
-                trade.status = status
-                if result_json is not None:
-                    trade.result_json = result_json
-                session.commit()
-
     # ── Backup ────────────────────────────────────────────────
 
     def backup_if_needed(
