@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Literal
 
 
 class RateLimiter:
-    """Token-bucket rate limiter with separate read/write buckets."""
+    """Token-bucket rate limiter with separate read/write buckets.
+
+    Thread-safe: used from ThreadPoolExecutor in TUIServices.
+    """
 
     def __init__(self, reads_per_sec: int = 20, writes_per_sec: int = 10) -> None:
         self._tokens = {"read": float(reads_per_sec), "write": float(writes_per_sec)}
         self._max = {"read": float(reads_per_sec), "write": float(writes_per_sec)}
         self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
 
     def _refill(self) -> None:
         now = time.monotonic()
@@ -26,11 +31,12 @@ class RateLimiter:
 
     def _try_acquire(self, bucket: Literal["read", "write"]) -> float | None:
         """Try to consume a token. Returns None on success, or wait time if unavailable."""
-        self._refill()
-        if self._tokens[bucket] >= 1.0:
-            self._tokens[bucket] -= 1.0
-            return None
-        return (1.0 - self._tokens[bucket]) / self._max[bucket]
+        with self._lock:
+            self._refill()
+            if self._tokens[bucket] >= 1.0:
+                self._tokens[bucket] -= 1.0
+                return None
+            return (1.0 - self._tokens[bucket]) / self._max[bucket]
 
     async def acquire_read(self) -> None:
         while (wait := self._try_acquire("read")) is not None:

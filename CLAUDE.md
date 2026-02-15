@@ -60,7 +60,7 @@ This is a cross-platform arbitrage system for Kalshi and Polymarket US, built on
 - `tui/app.py` — FinanceApp: initializes clients, DB, SDK, registers 5 screens (F1-F5)
 - `tui/services.py` — async wrappers bridging sync exchange clients to Textual event loop
 - `tui/screens/` — dashboard (chat+sidebar), recommendations, portfolio, signals, history
-- `tui/widgets/` — 8 widgets: agent_chat, rec_card, rec_list, portfolio_panel, status_bar, ask_modal, confirm_modal, orders_table
+- `tui/widgets/` — 7 widgets: agent_chat, rec_card, rec_list, portfolio_panel, status_bar, ask_modal, confirm_modal
 
 ### Source -> Runtime boundary
 
@@ -70,7 +70,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 
 - **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point calls TUI. Wires `setup_logging()`.
 - **logging_config.py** — `setup_logging()` configures root logger with stderr console + optional file handler. Idempotent, quiets noisy libraries (alembic, sqlalchemy, urllib3).
-- **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `polymarket_max_position_usd=50`, `polymarket_fee_rate=0.0`, `recommendation_ttl_minutes=60`. Also loads and templates `prompts/system.md`.
+- **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `polymarket_max_position_usd=50`, `min_edge_pct=7.0`, `recommendation_ttl_minutes=60`. Also loads and templates `prompts/system.md`.
 - **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 9 tables. Alembic autogenerate reads these.
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 8 read-only tools, `create_db_tools(db, session_id)` → 1 tool (`recommend_trade` with legs array). Exchange is a parameter, not a namespace.
 - **kalshi_client.py** — Thin wrapper around `kalshi-python` SDK with rate limiting. Auth is RSA-PSS signing. Includes batch_create/cancel, amend_order, get_events (paginated).
@@ -78,7 +78,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, pending_signals, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
 - **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates enriched `active_markets.md` market listings (price, spread, volume, OI, DTE).
-- **signals.py** — Standalone signal generator: 2 scan types (arbitrage, cross_platform_candidate). No LLM. Arbitrage detects bracket mispricing; cross-platform candidate matches titles across exchanges and flags price gaps for agent verification.
+- **signals.py** — Standalone signal generator: 1 scan type (arbitrage). No LLM. Arbitrage detects bracket mispricing where mutually exclusive YES prices don't sum to ~100%.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
 - **prompts/system.md** — System prompt template with arb-only mission, settlement equivalence verification protocol, arbitrage structures, information hierarchy, market discovery workflow, recommendation protocol, risk rules.
@@ -107,9 +107,9 @@ Centralized via `logging_config.py`. Call `setup_logging()` once per entry point
 ### Workspace reference scripts
 
 `workspace/lib/` contains CLI tools for the agent's calculations:
-- `normalize_prices.py` — Cross-platform price comparison with fee-adjusted edge
+- `normalize_prices.py` — Cross-platform price comparison with fee-adjusted edge (3 scenarios: leg-in maker/taker, both taker)
 - `match_markets.py` — Bulk title similarity matching across platforms
-- `kelly_size.py` — Kelly criterion position sizing (fractional Kelly, risk-of-ruin)
+- `kelly_size.py` — Kelly criterion position sizing (legacy reference, not used by agent)
 
 ## Code style
 

@@ -106,6 +106,7 @@ class FinanceApp(App):
             polymarket=pm_client,
             config=trading_config,
             session_id=session_id,
+            credentials=credentials,
         )
         self._services = services
 

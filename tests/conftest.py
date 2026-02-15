@@ -135,7 +135,7 @@ def sample_event():
 def sample_signal():
     """Factory for signal dicts matching insert_signals schema."""
 
-    def _make(scan_type="wide_spread", ticker="TICKER-A", strength=0.5, edge=5.0, **extra):
+    def _make(scan_type="arbitrage", ticker="TICKER-A", strength=0.5, edge=5.0, **extra):
         return {
             "scan_type": scan_type,
             "ticker": ticker,
@@ -191,7 +191,7 @@ def mock_polymarket():
         ],
     }
     client.get_market.return_value = {"slug": "test-market", "title": "Test PM Market"}
-    client.get_orderbook.return_value = {"bids": [], "asks": []}
+    client.get_orderbook.return_value = {"yes": [[52, 100]], "no": [[48, 100]]}
     client.get_bbo.return_value = {"best_bid": 0.50, "best_ask": 0.54}
     client.get_event.return_value = {"slug": "test-event", "title": "Test Event", "markets": []}
     client.get_trades.return_value = {"trades": []}

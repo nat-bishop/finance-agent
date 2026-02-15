@@ -11,7 +11,7 @@ from typing import Any
 
 from ..config import Credentials, TradingConfig
 from ..database import AgentDatabase
-from ..fees import compute_arb_edge, leg_fee
+from ..fees import best_price_and_depth, compute_arb_edge, leg_fee
 from ..kalshi_client import KalshiAPIClient
 from ..polymarket_client import PM_INTENT_MAP, PolymarketAPIClient, cents_to_usd
 from ..ws_monitor import FillMonitor
@@ -42,7 +42,7 @@ class TUIServices:
         self._fill_monitor: FillMonitor | None = None
 
     def _loop(self) -> asyncio.AbstractEventLoop:
-        return asyncio.get_event_loop()
+        return asyncio.get_running_loop()
 
     def _get_fill_monitor(self) -> FillMonitor:
         if not self._fill_monitor and self._credentials:
@@ -119,18 +119,7 @@ class TUIServices:
     @staticmethod
     def _best_price_from_orderbook(ob: dict[str, Any], side: str) -> tuple[int | None, int]:
         """Extract best executable price and depth from orderbook."""
-        inner = ob.get("orderbook", ob)
-        if side == "yes":
-            asks = inner.get("yes", inner.get("asks", []))
-        else:
-            asks = inner.get("no", inner.get("asks", []))
-        if not asks:
-            return None, 0
-        if isinstance(asks[0], list | tuple):
-            return int(asks[0][0]), int(asks[0][1])
-        if isinstance(asks[0], dict):
-            return int(asks[0].get("price", 0)), int(asks[0].get("quantity", 0))
-        return None, 0
+        return best_price_and_depth(ob, side)
 
     # ── Order execution ───────────────────────────────────────────
 
@@ -321,11 +310,21 @@ class TUIServices:
         taker_legs = sorted_legs[1:]  # easier side(s): placed as taker after fill
 
         results = []
-        fill_monitor = None
         try:
             fill_monitor = self._get_fill_monitor()
         except RuntimeError:
-            logger.warning("Fill monitor unavailable, falling back to sequential execution")
+            logger.error(
+                "Fill monitor unavailable — cannot safely execute without fill confirmation"
+            )
+            self.db.update_group_status(group_id, "rejected")
+            return [
+                {
+                    "leg_id": lg["id"],
+                    "status": "rejected",
+                    "error": "Fill monitor unavailable — execution requires WebSocket fill confirmation",
+                }
+                for lg in legs
+            ]
 
         # Place maker leg (leg 1)
         _emit(ExecutionProgress(group_id, "placing_maker", maker_leg.get("id")))
@@ -465,6 +464,7 @@ class TUIServices:
 
         if fill_monitor:
             await fill_monitor.close()
+            self._fill_monitor = None
 
         return results
 

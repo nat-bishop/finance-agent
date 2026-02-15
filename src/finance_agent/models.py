@@ -174,7 +174,7 @@ class Session(Base):
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
-# ── Watchlist ─────────────────────────────────────────────────
+# ── Watchlist (legacy — watchlist is now /workspace/data/watchlist.md) ──
 
 
 class Watchlist(Base):

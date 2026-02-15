@@ -47,6 +47,26 @@ def leg_fee(exchange: str, contracts: int, price_cents: int, *, maker: bool = Fa
     raise ValueError(f"Unknown exchange: {exchange}")
 
 
+def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | None, int]:
+    """Extract best executable price (cents) and total depth at that level.
+
+    Handles both Kalshi format ({yes: [[price, qty], ...], no: [...]})
+    and generic format ({asks: [...], bids: [...]}).
+    """
+    ob = orderbook.get("orderbook", orderbook)
+    asks = ob.get("yes", ob.get("asks", [])) if side == "yes" else ob.get("no", ob.get("asks", []))
+
+    if not asks:
+        return None, 0
+
+    first = asks[0]
+    if isinstance(first, list | tuple):
+        return int(first[0]), int(first[1])
+    elif isinstance(first, dict):
+        return int(first.get("price", 0)), int(first.get("quantity", 0))
+    return None, 0
+
+
 def compute_arb_edge(
     legs: list[dict[str, Any]],
     contracts: int,

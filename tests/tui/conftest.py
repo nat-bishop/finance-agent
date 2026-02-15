@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from finance_agent.config import TradingConfig
@@ -10,37 +12,50 @@ from finance_agent.tui.services import TUIServices
 
 @pytest.fixture
 def trading_config(tmp_path) -> TradingConfig:
-    """TradingConfig with safe test defaults."""
+    """TradingConfig with safe test defaults (edge validation disabled)."""
     return TradingConfig(
         kalshi_max_position_usd=100.0,
         polymarket_max_position_usd=50.0,
         recommendation_ttl_minutes=60,
         db_path=str(tmp_path / "test.db"),
+        min_edge_pct=0.0,
     )
+
+
+def _mock_fill_monitor() -> MagicMock:
+    """Create a mock FillMonitor that instantly reports fills."""
+    monitor = MagicMock()
+    monitor.wait_for_fill = AsyncMock(return_value={"fill_price_cents": 45, "fill_quantity": 10})
+    monitor.close = AsyncMock()
+    return monitor
 
 
 @pytest.fixture
 def services(db, mock_kalshi, mock_polymarket, trading_config, session_id) -> TUIServices:
-    """TUIServices wired to real DB + mock exchange clients."""
-    return TUIServices(
+    """TUIServices wired to real DB + mock exchange clients + mock fill monitor."""
+    svc = TUIServices(
         db=db,
         kalshi=mock_kalshi,
         polymarket=mock_polymarket,
         config=trading_config,
         session_id=session_id,
     )
+    svc._fill_monitor = _mock_fill_monitor()
+    return svc
 
 
 @pytest.fixture
 def services_no_pm(db, mock_kalshi, trading_config, session_id) -> TUIServices:
     """TUIServices with Polymarket disabled (None)."""
-    return TUIServices(
+    svc = TUIServices(
         db=db,
         kalshi=mock_kalshi,
         polymarket=None,
         config=trading_config,
         session_id=session_id,
     )
+    svc._fill_monitor = _mock_fill_monitor()
+    return svc
 
 
 @pytest.fixture

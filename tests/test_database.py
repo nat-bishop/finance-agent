@@ -458,7 +458,7 @@ def test_insert_signals_dict_details(db, sample_signal):
 
 def test_insert_signals_string_details(db):
     sig = {
-        "scan_type": "wide_spread",
+        "scan_type": "arbitrage",
         "ticker": "T-1",
         "signal_strength": 0.5,
         "estimated_edge_pct": 5.0,

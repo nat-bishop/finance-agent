@@ -22,40 +22,51 @@ match_mod = _import_script("match_markets")
 
 
 # ── normalize_prices.compare ─────────────────────────────────────
+# New API: compare(kalshi_cents, poly_cents, contracts=100, maker=False)
+# Returns nested structure with 'scenarios' dict, not flat keys.
 
 
 def test_compare_kalshi_higher():
-    result = normalize.compare(60, 0.52)
+    result = normalize.compare(60, 52)
     assert result["direction"] == "buy_poly_sell_kalshi"
     assert result["gross_edge_pct"] == 8.0
 
 
 def test_compare_poly_higher():
-    result = normalize.compare(40, 0.52)
+    result = normalize.compare(40, 52)
     assert result["direction"] == "buy_kalshi_sell_poly"
     assert result["gross_edge_pct"] == 12.0
 
 
 def test_compare_fees_reduce_edge():
-    result = normalize.compare(60, 0.52, kalshi_fee=0.03, poly_fee=0.0)
-    assert result["net_edge_pct"] < result["gross_edge_pct"]
-    assert result["fees_pct"] > 0
+    result = normalize.compare(60, 52)
+    best = result["scenarios"]["legin_kalshi_maker"]
+    assert best["net_edge_pct"] < result["gross_edge_pct"]
+    assert best["total_fees"] > 0
 
 
 def test_compare_unprofitable():
-    # 1 cent difference: gross=1%, kalshi fee on 51 cents = 1.53%
-    result = normalize.compare(51, 0.50, kalshi_fee=0.03)
-    assert result["profitable"] is False
+    # 1 cent difference at 50/51c — fees eat the edge
+    result = normalize.compare(51, 50)
+    both_taker = result["scenarios"]["both_taker"]
+    assert both_taker["profitable"] is False
 
 
 def test_compare_equal_prices():
-    result = normalize.compare(50, 0.50)
+    result = normalize.compare(50, 50)
     assert result["gross_edge_pct"] == 0.0
 
 
-def test_compare_zero_fees():
-    result = normalize.compare(60, 0.50, kalshi_fee=0.0, poly_fee=0.0)
-    assert result["net_edge_pct"] == result["gross_edge_pct"]
+def test_compare_scenarios_structure():
+    result = normalize.compare(60, 50)
+    assert "scenarios" in result
+    assert "legin_kalshi_maker" in result["scenarios"]
+    assert "legin_poly_maker" in result["scenarios"]
+    assert "both_taker" in result["scenarios"]
+    for scenario in result["scenarios"].values():
+        assert "net_edge_usd" in scenario
+        assert "net_edge_pct" in scenario
+        assert "profitable" in scenario
 
 
 # ── kelly_size.kelly ─────────────────────────────────────────────

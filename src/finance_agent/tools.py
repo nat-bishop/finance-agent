@@ -302,7 +302,7 @@ def create_db_tools(
     for auto-pricing and balanced sizing.
     """
     from .config import TradingConfig
-    from .fees import compute_arb_edge
+    from .fees import best_price_and_depth, compute_arb_edge, leg_fee
 
     cfg: TradingConfig = trading_config or TradingConfig()
 
@@ -327,29 +327,6 @@ def create_db_tools(
             inner = market.get("market", market)
             return str(inner.get("title", inner.get("question", market_id)))
         return market_id
-
-    def _best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | None, int]:
-        """Extract best executable price (cents) and total depth at that level.
-
-        For buying YES: best ask on the YES side.
-        For buying NO: best ask on the NO side.
-        """
-        ob = orderbook.get("orderbook", orderbook)
-        if side == "yes":
-            asks = ob.get("yes", ob.get("asks", []))
-        else:
-            asks = ob.get("no", ob.get("asks", []))
-
-        if not asks:
-            return None, 0
-
-        # Asks are typically [[price, quantity], ...] or [{"price": ..., "quantity": ...}]
-        first: Any = asks[0]
-        if isinstance(first, list | tuple):
-            return int(first[0]), int(first[1])
-        elif isinstance(first, dict):
-            return int(first.get("price", 0)), int(first.get("quantity", 0))
-        return None, 0
 
     @tool(
         "recommend_trade",
@@ -459,8 +436,8 @@ def create_db_tools(
         # For 2-leg cross-platform: buy YES on cheaper exchange, buy NO on expensive
         for leg in enriched_legs:
             ob = leg["orderbook"]
-            yes_price, yes_depth = _best_price_and_depth(ob, "yes")
-            no_price, no_depth = _best_price_and_depth(ob, "no")
+            yes_price, yes_depth = best_price_and_depth(ob, "yes")
+            no_price, no_depth = best_price_and_depth(ob, "no")
             leg["yes_ask"] = yes_price
             leg["yes_depth"] = yes_depth
             leg["no_ask"] = no_price
@@ -485,14 +462,28 @@ def create_db_tools(
                 leg_a["price_cents"] = a_yes
                 leg_a["depth"] = leg_a["yes_depth"]
                 leg_b["action"], leg_b["side"] = "buy", "no"
-                leg_b["price_cents"] = leg_b.get("no_ask") or (100 - b_yes)
+                if not leg_b.get("no_ask"):
+                    return _text(
+                        {
+                            "error": f"No executable NO price for {leg_b['market_id']} "
+                            "— NO orderbook is empty"
+                        }
+                    )
+                leg_b["price_cents"] = leg_b["no_ask"]
                 leg_b["depth"] = leg_b.get("no_depth", 0)
             else:
                 leg_b["action"], leg_b["side"] = "buy", "yes"
                 leg_b["price_cents"] = b_yes
                 leg_b["depth"] = leg_b["yes_depth"]
                 leg_a["action"], leg_a["side"] = "buy", "no"
-                leg_a["price_cents"] = leg_a.get("no_ask") or (100 - a_yes)
+                if not leg_a.get("no_ask"):
+                    return _text(
+                        {
+                            "error": f"No executable NO price for {leg_a['market_id']} "
+                            "— NO orderbook is empty"
+                        }
+                    )
+                leg_a["price_cents"] = leg_a["no_ask"]
                 leg_a["depth"] = leg_a.get("no_depth", 0)
 
             # Validate prices
@@ -505,13 +496,70 @@ def create_db_tools(
                         }
                     )
         else:
-            # Bracket or multi-leg: for now return error asking for 2-leg arbs
-            return _text(
-                {
-                    "error": "Only 2-leg cross-platform arbs are supported. "
-                    "For bracket arbs, provide exactly 2 legs on different exchanges."
-                }
-            )
+            # Bracket arb: N legs, must be same exchange (mutually exclusive event)
+            leg_exchanges = {leg["exchange"] for leg in enriched_legs}
+            if len(leg_exchanges) != 1:
+                return _text(
+                    {
+                        "error": "Multi-leg arbs with mixed exchanges are not supported. "
+                        "Use 2-leg cross-platform arbs or N-leg bracket arbs on one exchange."
+                    }
+                )
+
+            # Check both directions: buy all YES vs buy all NO
+            yes_prices = [leg.get("yes_ask") for leg in enriched_legs]
+            no_prices = [leg.get("no_ask") for leg in enriched_legs]
+
+            if any(p is None for p in yes_prices):
+                missing = [
+                    leg["market_id"]
+                    for leg, p in zip(enriched_legs, yes_prices, strict=True)
+                    if p is None
+                ]
+                return _text({"error": f"Empty YES orderbook for: {', '.join(missing)}"})
+
+            yes_cost = sum(yes_prices)  # type: ignore[arg-type]
+            buy_yes_edge = 100 - yes_cost  # positive = underpriced bracket
+
+            # NO side may have empty books — only consider if all legs have prices
+            if all(p is not None for p in no_prices):
+                no_cost = sum(no_prices)  # type: ignore[arg-type]
+                buy_no_edge = 100 - no_cost  # positive = overpriced bracket
+            else:
+                no_cost = None
+                buy_no_edge = -999  # can't use NO direction
+
+            if buy_yes_edge > 0 and buy_yes_edge >= buy_no_edge:
+                # Underpriced: buy all YES (sum < 100c, guaranteed $1 payout)
+                for leg in enriched_legs:
+                    leg["action"], leg["side"] = "buy", "yes"
+                    leg["price_cents"] = leg["yes_ask"]
+                    leg["depth"] = leg["yes_depth"]
+            elif buy_no_edge > 0:
+                # Overpriced: buy all NO (YES sum > 100c → NO sum < 100c)
+                for leg in enriched_legs:
+                    leg["action"], leg["side"] = "buy", "no"
+                    leg["price_cents"] = leg["no_ask"]
+                    leg["depth"] = leg["no_depth"]
+            else:
+                return _text(
+                    {
+                        "error": f"No bracket arb edge at executable prices: "
+                        f"YES sum {yes_cost}c"
+                        + (f", NO sum {no_cost}c" if no_cost is not None else "")
+                        + " (need sum < 100c on one side)"
+                    }
+                )
+
+            # Validate all selected prices
+            for leg in enriched_legs:
+                if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
+                    return _text(
+                        {
+                            "error": f"No executable price for {leg['market_id']} "
+                            f"({leg['side']} side) — orderbook may be empty"
+                        }
+                    )
 
         # ── Compute balanced quantities ─────────────────────────
         cost_per_pair_cents = sum(leg["price_cents"] for leg in enriched_legs)
@@ -565,21 +613,23 @@ def create_db_tools(
                 }
             )
 
-        # ── Validate position limits ────────────────────────────
+        # ── Validate position limits (fee-inclusive) ─────────────
         for leg in enriched_legs:
             cost = leg["price_cents"] * contracts / 100.0
-            if leg["exchange"] == "kalshi" and cost > cfg.kalshi_max_position_usd:
+            fee = leg_fee(leg["exchange"], contracts, leg["price_cents"], maker=leg["is_maker"])
+            cost_with_fee = cost + fee
+            if leg["exchange"] == "kalshi" and cost_with_fee > cfg.kalshi_max_position_usd:
                 return _text(
                     {
-                        "error": f"Kalshi leg ${cost:.2f} exceeds limit "
-                        f"${cfg.kalshi_max_position_usd:.2f}"
+                        "error": f"Kalshi leg ${cost_with_fee:.2f} (incl ${fee:.4f} fee) "
+                        f"exceeds limit ${cfg.kalshi_max_position_usd:.2f}"
                     }
                 )
-            if leg["exchange"] == "polymarket" and cost > cfg.polymarket_max_position_usd:
+            if leg["exchange"] == "polymarket" and cost_with_fee > cfg.polymarket_max_position_usd:
                 return _text(
                     {
-                        "error": f"Polymarket leg ${cost:.2f} exceeds limit "
-                        f"${cfg.polymarket_max_position_usd:.2f}"
+                        "error": f"Polymarket leg ${cost_with_fee:.2f} (incl ${fee:.4f} fee) "
+                        f"exceeds limit ${cfg.polymarket_max_position_usd:.2f}"
                     }
                 )
 

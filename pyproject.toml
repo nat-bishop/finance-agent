@@ -24,12 +24,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Scientific computing for workspace skill scripts (agent-authored analysis)
-skills = [
-    "pandas>=3.0",
-    "matplotlib>=3.10",
-    "scikit-learn>=1.8",
-]
 dev = [
     "pytest>=9.0",
     "pytest-asyncio>=1.3",

@@ -224,6 +224,11 @@ async def test_execute_group_partial_failure(
     mock_kalshi.create_order.return_value = {"order": {"order_id": "K-ORD-1"}}
     mock_polymarket.create_order.side_effect = Exception("API error")
 
+    # Kalshi depth < PM depth → Kalshi is maker (placed first, succeeds),
+    # PM is taker (placed second, fails)
+    mock_kalshi.get_orderbook.return_value = {"yes": [[45, 10]], "no": [[55, 10]]}
+    mock_polymarket.get_orderbook.return_value = {"yes": [[52, 100]], "no": [[48, 100]]}
+
     group_id, _ = db.log_recommendation_group(
         session_id=session_id,
         thesis="Partial",
@@ -243,10 +248,10 @@ async def test_execute_group_partial_failure(
                 "exchange": "polymarket",
                 "market_id": "PM-1",
                 "market_title": "Leg 2",
-                "action": "sell",
-                "side": "yes",
+                "action": "buy",
+                "side": "no",
                 "quantity": 10,
-                "price_cents": 52,
+                "price_cents": 48,
             },
         ],
     )

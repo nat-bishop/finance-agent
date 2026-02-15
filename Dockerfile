@@ -13,7 +13,7 @@ RUN uv pip install --system --no-cache claude-code
 # Install project deps — copy source before install so -e works
 COPY pyproject.toml uv.lock /app/
 COPY src/ /app/src/
-RUN uv pip install --system --no-cache "/app[skills]"
+RUN uv pip install --system --no-cache "/app"
 
 # Create isolated agent workspace
 RUN mkdir -p /workspace/{analysis,data,lib,backups}
