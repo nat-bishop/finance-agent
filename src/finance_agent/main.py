@@ -39,8 +39,10 @@ def build_options(
 
 
 def main() -> None:
+    from .logging_config import setup_logging
     from .tui.app import FinanceApp
 
+    setup_logging(log_file="/workspace/data/agent.log")
     app = FinanceApp()
     app.run()
 

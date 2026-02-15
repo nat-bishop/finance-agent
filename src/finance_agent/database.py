@@ -6,6 +6,7 @@ Uses SQLAlchemy ORM with Alembic autogenerate migrations.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -28,6 +29,8 @@ from finance_agent.models import (
     Trade,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -42,6 +45,7 @@ class AgentDatabase:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Opening database: %s", self.db_path)
 
         self._engine = create_engine(
             f"sqlite:///{self.db_path}",
@@ -65,12 +69,15 @@ class AgentDatabase:
         from alembic import command
         from alembic.config import Config
 
+        logger.debug("Running Alembic migrations...")
         config = Config()
         config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
         config.set_main_option("sqlalchemy.url", f"sqlite:///{self.db_path}")
         command.upgrade(config, "head")
+        logger.debug("Migrations complete")
 
     def close(self) -> None:
+        logger.debug("Closing database connection")
         self._engine.dispose()
 
     # ── Generic query (escape hatch for raw SQL) ──────────────
@@ -484,8 +491,13 @@ class AgentDatabase:
         finally:
             raw_conn.close()
 
+        logger.info("Database backup created: %s", backup_path)
+
         backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
+        pruned = len(backups) - max_backups
         for old in backups[:-max_backups]:
             old.unlink()
+        if pruned > 0:
+            logger.debug("Pruned %d old backups", pruned)
 
         return str(backup_path)

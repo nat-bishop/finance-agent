@@ -12,6 +12,7 @@ Scans:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from difflib import SequenceMatcher
@@ -19,6 +20,8 @@ from typing import Any
 
 from .config import load_configs
 from .database import AgentDatabase
+
+logger = logging.getLogger(__name__)
 
 
 def _signal(
@@ -210,34 +213,38 @@ _SCANS: list[tuple[str, Any]] = [
 
 def run_signals() -> None:
     """Main entry point for the signal generator."""
+    from .logging_config import setup_logging
+
+    setup_logging()
+
     _, _, trading_config = load_configs()
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()
-    print("Signal generator starting")
-    print(f"DB: {trading_config.db_path}")
+    logger.info("Signal generator starting")
+    logger.info("DB: %s", trading_config.db_path)
 
     expired = db.expire_old_signals(max_age_hours=48)
     if expired:
-        print(f"Expired {expired} old signals")
+        logger.info("Expired %d old signals", expired)
 
     all_signals: list[dict[str, Any]] = []
     for name, func in _SCANS:
         try:
             results = func(db)
             all_signals.extend(results)
-            print(f"  {name}: {len(results)} signals")
+            logger.info("  %s: %d signals", name, len(results))
         except Exception as e:
-            print(f"  {name}: ERROR -- {e}")
+            logger.error("  %s: ERROR -- %s", name, e)
 
     if all_signals:
         count = db.insert_signals(all_signals)
-        print(f"\nInserted {count} signals")
+        logger.info("Inserted %d signals", count)
     else:
-        print("\nNo signals generated (need data -- run `make collect` first)")
+        logger.info("No signals generated (need data -- run `make collect` first)")
 
     elapsed = time.time() - start
-    print(f"Signal generation complete in {elapsed:.1f}s")
+    logger.info("Signal generation complete in %.1fs", elapsed)
     db.close()
 
 

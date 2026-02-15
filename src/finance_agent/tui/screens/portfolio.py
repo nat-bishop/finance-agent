@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, ClassVar
 
 from textual.app import ComposeResult
@@ -11,6 +12,8 @@ from textual.widgets import DataTable, Static
 
 from ..services import TUIServices
 from ..widgets.status_bar import StatusBar
+
+logger = logging.getLogger(__name__)
 
 
 class PortfolioScreen(Screen):
@@ -72,19 +75,19 @@ class PortfolioScreen(Screen):
             self._update_balances(portfolio)
             self._update_positions(portfolio)
         except Exception:
-            pass
+            logger.debug("Failed to refresh portfolio", exc_info=True)
 
         try:
             orders = await self._services.get_orders()
             self._update_orders(orders)
         except Exception:
-            pass
+            logger.debug("Failed to refresh orders", exc_info=True)
 
         try:
             trades = self._services.get_trades(limit=20)
             self._update_trades(trades)
         except Exception:
-            pass
+            logger.debug("Failed to refresh trades", exc_info=True)
 
     def _update_balances(self, portfolio: dict[str, Any]) -> None:
         kalshi = portfolio.get("kalshi", {})

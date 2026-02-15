@@ -11,6 +11,7 @@ Collection schedule (all in one run):
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,8 @@ from .config import load_configs
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
 from .polymarket_client import PolymarketAPIClient
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -158,7 +161,7 @@ def _collect_markets_by_status(
     total = 0
     batch: list[dict[str, Any]] = []
 
-    print(f"Collecting {label}...")
+    logger.info("Collecting %s...", label)
     while True:
         resp = client.search_markets(status=status, limit=200, cursor=cursor)
         markets = resp.get("markets", [])
@@ -178,7 +181,7 @@ def _collect_markets_by_status(
     if batch:
         total += db.insert_market_snapshots(batch)
 
-    print(f"  -> {total} {label}")
+    logger.info("  -> %d %s", total, label)
     return total
 
 
@@ -192,7 +195,7 @@ def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
 
 def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
     """Collect event structures with nested markets via paginated GET /events."""
-    print("Collecting events...")
+    logger.info("Collecting events...")
 
     cursor = None
     total = 0
@@ -233,7 +236,7 @@ def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
         if not cursor:
             break
 
-    print(f"  -> {total} events")
+    logger.info("  -> %d events", total)
     return total
 
 
@@ -243,7 +246,7 @@ def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -
     total = 0
     batch: list[dict[str, Any]] = []
 
-    print("Collecting Polymarket markets...")
+    logger.info("Collecting Polymarket markets...")
     offset = 0
     while True:
         resp = client.search_markets(status="open", limit=100, offset=offset)
@@ -258,13 +261,13 @@ def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -
 
     if batch:
         total += db.insert_market_snapshots(batch)
-    print(f"  -> {total} Polymarket market snapshots")
+    logger.info("  -> %d Polymarket market snapshots", total)
     return total
 
 
 def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) -> int:
     """Collect event structures from Polymarket US."""
-    print("Collecting Polymarket events...")
+    logger.info("Collecting Polymarket events...")
     total = 0
     offset = 0
 
@@ -301,7 +304,7 @@ def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) ->
 
         offset += len(events)
 
-    print(f"  -> {total} Polymarket events")
+    logger.info("  -> %d Polymarket events", total)
     return total
 
 
@@ -363,19 +366,23 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  -> Market listings written to {output_path}")
+    logger.info("  -> Market listings written to %s", output_path)
 
 
 def run_collector() -> None:
     """Main entry point for the collector."""
+    from .logging_config import setup_logging
+
+    setup_logging()
+
     _, credentials, trading_config = load_configs()
 
     client = KalshiAPIClient(credentials, trading_config)
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()
-    print("Data collector starting")
-    print(f"DB: {trading_config.db_path}")
+    logger.info("Data collector starting")
+    logger.info("DB: %s", trading_config.db_path)
 
     try:
         open_count = collect_open_markets(client, db)
@@ -394,11 +401,13 @@ def run_collector() -> None:
         _generate_market_listings(db, listings_path)
 
         elapsed = time.time() - start
-        print(f"\nCollection complete in {elapsed:.1f}s")
-        print(f"  Open: {open_count} | Settled: {settled_count} | Events: {event_count}")
-        print(f"  Polymarket: {pm_count} markets, {pm_event_count} events")
+        logger.info("Collection complete in %.1fs", elapsed)
+        logger.info(
+            "  Open: %d | Settled: %d | Events: %d", open_count, settled_count, event_count
+        )
+        logger.info("  Polymarket: %d markets, %d events", pm_count, pm_event_count)
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        logger.warning("Interrupted")
     finally:
         db.close()
 

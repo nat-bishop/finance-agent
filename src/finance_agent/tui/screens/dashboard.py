@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, ClassVar
 
 from claude_agent_sdk import ClaudeSDKClient
@@ -22,6 +23,8 @@ from ..widgets.agent_chat import AgentChat
 from ..widgets.portfolio_panel import PortfolioPanel
 from ..widgets.rec_list import RecList
 from ..widgets.status_bar import StatusBar
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardScreen(Screen):
@@ -70,13 +73,13 @@ class DashboardScreen(Screen):
             portfolio = await self._services.get_portfolio()
             self.query_one("#portfolio-panel", PortfolioPanel).update_data(portfolio)
         except Exception:
-            pass
+            logger.debug("Failed to refresh portfolio", exc_info=True)
 
         try:
             groups = self._services.get_pending_groups()
             self.query_one("#rec-list", RecList).update_recs(groups)
         except Exception:
-            pass
+            logger.debug("Failed to refresh rec list", exc_info=True)
 
     async def _poll_state(self) -> None:
         """Periodic refresh for external changes."""

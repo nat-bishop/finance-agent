@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -11,13 +12,19 @@ from claude_agent_sdk.types import HookContext, HookEvent, HookInput, HookJSONOu
 
 from .database import AgentDatabase
 
-_ALLOW: HookJSONOutput = {  # type: ignore[assignment]
-    "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "allow",
-    }
-}
+logger = logging.getLogger(__name__)
+
 _EMPTY: HookJSONOutput = {}  # type: ignore[assignment]
+
+
+def _allow_with_input(input_data: HookInput) -> HookJSONOutput:
+    return {  # type: ignore[return-value]
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": input_data,
+        }
+    }
 
 
 def create_audit_hooks(
@@ -33,13 +40,16 @@ def create_audit_hooks(
     ) -> HookJSONOutput:
         """Auto-approve all tools except AskUserQuestion (handled by canUseTool)."""
         data: dict[str, Any] = input_data  # type: ignore[assignment]
-        return _EMPTY if data.get("tool_name") == "AskUserQuestion" else _ALLOW
+        return (
+            _EMPTY if data.get("tool_name") == "AskUserQuestion" else _allow_with_input(input_data)
+        )
 
     async def audit_recommendation(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
         nonlocal rec_count
         rec_count += 1
+        logger.info("Recommendation #%d recorded", rec_count)
         if on_recommendation:
             on_recommendation()
         return _EMPTY
@@ -48,6 +58,7 @@ def create_audit_hooks(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
         duration = time.time() - session_start
+        logger.info("Session ending: %ds, %d recommendations", int(duration), rec_count)
         db.end_session(
             session_id=session_id,
             summary=f"Duration: {duration:.0f}s | Recommendations: {rec_count}",

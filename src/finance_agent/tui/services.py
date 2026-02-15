@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -11,6 +12,8 @@ from ..config import TradingConfig
 from ..database import AgentDatabase
 from ..kalshi_client import KalshiAPIClient
 from ..polymarket_client import PM_INTENT_MAP, PolymarketAPIClient, cents_to_usd
+
+logger = logging.getLogger(__name__)
 
 
 class TUIServices:
@@ -102,6 +105,15 @@ class TUIServices:
         """Place a single order based on a recommendation leg."""
         loop = self._loop()
         exchange = leg["exchange"]
+        logger.info(
+            "Executing order: %s %s %s on %s @ %dc x%d",
+            leg["action"],
+            leg["side"],
+            leg["market_id"],
+            exchange,
+            leg["price_cents"],
+            leg["quantity"],
+        )
 
         if exchange == "kalshi":
             price_key = "yes_price" if leg["side"] == "yes" else "no_price"
@@ -143,10 +155,12 @@ class TUIServices:
             return []
 
         legs = group.get("legs", [])
+        logger.info("Executing recommendation group %d (%d legs)", group_id, len(legs))
 
         # Validate limits
         error = self.validate_execution(group)
         if error:
+            logger.warning("Group %d rejected: %s", group_id, error)
             self.db.update_group_status(group_id, "rejected")
             return [{"leg_id": leg["id"], "status": "rejected", "error": error} for leg in legs]
 
@@ -172,6 +186,7 @@ class TUIServices:
                 self.db.update_leg_status(leg["id"], "executed", order_id)
                 results.append({"leg_id": leg["id"], "status": "executed", "order_id": order_id})
             except Exception as e:
+                logger.error("Leg %d failed: %s", leg["id"], e)
                 self.db.update_leg_status(leg["id"], "rejected")
                 results.append({"leg_id": leg["id"], "status": "failed", "error": str(e)})
 
@@ -184,6 +199,9 @@ class TUIServices:
         else:
             group_status = "partial"
         self.db.update_group_status(group_id, group_status)
+        logger.info(
+            "Group %d result: %s (%d/%d executed)", group_id, group_status, executed, len(legs)
+        )
 
         return results
 
@@ -197,6 +215,7 @@ class TUIServices:
 
     async def reject_group(self, group_id: int) -> None:
         """Mark an entire recommendation group as rejected."""
+        logger.info("Rejected recommendation group %d", group_id)
         group = self.db.get_group(group_id)
         if group:
             for leg in group.get("legs", []):
@@ -207,6 +226,7 @@ class TUIServices:
 
     async def cancel_order(self, exchange: str, order_id: str) -> dict[str, Any]:
         """Cancel an order on the specified exchange."""
+        logger.info("Cancelling order %s on %s", order_id, exchange)
         loop = self._loop()
         if exchange == "kalshi":
             return await loop.run_in_executor(

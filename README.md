@@ -130,19 +130,30 @@ Discovery → Investigation → Verification → Sizing → Recommendation
 
 ## Configuration
 
-All settings are configured via environment variables (`.env` file) with sensible defaults.
+API credentials load from `.env` / environment variables via Pydantic `BaseSettings`. Trading parameters and agent settings are plain dataclasses — edit `config.py` to change defaults.
 
-| Parameter | Default | Env var |
-|---|---|---|
-| Kalshi max position | $100 | `KALSHI_MAX_POSITION_USD` |
-| Polymarket max position | $50 | `POLYMARKET_MAX_POSITION_USD` |
-| Max portfolio | $1,000 | `MAX_PORTFOLIO_USD` |
-| Max contracts/order | 50 | `MAX_ORDER_COUNT` |
-| Min edge required | 7% | `MIN_EDGE_PCT` |
-| Kalshi fee rate | 3% | `KALSHI_FEE_RATE` |
-| Polymarket fee rate | 0% | `POLYMARKET_FEE_RATE` |
-| Claude budget/session | $2 | `AGENT_MAX_BUDGET_USD` |
-| Recommendation TTL | 60 min | `RECOMMENDATION_TTL_MINUTES` |
+**Credentials** (from `.env` / env vars):
+
+| Parameter | Env var |
+|---|---|
+| Kalshi API key ID | `KALSHI_API_KEY_ID` |
+| Kalshi private key (PEM) | `KALSHI_PRIVATE_KEY` |
+| Polymarket key ID | `POLYMARKET_KEY_ID` |
+| Polymarket secret key | `POLYMARKET_SECRET_KEY` |
+
+**Trading defaults** (in `config.py` — edit source to change):
+
+| Parameter | Default |
+|---|---|
+| Kalshi max position | $100 |
+| Polymarket max position | $50 |
+| Max portfolio | $1,000 |
+| Max contracts/order | 50 |
+| Min edge required | 7% |
+| Kalshi fee rate | 3% |
+| Polymarket fee rate | 0% |
+| Claude budget/session | $2 |
+| Recommendation TTL | 60 min |
 
 ## Database Schema
 
@@ -158,7 +169,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 | `recommendation_legs` | agent | TUI | group_id FK, exchange, market_id, action, side, price_cents |
 | `portfolio_snapshots` | TUI | TUI | balance_usd, positions_json |
 | `sessions` | main | agent, TUI | started_at, summary, trades_placed, recommendations_made |
-| `watchlist` | legacy | — | (ticker, exchange) PK — migrated to `/workspace/data/watchlist.md` |
+| `watchlist` | agent (markdown) | — | (ticker, exchange) PK — agent now uses `/workspace/data/watchlist.md` instead |
 
 ## Workspace
 
@@ -167,6 +178,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
   lib/
     normalize_prices.py   # Cross-platform price comparison with fee-adjusted edge
     match_markets.py      # Bulk title similarity matching across platforms
+    kelly_size.py         # Kelly criterion position sizing
   analysis/               # Agent-written analysis (writable)
   data/
     agent.db              # SQLite database
@@ -181,7 +193,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 ```
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
-  config.py            # Pydantic settings (env vars override defaults)
+  config.py            # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
   models.py            # SQLAlchemy ORM models (canonical schema for all 9 tables)
   database.py          # AgentDatabase: ORM queries, Alembic migration runner, backup
   tools.py             # Unified MCP tool factories (8 market + 1 DB)
@@ -213,6 +225,7 @@ src/finance_agent/
       status_bar.py    # Session info bar
       ask_modal.py     # Agent question dialog
       confirm_modal.py # Order confirmation dialog
+      orders_table.py  # Orders data table
 ```
 
 ## Development
