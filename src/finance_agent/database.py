@@ -233,6 +233,28 @@ class AgentDatabase:
 
     # ── Recommendations ────────────────────────────────────────────
 
+    _REC_COLS = (
+        "session_id",
+        "created_at",
+        "group_id",
+        "leg_index",
+        "exchange",
+        "market_id",
+        "market_title",
+        "action",
+        "side",
+        "quantity",
+        "price_cents",
+        "order_type",
+        "thesis",
+        "signal_id",
+        "estimated_edge_pct",
+        "kelly_fraction",
+        "confidence",
+        "equivalence_notes",
+        "expires_at",
+    )
+
     def log_recommendation(
         self,
         session_id: str,
@@ -256,34 +278,31 @@ class AgentDatabase:
     ) -> int:
         now = _now()
         expires_at = (datetime.fromisoformat(now) + timedelta(minutes=ttl_minutes)).isoformat()
+        vals = (
+            session_id,
+            now,
+            group_id,
+            leg_index,
+            exchange,
+            market_id,
+            market_title,
+            action,
+            side,
+            quantity,
+            price_cents,
+            order_type,
+            thesis,
+            signal_id,
+            estimated_edge_pct,
+            kelly_fraction,
+            confidence,
+            equivalence_notes,
+            expires_at,
+        )
+        placeholders = ", ".join(["?"] * len(self._REC_COLS))
         cursor = self.execute(
-            """INSERT INTO recommendations
-               (session_id, created_at, group_id, leg_index, exchange, market_id,
-                market_title, action, side, quantity, price_cents, order_type,
-                thesis, signal_id, estimated_edge_pct, kelly_fraction, confidence,
-                equivalence_notes, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id,
-                now,
-                group_id,
-                leg_index,
-                exchange,
-                market_id,
-                market_title,
-                action,
-                side,
-                quantity,
-                price_cents,
-                order_type,
-                thesis,
-                signal_id,
-                estimated_edge_pct,
-                kelly_fraction,
-                confidence,
-                equivalence_notes,
-                expires_at,
-            ),
+            f"INSERT INTO recommendations ({', '.join(self._REC_COLS)}) VALUES ({placeholders})",
+            vals,
         )
         return cursor.lastrowid or 0
 
@@ -312,20 +331,13 @@ class AgentDatabase:
         order_id: str | None = None,
     ) -> None:
         now = _now()
-        if status == "executed":
-            self.execute(
-                """UPDATE recommendations
-                   SET status = ?, executed_at = ?, order_id = ?
-                   WHERE id = ?""",
-                (status, now, order_id, rec_id),
-            )
-        else:
-            self.execute(
-                """UPDATE recommendations
-                   SET status = ?, reviewed_at = ?
-                   WHERE id = ?""",
-                (status, now, rec_id),
-            )
+        ts_col = "executed_at" if status == "executed" else "reviewed_at"
+        self.execute(
+            f"""UPDATE recommendations
+               SET status = ?, {ts_col} = ?, order_id = ?
+               WHERE id = ?""",
+            (status, now, order_id, rec_id),
+        )
 
     # ── Market snapshots (bulk insert for collector) ─────────────
 
@@ -493,7 +505,7 @@ class AgentDatabase:
         portfolio_delta = None
         if snapshots:
             latest = snapshots[0]["balance_usd"] or 0
-            prev = snapshots[1]["balance_usd"] or 0 if len(snapshots) >= 2 else latest
+            prev = snapshots[1]["balance_usd"] or 0 if len(snapshots) > 1 else latest
             portfolio_delta = {"balance_change": latest - prev, "latest_balance": latest}
 
         signal_history = self.query(

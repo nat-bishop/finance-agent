@@ -68,29 +68,20 @@ def _init_watchlist(db: AgentDatabase) -> None:
     """One-time migration: write DB watchlist rows to markdown file."""
     if _WATCHLIST_PATH.exists():
         return
-    rows = db.query("SELECT ticker, exchange, reason, alert_condition FROM watchlist")
     _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        _WATCHLIST_PATH.write_text(
-            "# Watchlist\n\n"
-            "Markets to monitor across sessions.\n\n"
-            "| Ticker | Exchange | Reason | Alert Condition |\n"
-            "|--------|----------|--------|-----------------|\n",
-            encoding="utf-8",
-        )
-        return
-    lines = [
-        "# Watchlist\n",
-        "\nMarkets to monitor across sessions.\n",
-        "\n| Ticker | Exchange | Reason | Alert Condition |",
-        "\n|--------|----------|--------|-----------------|",
-    ]
-    for r in rows:
-        reason = r.get("reason") or ""
-        alert = r.get("alert_condition") or ""
-        lines.append(f"\n| {r['ticker']} | {r['exchange']} | {reason} | {alert} |")
-    lines.append("\n")
-    _WATCHLIST_PATH.write_text("".join(lines), encoding="utf-8")
+    header = (
+        "# Watchlist\n\n"
+        "Markets to monitor across sessions.\n\n"
+        "| Ticker | Exchange | Reason | Alert Condition |\n"
+        "|--------|----------|--------|-----------------|\n"
+    )
+    rows = db.query("SELECT ticker, exchange, reason, alert_condition FROM watchlist")
+    row_lines = "".join(
+        f"| {r['ticker']} | {r['exchange']} | {r.get('reason') or ''} "
+        f"| {r.get('alert_condition') or ''} |\n"
+        for r in rows
+    )
+    _WATCHLIST_PATH.write_text(header + row_lines, encoding="utf-8")
 
 
 # ── Build SDK options ─────────────────────────────────────────────

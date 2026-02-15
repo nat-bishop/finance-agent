@@ -377,24 +377,19 @@ def create_db_tools(
         },
     )
     async def recommend_trade(args: dict) -> dict:
+        # Forward all matching args; add session_id + ttl + default leg_index
+        forwarded = (
+            "exchange", "market_id", "market_title", "action", "side",
+            "quantity", "price_cents", "thesis", "estimated_edge_pct",
+            "kelly_fraction", "confidence", "signal_id", "group_id",
+            "equivalence_notes",
+        )  # fmt: skip
+        kwargs = {k: args[k] for k in forwarded if k in args}
         rec_id = db.log_recommendation(
             session_id=session_id,
-            exchange=args["exchange"],
-            market_id=args["market_id"],
-            market_title=args["market_title"],
-            action=args["action"],
-            side=args["side"],
-            quantity=args["quantity"],
-            price_cents=args["price_cents"],
-            thesis=args.get("thesis"),
-            estimated_edge_pct=args.get("estimated_edge_pct"),
-            kelly_fraction=args.get("kelly_fraction"),
-            confidence=args.get("confidence"),
-            signal_id=args.get("signal_id"),
-            group_id=args.get("group_id"),
-            leg_index=args.get("leg_index", 0),
-            equivalence_notes=args.get("equivalence_notes"),
             ttl_minutes=recommendation_ttl_minutes,
+            leg_index=args.get("leg_index", 0),
+            **kwargs,
         )
         rec = db.get_recommendation(rec_id)
         return _text(

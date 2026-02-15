@@ -29,7 +29,8 @@
       "Bash(git commit -m \"$\\(cat <<''EOF''\nReduce duplication across codebase with helper extractions\n\nExtract shared patterns to cut ~145 lines:\n- tools.py: _dispatch\\(\\) for exchange routing\n- hooks.py: _ask\\(\\) and _parse_result\\(\\) helpers, simplified signatures\n- permissions.py: _approve_or_reject\\(\\) for user approval flow\n- main.py: dynamic MCP tool name generation from tool objects\n- database.py: _now\\(\\) helper, simplified portfolio delta logic\n- signals.py: _signal\\(\\) factory for consistent signal dict construction\n- collector.py: _as_list\\(\\) and _to_cents\\(\\) helpers\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(python:*)",
       "Bash(uv run:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(wc:*)"
     ]
   }
 }
