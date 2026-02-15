@@ -8,18 +8,16 @@ from polymarket_us import PolymarketUS
 
 from .api_base import BaseAPIClient
 from .config import TradingConfig
-from .rate_limiter import RateLimiter
 
 
 class PolymarketAPIClient(BaseAPIClient):
     """Convenience wrapper providing typed methods around the Polymarket US SDK."""
 
-    def __init__(
-        self,
-        config: TradingConfig,
-        rate_limiter: RateLimiter | None = None,
-    ) -> None:
-        super().__init__(rate_limiter)
+    def __init__(self, config: TradingConfig) -> None:
+        super().__init__(
+            reads_per_sec=config.polymarket_rate_limit_reads_per_sec,
+            writes_per_sec=config.polymarket_rate_limit_writes_per_sec,
+        )
         self._config = config
         self._client = PolymarketUS(
             key_id=config.polymarket_key_id,

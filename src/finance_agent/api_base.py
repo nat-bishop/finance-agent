@@ -10,8 +10,8 @@ from .rate_limiter import RateLimiter
 class BaseAPIClient:
     """Shared helpers for API client wrappers (rate limiting, response conversion)."""
 
-    def __init__(self, rate_limiter: RateLimiter | None = None) -> None:
-        self._limiter = rate_limiter
+    def __init__(self, reads_per_sec: int, writes_per_sec: int) -> None:
+        self._limiter = RateLimiter(reads_per_sec=reads_per_sec, writes_per_sec=writes_per_sec)
 
     @staticmethod
     def _to_dict(resp: Any) -> Any:
@@ -23,9 +23,7 @@ class BaseAPIClient:
         return resp
 
     def _rate_read(self) -> None:
-        if self._limiter:
-            self._limiter.acquire_read_sync()
+        self._limiter.acquire_read_sync()
 
     def _rate_write(self) -> None:
-        if self._limiter:
-            self._limiter.acquire_write_sync()
+        self._limiter.acquire_write_sync()

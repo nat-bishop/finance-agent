@@ -9,7 +9,6 @@ from kalshi_python.models import CreateOrderRequest
 
 from .api_base import BaseAPIClient
 from .config import TradingConfig
-from .rate_limiter import RateLimiter
 
 
 def _optional(**kwargs: Any) -> dict[str, Any]:
@@ -20,12 +19,11 @@ def _optional(**kwargs: Any) -> dict[str, Any]:
 class KalshiAPIClient(BaseAPIClient):
     """Convenience wrapper providing typed methods around the Kalshi SDK."""
 
-    def __init__(
-        self,
-        config: TradingConfig,
-        rate_limiter: RateLimiter | None = None,
-    ) -> None:
-        super().__init__(rate_limiter)
+    def __init__(self, config: TradingConfig) -> None:
+        super().__init__(
+            reads_per_sec=config.kalshi_rate_limit_reads_per_sec,
+            writes_per_sec=config.kalshi_rate_limit_writes_per_sec,
+        )
         self._config = config
         self._client = self._build_client(config)
 

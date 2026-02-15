@@ -19,7 +19,6 @@ from .config import load_configs
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
 from .polymarket_client import PolymarketAPIClient
-from .rate_limiter import RateLimiter
 
 
 def _now_iso() -> str:
@@ -309,11 +308,7 @@ def run_collector() -> None:
     """Main entry point for the collector."""
     _, trading_config = load_configs()
 
-    limiter = RateLimiter(
-        reads_per_sec=trading_config.rate_limit_reads_per_sec,
-        writes_per_sec=trading_config.rate_limit_writes_per_sec,
-    )
-    client = KalshiAPIClient(trading_config, rate_limiter=limiter)
+    client = KalshiAPIClient(trading_config)
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()
@@ -328,7 +323,7 @@ def run_collector() -> None:
         pm_count = 0
         pm_event_count = 0
         if trading_config.polymarket_enabled and trading_config.polymarket_key_id:
-            pm_client = PolymarketAPIClient(trading_config, rate_limiter=limiter)
+            pm_client = PolymarketAPIClient(trading_config)
             pm_count = collect_polymarket_markets(pm_client, db)
             pm_event_count = collect_polymarket_events(pm_client, db)
 
