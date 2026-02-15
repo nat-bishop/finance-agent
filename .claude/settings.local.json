@@ -30,7 +30,8 @@
       "Bash(python:*)",
       "Bash(uv run:*)",
       "Bash(git commit:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(uv run pytest:*)"
     ]
   }
 }
