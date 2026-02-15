@@ -18,14 +18,14 @@ from finance_agent.config import (
 
 def test_trading_config_defaults():
     config = TradingConfig()
-    assert config.kalshi_fee_rate == 0.03
-    assert config.polymarket_fee_rate == 0.0
     assert config.recommendation_ttl_minutes == 60
     assert config.kalshi_max_position_usd == 100.0
     assert config.max_portfolio_usd == 1000.0
     assert config.max_order_count == 50
     assert config.min_edge_pct == 7.0
     assert config.polymarket_enabled is False
+    assert config.execution_timeout_seconds == 300
+    assert config.max_slippage_cents == 3
 
 
 def test_trading_config_urls():
@@ -82,7 +82,7 @@ def test_build_system_prompt_substitutes():
     config = TradingConfig()
     prompt = build_system_prompt(config)
     assert "100.0" in prompt  # KALSHI_MAX_POSITION_USD
-    assert "0.03" in prompt  # KALSHI_FEE_RATE
+    assert "300" in prompt  # EXECUTION_TIMEOUT_SECONDS
 
 
 def test_build_system_prompt_no_unresolved_placeholders():

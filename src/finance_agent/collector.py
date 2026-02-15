@@ -320,47 +320,91 @@ def _fmt_volume(n: int | float | None) -> str:
     return str(n)
 
 
+def _format_market_line(m: dict[str, Any]) -> str:
+    """Format a single market line for the listings file."""
+    spr = m["spread_cents"]
+    spr_s = f"spr:{spr}c" if spr is not None else "spr:?"
+    vol_s = f"vol24h:{_fmt_volume(m['volume_24h'])}"
+    oi_s = f"oi:{_fmt_volume(m['open_interest'])}"
+    dte = m["days_to_expiration"]
+    dte_s = f"dte:{int(dte)}d" if dte is not None else "dte:?"
+    return (
+        f"- {m['title']} — {m['mid_price_cents']}c"
+        f" | {spr_s} {vol_s} {oi_s} {dte_s}"
+        f" [{m['ticker']}]"
+    )
+
+
 def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
-    """Write category-grouped market summary for agent semantic discovery."""
+    """Write category-grouped market summary for agent semantic discovery.
+
+    Markets are grouped by event within each exchange section. Mutually exclusive
+    events show the price sum so bracket arbs are visible from the file.
+    """
     markets = db.query("""
-        SELECT exchange, ticker, title, mid_price_cents, category,
+        SELECT exchange, ticker, event_ticker, title, mid_price_cents, category,
                spread_cents, volume_24h, open_interest, days_to_expiration
         FROM market_snapshots
         WHERE status = 'open' AND mid_price_cents IS NOT NULL
         GROUP BY exchange, ticker
         HAVING captured_at = MAX(captured_at)
-        ORDER BY category, exchange, title
+        ORDER BY category, exchange, event_ticker, title
     """)
 
-    by_cat: dict[str, dict[str, list]] = {}
+    # Fetch event metadata for grouping
+    event_rows = db.query("SELECT event_ticker, exchange, title, mutually_exclusive FROM events")
+    event_map: dict[tuple[str, str], dict[str, Any]] = {
+        (e["event_ticker"], e["exchange"]): e for e in event_rows
+    }
+
+    # Build nested: {category: {exchange: {event_ticker: [markets]}}}
+    by_cat: dict[str, dict[str, dict[str | None, list]]] = {}
     for m in markets:
-        by_cat.setdefault(m["category"] or "Other", {}).setdefault(m["exchange"], []).append(m)
+        cat = m["category"] or "Other"
+        exch = m["exchange"]
+        evt = m["event_ticker"]
+        by_cat.setdefault(cat, {}).setdefault(exch, {}).setdefault(evt, []).append(m)
 
     now = _now_iso()
-    total = {e: sum(len(v.get(e, [])) for v in by_cat.values()) for e in ("kalshi", "polymarket")}
+    flat_total: dict[str, int] = {"kalshi": 0, "polymarket": 0}
+    for cat_data in by_cat.values():
+        for exch, evt_groups in cat_data.items():
+            flat_total[exch] = flat_total.get(exch, 0) + sum(len(ms) for ms in evt_groups.values())
+
     lines = [f"# Active Markets — {now}\n"]
     lines.append(
-        f"\n{total['kalshi']} Kalshi, {total['polymarket']} Polymarket. Prices in cents.\n"
+        f"\n{flat_total['kalshi']} Kalshi, {flat_total['polymarket']} Polymarket. Prices in cents."
     )
+    lines.append("Format: Title — MIDc | spr:SPREAD vol24h:VOL24H oi:OI dte:DTE [TICKER]\n")
 
     for cat in sorted(by_cat):
         lines.append(f"\n## {cat}\n")
         for exch in ("kalshi", "polymarket"):
-            ms = by_cat[cat].get(exch, [])
-            if ms:
-                lines.append(f"\n### {exch.title()} ({len(ms)} markets)")
-                for m in ms:
-                    spr = m["spread_cents"]
-                    spr_s = f"spr:{spr}c" if spr is not None else "spr:?"
-                    vol_s = f"vol24h:{_fmt_volume(m['volume_24h'])}"
-                    oi_s = f"oi:{_fmt_volume(m['open_interest'])}"
-                    dte = m["days_to_expiration"]
-                    dte_s = f"dte:{int(dte)}d" if dte is not None else "dte:?"
-                    lines.append(
-                        f"- {m['title']} — {m['mid_price_cents']}c"
-                        f" | {spr_s} {vol_s} {oi_s} {dte_s}"
-                        f" [{m['ticker']}]"
-                    )
+            evt_groups = by_cat[cat].get(exch, {})
+            if not evt_groups:
+                continue
+            total_markets = sum(len(ms) for ms in evt_groups.values())
+            lines.append(f"\n### {exch.title()} ({total_markets} markets)")
+
+            for evt_ticker, ms in evt_groups.items():
+                evt_meta = event_map.get((evt_ticker, exch)) if evt_ticker else None
+
+                if evt_meta and len(ms) >= 2:
+                    # Multi-market event — show event header
+                    mut_excl = evt_meta.get("mutually_exclusive")
+                    header = f"\n**{evt_ticker} — {evt_meta['title']}** ({len(ms)} markets"
+                    if mut_excl:
+                        price_sum = sum(m["mid_price_cents"] or 0 for m in ms)
+                        header += f", mutually exclusive, sum: {price_sum}c"
+                    header += ")"
+                    lines.append(header)
+                    for m in ms:
+                        lines.append(_format_market_line(m))
+                else:
+                    # Standalone market(s) — no event header
+                    for m in ms:
+                        lines.append(_format_market_line(m))
+
         lines.append("")
 
     out = Path(output_path)
@@ -399,6 +443,12 @@ def run_collector() -> None:
         # Generate market listings for agent semantic discovery
         listings_path = str(Path(trading_config.db_path).parent / "active_markets.md")
         _generate_market_listings(db, listings_path)
+
+        # Run signal generation on freshly collected data
+        from .signals import generate_signals
+
+        sig_count = generate_signals(db)
+        logger.info("  -> %d signals generated", sig_count)
 
         elapsed = time.time() - start
         logger.info("Collection complete in %.1fs", elapsed)

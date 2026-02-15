@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, event, insert, select, update
+from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 
@@ -186,6 +186,9 @@ class AgentDatabase:
         signal_id: int | None = None,
         legs: list[dict[str, Any]] | None = None,
         ttl_minutes: int = 60,
+        total_exposure_usd: float | None = None,
+        computed_edge_pct: float | None = None,
+        computed_fees_usd: float | None = None,
     ) -> tuple[int, str]:
         """Insert a recommendation group + legs atomically. Returns (group_id, expires_at)."""
         now = _now()
@@ -199,6 +202,9 @@ class AgentDatabase:
             estimated_edge_pct=estimated_edge_pct,
             signal_id=signal_id,
             expires_at=expires_at,
+            total_exposure_usd=total_exposure_usd,
+            computed_edge_pct=computed_edge_pct,
+            computed_fees_usd=computed_fees_usd,
         )
         for i, leg in enumerate(legs or []):
             group.legs.append(
@@ -207,10 +213,12 @@ class AgentDatabase:
                     exchange=leg["exchange"],
                     market_id=leg["market_id"],
                     market_title=leg.get("market_title"),
-                    action=leg["action"],
-                    side=leg["side"],
-                    quantity=leg["quantity"],
-                    price_cents=leg["price_cents"],
+                    action=leg.get("action"),
+                    side=leg.get("side"),
+                    quantity=leg.get("quantity"),
+                    price_cents=leg.get("price_cents"),
+                    is_maker=leg.get("is_maker"),
+                    orderbook_snapshot_json=leg.get("orderbook_snapshot_json"),
                 )
             )
 
@@ -258,6 +266,31 @@ class AgentDatabase:
                 group.status = status
                 ts_col = "executed_at" if status == "executed" else "reviewed_at"
                 setattr(group, ts_col, _now())
+                session.commit()
+
+    def update_leg_fill(self, leg_id: int, fill_price_cents: int, fill_quantity: int) -> None:
+        """Record actual fill data from exchange after order executes."""
+        with self._session_factory() as session:
+            leg = session.get(RecommendationLeg, leg_id)
+            if leg:
+                leg.fill_price_cents = fill_price_cents
+                leg.fill_quantity = fill_quantity
+                session.commit()
+
+    def update_group_computed_fields(
+        self,
+        group_id: int,
+        computed_edge_pct: float | None = None,
+        computed_fees_usd: float | None = None,
+    ) -> None:
+        """Update code-computed fields (e.g. at execution time with fresh orderbook)."""
+        with self._session_factory() as session:
+            group = session.get(RecommendationGroup, group_id)
+            if group:
+                if computed_edge_pct is not None:
+                    group.computed_edge_pct = computed_edge_pct
+                if computed_fees_usd is not None:
+                    group.computed_fees_usd = computed_fees_usd
                 session.commit()
 
     # ── Market snapshots (bulk insert for collector) ──────────
@@ -340,6 +373,13 @@ class AgentDatabase:
             session.commit()
         return len(mapped_rows)
 
+    def clear_pending_signals(self) -> int:
+        """Delete all pending signals. Called before re-generating to avoid duplicates."""
+        with self._session_factory() as session:
+            result = session.execute(delete(Signal).where(Signal.status == "pending"))
+            session.commit()
+            return result.rowcount  # type: ignore[attr-defined, return-value]
+
     def expire_old_signals(self, max_age_hours: int = 48) -> int:
         cutoff = (datetime.now(UTC) - timedelta(hours=max_age_hours)).isoformat()
         with self._session_factory() as session:
@@ -349,7 +389,7 @@ class AgentDatabase:
                 .values(status="expired")
             )
             session.commit()
-            return result.rowcount  # type: ignore[return-value]
+            return result.rowcount  # type: ignore[attr-defined, return-value]
 
     # ── Session state (for startup) ───────────────────────────
 
@@ -486,7 +526,10 @@ class AgentDatabase:
         raw_conn = self._engine.raw_connection()
         try:
             backup_conn = sqlite3.connect(str(backup_path))
-            raw_conn.driver_connection.backup(backup_conn)
+            driver = raw_conn.driver_connection
+            if driver is None:
+                raise RuntimeError("No underlying driver connection for backup")
+            driver.backup(backup_conn)  # type: ignore[union-attr]
             backup_conn.close()
         finally:
             raw_conn.close()

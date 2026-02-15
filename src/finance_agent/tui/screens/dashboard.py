@@ -114,7 +114,7 @@ class DashboardScreen(Screen):
             group = self._services.db.get_group(group_id)
             if group:
 
-                def on_confirm(ok: bool) -> None:
+                def on_confirm(ok: bool | None) -> None:
                     if ok:
                         self.run_worker(self._execute_and_refresh(group_id))
 

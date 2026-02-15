@@ -144,67 +144,50 @@ async def test_get_orders_both(mock_kalshi, mock_polymarket):
 # ── DB tools ─────────────────────────────────────────────────────
 
 
-async def test_recommend_trade_tool(db, session_id):
-    tools = create_db_tools(db, session_id, recommendation_ttl_minutes=30)
+def _arb_mocks(mock_kalshi, mock_polymarket):
+    """Set up orderbooks that produce a profitable arb (Kalshi YES=45, PM YES=52)."""
+    mock_kalshi.get_orderbook.return_value = {"yes": [[45, 100]], "no": [[55, 100]]}
+    mock_kalshi.get_market.return_value = {"market": {"title": "Test Kalshi Market"}}
+    mock_polymarket.get_orderbook.return_value = {"yes": [[52, 100]], "no": [[48, 100]]}
+    mock_polymarket.get_market.return_value = {"title": "Test PM Market"}
+
+
+async def test_recommend_trade_tool(db, session_id, mock_kalshi, mock_polymarket):
+    _arb_mocks(mock_kalshi, mock_polymarket)
+    tools = create_db_tools(
+        db, session_id, mock_kalshi, mock_polymarket, recommendation_ttl_minutes=30
+    )
     result = await _call(tools, 0)(
         {
             "thesis": "Cross-platform arbitrage on presidential election",
-            "estimated_edge_pct": 7.5,
             "equivalence_notes": "Both resolve based on AP call, same timing",
+            "total_exposure_usd": 50.0,
             "legs": [
-                {
-                    "exchange": "kalshi",
-                    "market_id": "K-MKT-1",
-                    "market_title": "Test Market Kalshi",
-                    "action": "buy",
-                    "side": "yes",
-                    "quantity": 10,
-                    "price_cents": 45,
-                },
-                {
-                    "exchange": "polymarket",
-                    "market_id": "PM-MKT-1",
-                    "market_title": "Test Market PM",
-                    "action": "sell",
-                    "side": "yes",
-                    "quantity": 10,
-                    "price_cents": 52,
-                },
+                {"exchange": "kalshi", "market_id": "K-MKT-1"},
+                {"exchange": "polymarket", "market_id": "PM-MKT-1"},
             ],
         }
     )
     data = json.loads(result["content"][0]["text"])
     assert data["group_id"] > 0
-    assert data["leg_count"] == 2
     assert data["expires_at"] is not None
+    assert "computed" in data
+    assert data["computed"]["contracts_per_leg"] > 0
 
 
-async def test_recommend_trade_creates_group_with_legs(db, session_id):
-    tools = create_db_tools(db, session_id)
+async def test_recommend_trade_creates_group_with_legs(
+    db, session_id, mock_kalshi, mock_polymarket
+):
+    _arb_mocks(mock_kalshi, mock_polymarket)
+    tools = create_db_tools(db, session_id, mock_kalshi, mock_polymarket)
     await _call(tools, 0)(
         {
-            "thesis": "Bracket arb: prices sum to 112",
-            "estimated_edge_pct": 6.0,
+            "thesis": "Cross-platform arb: price discrepancy detected",
             "equivalence_notes": "Same mutually exclusive event, verified resolution source",
+            "total_exposure_usd": 50.0,
             "legs": [
-                {
-                    "exchange": "kalshi",
-                    "market_id": "K-1",
-                    "market_title": "Leg 1",
-                    "action": "buy",
-                    "side": "yes",
-                    "quantity": 10,
-                    "price_cents": 45,
-                },
-                {
-                    "exchange": "polymarket",
-                    "market_id": "PM-1",
-                    "market_title": "Leg 2",
-                    "action": "sell",
-                    "side": "yes",
-                    "quantity": 10,
-                    "price_cents": 52,
-                },
+                {"exchange": "kalshi", "market_id": "K-1"},
+                {"exchange": "polymarket", "market_id": "PM-1"},
             ],
         }
     )
@@ -213,46 +196,39 @@ async def test_recommend_trade_creates_group_with_legs(db, session_id):
     assert len(groups[0]["legs"]) == 2
     assert groups[0]["legs"][0]["exchange"] == "kalshi"
     assert groups[0]["legs"][1]["exchange"] == "polymarket"
+    # Verify computed fields are populated
+    assert groups[0]["computed_edge_pct"] is not None
+    assert groups[0]["computed_fees_usd"] is not None
+    assert groups[0]["total_exposure_usd"] == 50.0
 
 
-async def test_recommend_trade_ttl_override(db, session_id):
-    tools_30 = create_db_tools(db, session_id, recommendation_ttl_minutes=30)
-    tools_120 = create_db_tools(db, session_id, recommendation_ttl_minutes=120)
+async def test_recommend_trade_ttl_override(db, session_id, mock_kalshi, mock_polymarket):
+    _arb_mocks(mock_kalshi, mock_polymarket)
+    tools_30 = create_db_tools(
+        db, session_id, mock_kalshi, mock_polymarket, recommendation_ttl_minutes=30
+    )
+    tools_120 = create_db_tools(
+        db, session_id, mock_kalshi, mock_polymarket, recommendation_ttl_minutes=120
+    )
 
     leg_pair = [
-        {
-            "exchange": "kalshi",
-            "market_id": "K-1",
-            "market_title": "T1",
-            "action": "buy",
-            "side": "yes",
-            "quantity": 10,
-            "price_cents": 45,
-        },
-        {
-            "exchange": "polymarket",
-            "market_id": "PM-1",
-            "market_title": "T2",
-            "action": "sell",
-            "side": "yes",
-            "quantity": 10,
-            "price_cents": 52,
-        },
+        {"exchange": "kalshi", "market_id": "K-1"},
+        {"exchange": "polymarket", "market_id": "PM-1"},
     ]
 
     r1 = await _call(tools_30, 0)(
         {
             "thesis": "Short TTL arb opportunity test",
-            "estimated_edge_pct": 5.0,
-            "equivalence_notes": "Verified same resolution",
+            "equivalence_notes": "Verified same resolution criteria match",
+            "total_exposure_usd": 50.0,
             "legs": leg_pair,
         }
     )
     r2 = await _call(tools_120, 0)(
         {
             "thesis": "Long TTL arb opportunity test",
-            "estimated_edge_pct": 5.0,
-            "equivalence_notes": "Verified same resolution",
+            "equivalence_notes": "Verified same resolution criteria match",
+            "total_exposure_usd": 50.0,
             "legs": leg_pair,
         }
     )
@@ -261,37 +237,42 @@ async def test_recommend_trade_ttl_override(db, session_id):
     assert d1["expires_at"] < d2["expires_at"]
 
 
-async def test_recommend_trade_warns_on_missing_equivalence(db, session_id):
-    tools = create_db_tools(db, session_id)
+async def test_recommend_trade_rejects_missing_equivalence(
+    db, session_id, mock_kalshi, mock_polymarket
+):
+    _arb_mocks(mock_kalshi, mock_polymarket)
+    tools = create_db_tools(db, session_id, mock_kalshi, mock_polymarket)
     result = await _call(tools, 0)(
         {
             "thesis": "Missing equivalence notes test",
-            "estimated_edge_pct": 5.0,
             "equivalence_notes": "",
+            "total_exposure_usd": 50.0,
             "legs": [
-                {
-                    "exchange": "kalshi",
-                    "market_id": "K-1",
-                    "market_title": "L1",
-                    "action": "buy",
-                    "side": "yes",
-                    "quantity": 10,
-                    "price_cents": 45,
-                },
-                {
-                    "exchange": "polymarket",
-                    "market_id": "PM-1",
-                    "market_title": "L2",
-                    "action": "sell",
-                    "side": "yes",
-                    "quantity": 10,
-                    "price_cents": 52,
-                },
+                {"exchange": "kalshi", "market_id": "K-1"},
+                {"exchange": "polymarket", "market_id": "PM-1"},
             ],
         }
     )
     data = json.loads(result["content"][0]["text"])
-    assert "warnings" in data
+    assert "error" in data
+
+
+async def test_recommend_trade_rejects_same_exchange(db, session_id, mock_kalshi, mock_polymarket):
+    _arb_mocks(mock_kalshi, mock_polymarket)
+    tools = create_db_tools(db, session_id, mock_kalshi, mock_polymarket)
+    result = await _call(tools, 0)(
+        {
+            "thesis": "Same exchange should fail",
+            "equivalence_notes": "Verified resolution source matches exactly",
+            "total_exposure_usd": 50.0,
+            "legs": [
+                {"exchange": "kalshi", "market_id": "K-1"},
+                {"exchange": "kalshi", "market_id": "K-2"},
+            ],
+        }
+    )
+    data = json.loads(result["content"][0]["text"])
+    assert "error" in data
 
 
 # ── Tool count verification ──────────────────────────────────────
@@ -302,6 +283,6 @@ def test_market_tools_count(mock_kalshi, mock_polymarket):
     assert len(tools) == 8
 
 
-def test_db_tools_count(db, session_id):
-    tools = create_db_tools(db, session_id)
+def test_db_tools_count(db, session_id, mock_kalshi, mock_polymarket):
+    tools = create_db_tools(db, session_id, mock_kalshi, mock_polymarket)
     assert len(tools) == 1

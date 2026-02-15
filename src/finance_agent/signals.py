@@ -6,20 +6,18 @@ Reads from SQLite (market_snapshots, events), writes to signals table.
 
 Scans:
 - Arbitrage: bracket price sums != ~100%
-- Cross-platform candidate: title-matched pairs with price gaps across exchanges
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 import time
-from difflib import SequenceMatcher
 from typing import Any
 
 from .config import load_configs
 from .database import AgentDatabase
+from .fees import kalshi_fee
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +48,16 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     """
     signals = []
 
+    # Batch-fetch latest snapshot per ticker for spread/volume enrichment
+    snapshots = db.query(
+        """SELECT ticker, spread_cents, volume_24h, volume
+           FROM market_snapshots
+           WHERE exchange = 'kalshi' AND status = 'open'
+           GROUP BY ticker
+           HAVING captured_at = MAX(captured_at)"""
+    )
+    snapshot_map = {s["ticker"]: s for s in snapshots}
+
     events = db.query(
         """SELECT event_ticker, title, category, mutually_exclusive, markets_json
            FROM events WHERE mutually_exclusive = 1 AND markets_json IS NOT NULL"""
@@ -64,38 +72,79 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
         if len(markets) < 2:
             continue
 
-        # Use mid-price (average of bid/ask) for each market
+        # Use mid-price (average of bid/ask) for each market, enriched with liquidity
         legs = []
         for m in markets:
             bid = m.get("yes_bid") or 0
             ask = m.get("yes_ask") or 0
             if bid or ask:
                 mid_price = (bid + ask) / 2 if bid and ask else (bid or ask)
-                legs.append({"ticker": m.get("ticker", ""), "mid_price": mid_price})
+                ticker = m.get("ticker", "")
+                snap = snapshot_map.get(ticker, {})
+                legs.append(
+                    {
+                        "ticker": ticker,
+                        "mid_price": mid_price,
+                        "spread": snap.get("spread_cents"),
+                        "volume_24h": snap.get("volume_24h") or snap.get("volume") or 0,
+                    }
+                )
 
         if len(legs) < 2:
+            continue
+
+        # Skip if ALL legs are dead (no volume and wide spread)
+        if all(leg["volume_24h"] == 0 and (leg["spread"] or 0) > 20 for leg in legs):
             continue
 
         price_sum = sum(leg["mid_price"] for leg in legs)
         deviation = abs(price_sum - 100)
 
         if deviation > 2:
+            # Fee-adjusted edge: estimate fees for 100 contracts using Kalshi P(1-P)
+            est_contracts = 100
+            total_fees_usd = sum(
+                kalshi_fee(est_contracts, round(leg["mid_price"]))
+                for leg in legs
+                if 1 <= round(leg["mid_price"]) <= 99
+            )
+            gross_edge_usd = est_contracts * deviation / 100.0
+            net_edge_usd = gross_edge_usd - total_fees_usd
+            net_edge_pct = (net_edge_usd / est_contracts) * 100 if est_contracts else 0
+
+            if net_edge_pct <= 0:
+                continue  # Not profitable after fees
+
+            # Liquidity-weighted strength (demotes dead markets, promotes liquid ones)
+            min_vol = min(leg["volume_24h"] for leg in legs)
+            liquidity_factor = min(1.0, min_vol / 100) if min_vol > 0 else 0.1
+            strength = (deviation / 10) * liquidity_factor
+
             signals.append(
                 _signal(
                     "arbitrage",
                     event["event_ticker"],
-                    deviation / 10,
-                    deviation,
+                    strength,
+                    round(net_edge_pct, 2),
                     {
                         "title": event["title"],
                         "price_sum": round(price_sum, 1),
                         "deviation_cents": round(deviation, 1),
+                        "gross_edge_pct": round(deviation, 2),
+                        "estimated_fees_usd": round(total_fees_usd, 4),
                         "direction": "overpriced" if price_sum > 100 else "underpriced",
                         "legs": [
-                            {"ticker": leg["ticker"], "mid_price": round(leg["mid_price"], 1)}
+                            {
+                                "ticker": leg["ticker"],
+                                "mid_price": round(leg["mid_price"], 1),
+                                "spread": leg["spread"],
+                                "volume_24h": leg["volume_24h"],
+                            }
                             for leg in legs
                         ],
                         "num_markets": len(legs),
+                        "min_leg_volume_24h": min(leg["volume_24h"] for leg in legs),
+                        "max_leg_spread": max((leg["spread"] or 0) for leg in legs),
                     },
                     event_ticker=event["event_ticker"],
                 )
@@ -104,115 +153,38 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     return signals
 
 
-def _norm_title(t: str) -> str:
-    """Normalize market title for fuzzy matching."""
-    t = t.lower().strip()
-    t = re.sub(r'[?!.,;:\'"()]', "", t)
-    t = re.sub(r"\b(will|the|be|a|an|to|in|on|by|of)\b", "", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def _generate_cross_platform_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find cross-platform pairs with similar titles and price gaps.
-
-    Matches Kalshi and Polymarket markets by normalized title similarity,
-    then filters by price gap and volume. These are CANDIDATES only — the
-    agent must verify settlement equivalence before recommending.
-    """
-    signals: list[dict[str, Any]] = []
-
-    kalshi_markets = db.query(
-        """SELECT ticker, title, mid_price_cents, volume_24h, volume
-           FROM market_snapshots
-           WHERE exchange = 'kalshi' AND status = 'open'
-             AND mid_price_cents IS NOT NULL
-           GROUP BY ticker
-           HAVING captured_at = MAX(captured_at)"""
-    )
-
-    poly_markets = db.query(
-        """SELECT ticker, title, mid_price_cents, volume_24h, volume
-           FROM market_snapshots
-           WHERE exchange = 'polymarket' AND status = 'open'
-             AND mid_price_cents IS NOT NULL
-           GROUP BY ticker
-           HAVING captured_at = MAX(captured_at)"""
-    )
-
-    if not kalshi_markets or not poly_markets:
-        return signals
-
-    # Pre-normalize polymarket titles
-    poly_normed = [(m, _norm_title(m["title"] or "")) for m in poly_markets]
-
-    for km in kalshi_markets:
-        kn = _norm_title(km["title"] or "")
-        if not kn:
-            continue
-
-        best_score = 0.0
-        best_pm: dict[str, Any] | None = None
-        for pm, pn in poly_normed:
-            score = SequenceMatcher(None, kn, pn).ratio()
-            if score > best_score:
-                best_score, best_pm = score, pm
-
-        if best_score < 0.7 or best_pm is None:
-            continue
-
-        k_mid = km["mid_price_cents"]
-        p_mid = best_pm["mid_price_cents"]
-        gap = abs(k_mid - p_mid)
-
-        if gap < 3:
-            continue
-
-        # At least one market should have some volume
-        k_vol = km["volume_24h"] or km["volume"] or 0
-        p_vol = best_pm["volume_24h"] or best_pm["volume"] or 0
-        if k_vol == 0 and p_vol == 0:
-            continue
-
-        # Strength: weighted combination of similarity, gap, and liquidity
-        liq_score = min(1.0, (k_vol + p_vol) / 200)
-        strength = best_score * (gap / 20) * (0.5 + 0.5 * liq_score)
-
-        direction = "buy_kalshi" if k_mid < p_mid else "buy_polymarket"
-
-        signals.append(
-            _signal(
-                "cross_platform_candidate",
-                km["ticker"],
-                strength,
-                gap,  # Gross gap, not fee-adjusted
-                {
-                    "kalshi_ticker": km["ticker"],
-                    "kalshi_title": km["title"],
-                    "kalshi_mid": k_mid,
-                    "polymarket_slug": best_pm["ticker"],
-                    "polymarket_title": best_pm["title"],
-                    "polymarket_mid": p_mid,
-                    "price_gap_cents": gap,
-                    "title_similarity": round(best_score, 3),
-                    "needs_verification": best_score < 0.9,
-                    "direction": direction,
-                },
-            )
-        )
-
-    # Return top 20 by estimated edge (gap)
-    signals.sort(key=lambda s: s["estimated_edge_pct"], reverse=True)
-    return signals[:20]
-
-
 _SCANS: list[tuple[str, Any]] = [
     ("arbitrage", _generate_arbitrage_signals),
-    ("cross_platform_candidate", _generate_cross_platform_signals),
 ]
 
 
+def generate_signals(db: AgentDatabase) -> int:
+    """Run signal generation against an existing DB. Returns count inserted.
+
+    Clears pending signals first to avoid duplicates when called from
+    both the collector and TUI startup.
+    """
+    db.expire_old_signals(max_age_hours=48)
+    db.clear_pending_signals()
+
+    all_signals: list[dict[str, Any]] = []
+    for name, func in _SCANS:
+        try:
+            results = func(db)
+            all_signals.extend(results)
+            logger.info("  %s: %d signals", name, len(results))
+        except Exception:
+            logger.exception("  %s: scan failed", name)
+
+    if all_signals:
+        count = db.insert_signals(all_signals)
+        logger.info("Inserted %d signals", count)
+        return count
+    return 0
+
+
 def run_signals() -> None:
-    """Main entry point for the signal generator."""
+    """Main entry point for the signal generator (standalone `make signals`)."""
     from .logging_config import setup_logging
 
     setup_logging()
@@ -224,23 +196,8 @@ def run_signals() -> None:
     logger.info("Signal generator starting")
     logger.info("DB: %s", trading_config.db_path)
 
-    expired = db.expire_old_signals(max_age_hours=48)
-    if expired:
-        logger.info("Expired %d old signals", expired)
-
-    all_signals: list[dict[str, Any]] = []
-    for name, func in _SCANS:
-        try:
-            results = func(db)
-            all_signals.extend(results)
-            logger.info("  %s: %d signals", name, len(results))
-        except Exception as e:
-            logger.error("  %s: ERROR -- %s", name, e)
-
-    if all_signals:
-        count = db.insert_signals(all_signals)
-        logger.info("Inserted %d signals", count)
-    else:
+    count = generate_signals(db)
+    if not count:
         logger.info("No signals generated (need data -- run `make collect` first)")
 
     elapsed = time.time() - start

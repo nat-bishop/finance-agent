@@ -291,27 +291,80 @@ def create_market_tools(
 def create_db_tools(
     db: AgentDatabase,
     session_id: str,
+    kalshi: KalshiAPIClient,
+    polymarket: PolymarketAPIClient | None,
+    trading_config: Any = None,
     recommendation_ttl_minutes: int = 60,
 ) -> list:
-    """Database tools for agent persistence."""
+    """Database tools for agent persistence.
+
+    Exchange clients are needed to fetch orderbooks at recommendation time
+    for auto-pricing and balanced sizing.
+    """
+    from .config import TradingConfig
+    from .fees import compute_arb_edge
+
+    cfg: TradingConfig = trading_config or TradingConfig()
+
+    def _get_client(exchange: str) -> KalshiAPIClient | PolymarketAPIClient:
+        if exchange == "kalshi":
+            return kalshi
+        if exchange == "polymarket":
+            if polymarket is None:
+                raise ValueError("Polymarket is not enabled")
+            return polymarket
+        raise ValueError(f"Unknown exchange: {exchange}")
+
+    def _fetch_orderbook(exchange: str, market_id: str) -> dict[str, Any]:
+        client = _get_client(exchange)
+        return client.get_orderbook(market_id)
+
+    def _fetch_market_title(exchange: str, market_id: str) -> str:
+        client = _get_client(exchange)
+        market = client.get_market(market_id)
+        if isinstance(market, dict):
+            # Kalshi nests under "market" key, Polymarket may not
+            inner = market.get("market", market)
+            return str(inner.get("title", inner.get("question", market_id)))
+        return market_id
+
+    def _best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | None, int]:
+        """Extract best executable price (cents) and total depth at that level.
+
+        For buying YES: best ask on the YES side.
+        For buying NO: best ask on the NO side.
+        """
+        ob = orderbook.get("orderbook", orderbook)
+        if side == "yes":
+            asks = ob.get("yes", ob.get("asks", []))
+        else:
+            asks = ob.get("no", ob.get("asks", []))
+
+        if not asks:
+            return None, 0
+
+        # Asks are typically [[price, quantity], ...] or [{"price": ..., "quantity": ...}]
+        first: Any = asks[0]
+        if isinstance(first, list | tuple):
+            return int(first[0]), int(first[1])
+        elif isinstance(first, dict):
+            return int(first.get("price", 0)), int(first.get("quantity", 0))
+        return None, 0
 
     @tool(
         "recommend_trade",
-        "Record an arbitrage recommendation (2+ legs across exchanges) for review.",
+        (
+            "Record an arbitrage recommendation. Provide market pairs and total exposure "
+            "— the system computes direction, prices, quantities, and fees from live orderbooks."
+        ),
         {
             "type": "object",
-            "required": ["thesis", "estimated_edge_pct", "equivalence_notes", "legs"],
+            "required": ["thesis", "equivalence_notes", "total_exposure_usd", "legs"],
             "properties": {
                 "thesis": {
                     "type": "string",
                     "description": "1-3 sentences explaining the arbitrage opportunity",
                     "minLength": 10,
-                },
-                "estimated_edge_pct": {
-                    "type": "number",
-                    "description": "Fee-adjusted edge percentage",
-                    "minimum": 0,
-                    "maximum": 100,
                 },
                 "equivalence_notes": {
                     "type": "string",
@@ -321,6 +374,12 @@ def create_db_tools(
                     ),
                     "minLength": 10,
                 },
+                "total_exposure_usd": {
+                    "type": "number",
+                    "description": "Total capital to deploy across all legs (USD)",
+                    "minimum": 1,
+                    "maximum": 1000,
+                },
                 "signal_id": {
                     "type": "integer",
                     "description": "Signal ID that prompted this investigation, if any",
@@ -328,20 +387,12 @@ def create_db_tools(
                 },
                 "legs": {
                     "type": "array",
-                    "description": "Arbitrage legs (2+ required)",
+                    "description": "Market pairs to arb (2+ required). Just identify markets.",
                     "minItems": 2,
                     "maxItems": 6,
                     "items": {
                         "type": "object",
-                        "required": [
-                            "exchange",
-                            "market_id",
-                            "market_title",
-                            "action",
-                            "side",
-                            "quantity",
-                            "price_cents",
-                        ],
+                        "required": ["exchange", "market_id"],
                         "properties": {
                             "exchange": {
                                 "type": "string",
@@ -351,27 +402,6 @@ def create_db_tools(
                                 "type": "string",
                                 "minLength": 1,
                             },
-                            "market_title": {
-                                "type": "string",
-                            },
-                            "action": {
-                                "type": "string",
-                                "enum": ["buy", "sell"],
-                            },
-                            "side": {
-                                "type": "string",
-                                "enum": ["yes", "no"],
-                            },
-                            "quantity": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 500,
-                            },
-                            "price_cents": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 99,
-                            },
                         },
                     },
                 },
@@ -379,31 +409,245 @@ def create_db_tools(
         },
     )
     async def recommend_trade(args: dict) -> dict:
-        legs = args.get("legs", [])
+        legs_input = args.get("legs", [])
+        total_exposure = args.get("total_exposure_usd", 0)
 
-        # Warn-only validation (don't reject — let agent self-correct)
-        warnings = []
-        if len(legs) < 2:
-            warnings.append("Arbitrage should have 2+ legs")
+        # ── Validation ──────────────────────────────────────────
+        errors: list[str] = []
+        if len(legs_input) < 2:
+            errors.append("Arbitrage requires 2+ legs")
         if not args.get("equivalence_notes"):
-            warnings.append("Missing equivalence_notes — explain settlement verification")
+            errors.append("Missing equivalence_notes — explain settlement verification")
+
+        exchanges = {leg["exchange"] for leg in legs_input}
+        if len(exchanges) < 2 and len(legs_input) == 2:
+            errors.append(
+                "Cross-platform arb requires legs on different exchanges "
+                f"(both legs are on {exchanges.pop()})"
+            )
+
+        if errors:
+            return _text({"error": "; ".join(errors)})
+
+        # ── Fetch orderbooks and market titles ──────────────────
+        enriched_legs: list[dict[str, Any]] = []
+        for i, leg in enumerate(legs_input):
+            exchange = leg["exchange"]
+            market_id = leg["market_id"]
+
+            try:
+                ob = _fetch_orderbook(exchange, market_id)
+            except Exception as e:
+                return _text({"error": f"Failed to fetch orderbook for {market_id}: {e}"})
+
+            try:
+                title = _fetch_market_title(exchange, market_id)
+            except Exception:
+                title = market_id
+
+            enriched_legs.append(
+                {
+                    "exchange": exchange,
+                    "market_id": market_id,
+                    "market_title": title,
+                    "orderbook": ob,
+                    "leg_index": i,
+                }
+            )
+
+        # ── Determine direction from prices ─────────────────────
+        # For 2-leg cross-platform: buy YES on cheaper exchange, buy NO on expensive
+        for leg in enriched_legs:
+            ob = leg["orderbook"]
+            yes_price, yes_depth = _best_price_and_depth(ob, "yes")
+            no_price, no_depth = _best_price_and_depth(ob, "no")
+            leg["yes_ask"] = yes_price
+            leg["yes_depth"] = yes_depth
+            leg["no_ask"] = no_price
+            leg["no_depth"] = no_depth
+
+        if len(enriched_legs) == 2:
+            leg_a, leg_b = enriched_legs
+            a_yes = leg_a.get("yes_ask")
+            b_yes = leg_b.get("yes_ask")
+
+            if a_yes is None or b_yes is None:
+                return _text(
+                    {
+                        "error": "No executable price — empty orderbook for "
+                        + (leg_a["market_id"] if a_yes is None else leg_b["market_id"])
+                    }
+                )
+
+            # Buy YES on cheaper exchange, buy NO on expensive exchange
+            if a_yes <= b_yes:
+                leg_a["action"], leg_a["side"] = "buy", "yes"
+                leg_a["price_cents"] = a_yes
+                leg_a["depth"] = leg_a["yes_depth"]
+                leg_b["action"], leg_b["side"] = "buy", "no"
+                leg_b["price_cents"] = leg_b.get("no_ask") or (100 - b_yes)
+                leg_b["depth"] = leg_b.get("no_depth", 0)
+            else:
+                leg_b["action"], leg_b["side"] = "buy", "yes"
+                leg_b["price_cents"] = b_yes
+                leg_b["depth"] = leg_b["yes_depth"]
+                leg_a["action"], leg_a["side"] = "buy", "no"
+                leg_a["price_cents"] = leg_a.get("no_ask") or (100 - a_yes)
+                leg_a["depth"] = leg_a.get("no_depth", 0)
+
+            # Validate prices
+            for leg in enriched_legs:
+                if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
+                    return _text(
+                        {
+                            "error": f"No executable price for {leg['market_id']} "
+                            f"({leg['side']} side) — orderbook may be empty"
+                        }
+                    )
+        else:
+            # Bracket or multi-leg: for now return error asking for 2-leg arbs
+            return _text(
+                {
+                    "error": "Only 2-leg cross-platform arbs are supported. "
+                    "For bracket arbs, provide exactly 2 legs on different exchanges."
+                }
+            )
+
+        # ── Compute balanced quantities ─────────────────────────
+        cost_per_pair_cents = sum(leg["price_cents"] for leg in enriched_legs)
+        if cost_per_pair_cents <= 0:
+            return _text({"error": "Invalid prices — cost per pair is zero"})
+
+        cost_per_pair_usd = cost_per_pair_cents / 100.0
+        contracts = int(total_exposure / cost_per_pair_usd)
+        if contracts < 1:
+            return _text(
+                {
+                    "error": f"total_exposure_usd ${total_exposure} too low for one contract pair "
+                    f"(cost per pair: ${cost_per_pair_usd:.2f})"
+                }
+            )
+
+        # Check depth — can we fill this many contracts?
+        for leg in enriched_legs:
+            if leg.get("depth", 0) < 5:
+                return _text(
+                    {
+                        "error": f"Orderbook depth too thin for {leg['market_id']} "
+                        f"({leg['side']} side): only {leg.get('depth', 0)} contracts available"
+                    }
+                )
+
+        # ── Compute fees (leg-in: harder side maker, easier side taker) ──
+        # Determine harder leg (less depth = less liquid = placed first as maker)
+        sorted_legs = sorted(enriched_legs, key=lambda lg: lg.get("depth", 0))
+        sorted_legs[0]["is_maker"] = True  # harder leg: maker
+        for leg in sorted_legs[1:]:
+            leg["is_maker"] = False  # easier legs: taker
+
+        fee_legs = [
+            {
+                "exchange": leg["exchange"],
+                "price_cents": leg["price_cents"],
+                "maker": leg["is_maker"],
+            }
+            for leg in enriched_legs
+        ]
+        edge_result = compute_arb_edge(fee_legs, contracts)
+
+        # ── Validate edge ───────────────────────────────────────
+        if edge_result["net_edge_pct"] < cfg.min_edge_pct:
+            return _text(
+                {
+                    "error": f"Net edge {edge_result['net_edge_pct']:.1f}% after fees "
+                    f"is below minimum {cfg.min_edge_pct}%",
+                    "details": edge_result,
+                }
+            )
+
+        # ── Validate position limits ────────────────────────────
+        for leg in enriched_legs:
+            cost = leg["price_cents"] * contracts / 100.0
+            if leg["exchange"] == "kalshi" and cost > cfg.kalshi_max_position_usd:
+                return _text(
+                    {
+                        "error": f"Kalshi leg ${cost:.2f} exceeds limit "
+                        f"${cfg.kalshi_max_position_usd:.2f}"
+                    }
+                )
+            if leg["exchange"] == "polymarket" and cost > cfg.polymarket_max_position_usd:
+                return _text(
+                    {
+                        "error": f"Polymarket leg ${cost:.2f} exceeds limit "
+                        f"${cfg.polymarket_max_position_usd:.2f}"
+                    }
+                )
+
+        # ── Store recommendation ────────────────────────────────
+        db_legs = []
+        for leg in enriched_legs:
+            ob_snapshot = {
+                "yes_ask": leg.get("yes_ask"),
+                "no_ask": leg.get("no_ask"),
+                "yes_depth": leg.get("yes_depth"),
+                "no_depth": leg.get("no_depth"),
+            }
+            db_legs.append(
+                {
+                    "exchange": leg["exchange"],
+                    "market_id": leg["market_id"],
+                    "market_title": leg["market_title"],
+                    "action": leg["action"],
+                    "side": leg["side"],
+                    "quantity": contracts,
+                    "price_cents": leg["price_cents"],
+                    "is_maker": leg["is_maker"],
+                    "orderbook_snapshot_json": json.dumps(ob_snapshot),
+                }
+            )
 
         group_id, expires_at = db.log_recommendation_group(
             session_id=session_id,
             thesis=args.get("thesis"),
-            estimated_edge_pct=args.get("estimated_edge_pct"),
+            estimated_edge_pct=edge_result["net_edge_pct"],
             equivalence_notes=args.get("equivalence_notes"),
             signal_id=args.get("signal_id"),
-            legs=legs,
+            legs=db_legs,
             ttl_minutes=recommendation_ttl_minutes,
+            total_exposure_usd=total_exposure,
+            computed_edge_pct=edge_result["net_edge_pct"],
+            computed_fees_usd=edge_result["total_fees_usd"],
         )
-        result: dict[str, Any] = {
-            "group_id": group_id,
-            "leg_count": len(legs),
-            "expires_at": expires_at,
-        }
-        if warnings:
-            result["warnings"] = warnings
-        return _text(result)
+
+        return _text(
+            {
+                "group_id": group_id,
+                "status": "pending",
+                "expires_at": expires_at,
+                "computed": {
+                    "contracts_per_leg": contracts,
+                    "cost_per_pair_usd": round(cost_per_pair_usd, 4),
+                    "total_cost_usd": round(contracts * cost_per_pair_usd, 2),
+                    "gross_edge_usd": edge_result["gross_edge_usd"],
+                    "total_fees_usd": edge_result["total_fees_usd"],
+                    "net_edge_usd": edge_result["net_edge_usd"],
+                    "net_edge_pct": edge_result["net_edge_pct"],
+                    "fee_breakdown": edge_result["fee_breakdown"],
+                },
+                "legs": [
+                    {
+                        "exchange": leg["exchange"],
+                        "market_id": leg["market_id"],
+                        "market_title": leg["market_title"],
+                        "action": leg["action"],
+                        "side": leg["side"],
+                        "quantity": contracts,
+                        "price_cents": leg["price_cents"],
+                        "is_maker": leg["is_maker"],
+                    }
+                    for leg in enriched_legs
+                ],
+            }
+        )
 
     return [recommend_trade]

@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from ..config import TradingConfig
+from ..config import Credentials, TradingConfig
 from ..database import AgentDatabase
+from ..fees import compute_arb_edge, leg_fee
 from ..kalshi_client import KalshiAPIClient
 from ..polymarket_client import PM_INTENT_MAP, PolymarketAPIClient, cents_to_usd
+from ..ws_monitor import FillMonitor
+from .messages import ExecutionProgress, FillReceived
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +30,26 @@ class TUIServices:
         polymarket: PolymarketAPIClient | None,
         config: TradingConfig,
         session_id: str,
+        credentials: Credentials | None = None,
     ) -> None:
         self.db = db
         self._kalshi = kalshi
         self._pm = polymarket
         self._config = config
         self._session_id = session_id
+        self._credentials = credentials
         self._executor = ThreadPoolExecutor(max_workers=4)
+        self._fill_monitor: FillMonitor | None = None
 
     def _loop(self) -> asyncio.AbstractEventLoop:
         return asyncio.get_event_loop()
+
+    def _get_fill_monitor(self) -> FillMonitor:
+        if not self._fill_monitor and self._credentials:
+            self._fill_monitor = FillMonitor(self._credentials, self._config)
+        if not self._fill_monitor:
+            raise RuntimeError("Fill monitor unavailable — no credentials provided")
+        return self._fill_monitor
 
     # ── Portfolio ──────────────────────────────────────────────────
 
@@ -68,9 +82,10 @@ class TUIServices:
                 lambda: self._kalshi.get_orders(status="resting"),
             )
         if exchange in ("polymarket", None) and self._pm:
+            pm = self._pm
             data["polymarket"] = await loop.run_in_executor(
                 self._executor,
-                lambda: self._pm.get_orders(status="resting"),
+                lambda: pm.get_orders(status="resting"),
             )
 
         return data
@@ -85,20 +100,71 @@ class TUIServices:
         """Get filtered recommendation groups with legs (sync, fast DB read)."""
         return self.db.get_recommendations(**kwargs)
 
+    # ── Orderbook fetching ────────────────────────────────────────
+
+    async def _fetch_orderbook(self, exchange: str, market_id: str) -> dict[str, Any]:
+        """Fetch orderbook from exchange (async wrapper)."""
+        loop = self._loop()
+        if exchange == "kalshi":
+            return await loop.run_in_executor(
+                self._executor, lambda: self._kalshi.get_orderbook(market_id)
+            )
+        elif self._pm:
+            return await loop.run_in_executor(
+                self._executor,
+                lambda: self._pm.get_orderbook(market_id),  # type: ignore[union-attr]
+            )
+        raise ValueError(f"Exchange {exchange} not available")
+
+    @staticmethod
+    def _best_price_from_orderbook(ob: dict[str, Any], side: str) -> tuple[int | None, int]:
+        """Extract best executable price and depth from orderbook."""
+        inner = ob.get("orderbook", ob)
+        if side == "yes":
+            asks = inner.get("yes", inner.get("asks", []))
+        else:
+            asks = inner.get("no", inner.get("asks", []))
+        if not asks:
+            return None, 0
+        if isinstance(asks[0], list | tuple):
+            return int(asks[0][0]), int(asks[0][1])
+        if isinstance(asks[0], dict):
+            return int(asks[0].get("price", 0)), int(asks[0].get("quantity", 0))
+        return None, 0
+
     # ── Order execution ───────────────────────────────────────────
 
     def validate_execution(self, group: dict[str, Any]) -> str | None:
-        """Check position limits. Returns error message or None if valid."""
+        """Check position limits with fee-aware cost. Returns error or None."""
+        total_cost = 0.0
         for leg in group.get("legs", []):
             exchange = leg["exchange"]
+            price_cents = leg.get("price_cents", 0)
+            quantity = leg.get("quantity", 0)
+            if not price_cents or not quantity:
+                return f"Leg {leg.get('market_id')} has no computed price/quantity"
+
+            cost_usd = price_cents * quantity / 100
+            fee = leg_fee(exchange, quantity, price_cents, maker=leg.get("is_maker", False))
+            total_with_fee = cost_usd + fee
+            total_cost += total_with_fee
+
             if exchange == "kalshi":
                 max_usd = self._config.kalshi_max_position_usd
             else:
                 max_usd = self._config.polymarket_max_position_usd
 
-            cost_usd = leg["price_cents"] * leg["quantity"] / 100
-            if cost_usd > max_usd:
-                return f"Order ${cost_usd:.2f} exceeds {exchange} limit ${max_usd:.2f}"
+            if total_with_fee > max_usd:
+                return (
+                    f"Order ${total_with_fee:.2f} (incl ${fee:.4f} fee) "
+                    f"exceeds {exchange} limit ${max_usd:.2f}"
+                )
+
+        if total_cost > self._config.max_portfolio_usd:
+            return (
+                f"Total group cost ${total_cost:.2f} exceeds "
+                f"portfolio limit ${self._config.max_portfolio_usd:.2f}"
+            )
         return None
 
     async def execute_order(self, leg: dict[str, Any]) -> dict[str, Any]:
@@ -106,13 +172,14 @@ class TUIServices:
         loop = self._loop()
         exchange = leg["exchange"]
         logger.info(
-            "Executing order: %s %s %s on %s @ %dc x%d",
+            "Executing order: %s %s %s on %s @ %dc x%d (maker=%s)",
             leg["action"],
             leg["side"],
             leg["market_id"],
             exchange,
             leg["price_cents"],
             leg["quantity"],
+            leg.get("is_maker", False),
         )
 
         if exchange == "kalshi":
@@ -145,52 +212,244 @@ class TUIServices:
                 lambda: self._pm.create_order(**params_pm),  # type: ignore[union-attr]
             )
 
-    async def execute_recommendation_group(self, group_id: int) -> list[dict[str, Any]]:
-        """Execute all legs in a recommendation group.
+    async def execute_recommendation_group(
+        self,
+        group_id: int,
+        on_progress: Callable[[ExecutionProgress | FillReceived], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Execute all legs using leg-in strategy with fill monitoring.
 
-        Returns per-leg results with status and order_id or error.
+        1. Re-fetch orderbooks, recompute prices/quantities/edge
+        2. Validate edge still exists (slippage check)
+        3. Place harder leg first as maker, wait for fill
+        4. Place easier leg as taker
+        5. Handle failures: cancel/unwind as needed
         """
+
+        def _emit(msg: ExecutionProgress | FillReceived) -> None:
+            if on_progress:
+                on_progress(msg)
+
         group = self.db.get_group(group_id)
         if not group:
             return []
 
         legs = group.get("legs", [])
         logger.info("Executing recommendation group %d (%d legs)", group_id, len(legs))
+        _emit(ExecutionProgress(group_id, "recomputing_edge"))
 
-        # Validate limits
-        error = self.validate_execution(group)
-        if error:
-            logger.warning("Group %d rejected: %s", group_id, error)
-            self.db.update_group_status(group_id, "rejected")
-            return [{"leg_id": leg["id"], "status": "rejected", "error": error} for leg in legs]
-
-        results = []
+        # ── Re-fetch orderbooks and recompute ──────────────────
+        refreshed_legs = []
         for leg in legs:
             try:
-                result = await self.execute_order(leg)
-                order_id = self._extract_order_id(result)
+                ob = await self._fetch_orderbook(leg["exchange"], leg["market_id"])
+            except Exception as e:
+                self.db.update_group_status(group_id, "rejected")
+                return [
+                    {
+                        "leg_id": lg["id"],
+                        "status": "rejected",
+                        "error": f"Orderbook fetch failed: {e}",
+                    }
+                    for lg in legs
+                ]
 
+            side = leg.get("side", "yes")
+            price, depth = self._best_price_from_orderbook(ob, side)
+
+            # Slippage check against recommendation-time price
+            rec_price = leg.get("price_cents")
+            if price and rec_price:
+                slippage = abs(price - rec_price)
+                if slippage > self._config.max_slippage_cents:
+                    error = (
+                        f"Price moved {slippage}c on {leg['market_id']} "
+                        f"(was {rec_price}c, now {price}c, max slippage {self._config.max_slippage_cents}c)"
+                    )
+                    logger.warning("Group %d rejected: %s", group_id, error)
+                    self.db.update_group_status(group_id, "rejected")
+                    return [
+                        {"leg_id": lg["id"], "status": "rejected", "error": error} for lg in legs
+                    ]
+
+            refreshed_legs.append(
+                {
+                    **leg,
+                    "price_cents": price or leg.get("price_cents", 0),
+                    "depth": depth,
+                }
+            )
+
+        # Recompute edge with fresh prices
+        contracts = refreshed_legs[0].get("quantity", 0) if refreshed_legs else 0
+        if contracts > 0:
+            fee_legs = [
+                {
+                    "exchange": lg["exchange"],
+                    "price_cents": lg["price_cents"],
+                    "maker": lg.get("is_maker", False),
+                }
+                for lg in refreshed_legs
+            ]
+            edge = compute_arb_edge(fee_legs, contracts)
+            if edge["net_edge_pct"] < self._config.min_edge_pct:
+                error = (
+                    f"Edge evaporated: was {group.get('computed_edge_pct', '?')}%, "
+                    f"now {edge['net_edge_pct']}% (min {self._config.min_edge_pct}%)"
+                )
+                logger.warning("Group %d rejected: %s", group_id, error)
+                self.db.update_group_status(group_id, "rejected")
+                return [{"leg_id": lg["id"], "status": "rejected", "error": error} for lg in legs]
+
+            self.db.update_group_computed_fields(
+                group_id, edge["net_edge_pct"], edge["total_fees_usd"]
+            )
+
+        # ── Validate position limits ───────────────────────────
+        limit_error = self.validate_execution({"legs": refreshed_legs})
+        if limit_error:
+            logger.warning("Group %d rejected: %s", group_id, limit_error)
+            self.db.update_group_status(group_id, "rejected")
+            return [
+                {"leg_id": lg["id"], "status": "rejected", "error": limit_error} for lg in legs
+            ]
+
+        # ── Leg-in execution ───────────────────────────────────
+        # Sort: harder leg first (less depth = less liquid)
+        sorted_legs = sorted(refreshed_legs, key=lambda lg: lg.get("depth", 0))
+        maker_leg = sorted_legs[0]  # harder side: placed as maker
+        taker_legs = sorted_legs[1:]  # easier side(s): placed as taker after fill
+
+        results = []
+        fill_monitor = None
+        try:
+            fill_monitor = self._get_fill_monitor()
+        except RuntimeError:
+            logger.warning("Fill monitor unavailable, falling back to sequential execution")
+
+        # Place maker leg (leg 1)
+        _emit(ExecutionProgress(group_id, "placing_maker", maker_leg.get("id")))
+        try:
+            result = await self.execute_order(maker_leg)
+            order_id = self._extract_order_id(result)
+            self.db.log_trade(
+                session_id=self._session_id,
+                ticker=maker_leg["market_id"],
+                action=maker_leg["action"],
+                side=maker_leg["side"],
+                count=maker_leg["quantity"],
+                price_cents=maker_leg["price_cents"],
+                order_type="limit",
+                order_id=order_id,
+                status="placed",
+                result_json=json.dumps(result, default=str),
+                exchange=maker_leg["exchange"],
+            )
+            self.db.update_leg_status(maker_leg["id"], "executed", order_id)
+            results.append({"leg_id": maker_leg["id"], "status": "executed", "order_id": order_id})
+        except Exception as e:
+            logger.error("Maker leg %d failed: %s", maker_leg["id"], e)
+            self.db.update_leg_status(maker_leg["id"], "rejected")
+            self.db.update_group_status(group_id, "rejected")
+            return [{"leg_id": lg["id"], "status": "rejected", "error": str(e)} for lg in legs]
+
+        # Wait for maker leg fill
+        _emit(ExecutionProgress(group_id, "waiting_for_maker_fill", maker_leg.get("id")))
+        if fill_monitor:
+            logger.info(
+                "Waiting for maker fill on %s (timeout %ds)",
+                order_id,
+                self._config.execution_timeout_seconds,
+            )
+            fill = await fill_monitor.wait_for_fill(
+                maker_leg["exchange"],
+                order_id,
+                self._config.execution_timeout_seconds,
+                market_slug=maker_leg["market_id"],
+            )
+            if not fill:
+                # Timeout — cancel maker leg
+                logger.warning("Maker leg timed out, cancelling order %s", order_id)
+                try:
+                    await self.cancel_order(maker_leg["exchange"], order_id)
+                except Exception as cancel_err:
+                    logger.error("Failed to cancel maker leg: %s", cancel_err)
+                self.db.update_group_status(group_id, "rejected")
+                return [
+                    {
+                        "leg_id": maker_leg["id"],
+                        "status": "rejected",
+                        "error": f"Maker leg timed out after {self._config.execution_timeout_seconds}s",
+                    }
+                ]
+
+            # Record fill data
+            fill_price = fill.get("fill_price_cents", fill.get("price", maker_leg["price_cents"]))
+            fill_qty = fill.get("fill_quantity", fill.get("count", maker_leg["quantity"]))
+            if isinstance(fill_price, str):
+                fill_price = int(float(fill_price) * 100)
+            self.db.update_leg_fill(maker_leg["id"], int(fill_price), int(fill_qty))
+            logger.info("Maker fill confirmed: %d contracts @ %dc", fill_qty, fill_price)
+            _emit(FillReceived(order_id, int(fill_price), int(fill_qty), maker_leg["exchange"]))
+            _emit(ExecutionProgress(group_id, "maker_filled", maker_leg.get("id")))
+
+        # Place taker legs (leg 2+)
+        for taker_leg in taker_legs:
+            _emit(ExecutionProgress(group_id, "placing_taker", taker_leg.get("id")))
+            try:
+                result = await self.execute_order(taker_leg)
+                order_id = self._extract_order_id(result)
                 self.db.log_trade(
                     session_id=self._session_id,
-                    ticker=leg["market_id"],
-                    action=leg["action"],
-                    side=leg["side"],
-                    count=leg["quantity"],
-                    price_cents=leg["price_cents"],
-                    order_type=leg.get("order_type", "limit"),
+                    ticker=taker_leg["market_id"],
+                    action=taker_leg["action"],
+                    side=taker_leg["side"],
+                    count=taker_leg["quantity"],
+                    price_cents=taker_leg["price_cents"],
+                    order_type="limit",
                     order_id=order_id,
                     status="placed",
                     result_json=json.dumps(result, default=str),
-                    exchange=leg["exchange"],
+                    exchange=taker_leg["exchange"],
                 )
-                self.db.update_leg_status(leg["id"], "executed", order_id)
-                results.append({"leg_id": leg["id"], "status": "executed", "order_id": order_id})
-            except Exception as e:
-                logger.error("Leg %d failed: %s", leg["id"], e)
-                self.db.update_leg_status(leg["id"], "rejected")
-                results.append({"leg_id": leg["id"], "status": "failed", "error": str(e)})
+                self.db.update_leg_status(taker_leg["id"], "executed", order_id)
+                results.append(
+                    {"leg_id": taker_leg["id"], "status": "executed", "order_id": order_id}
+                )
 
-        # Derive group status from results
+                # Wait for taker fill (short timeout — should be near-immediate)
+                if fill_monitor:
+                    taker_fill = await fill_monitor.wait_for_fill(
+                        taker_leg["exchange"],
+                        order_id,
+                        30,
+                        market_slug=taker_leg["market_id"],
+                    )
+                    if taker_fill:
+                        tp = taker_fill.get(
+                            "fill_price_cents", taker_fill.get("price", taker_leg["price_cents"])
+                        )
+                        tq = taker_fill.get(
+                            "fill_quantity", taker_fill.get("count", taker_leg["quantity"])
+                        )
+                        if isinstance(tp, str):
+                            tp = int(float(tp) * 100)
+                        self.db.update_leg_fill(taker_leg["id"], int(tp), int(tq))
+                        _emit(FillReceived(order_id, int(tp), int(tq), taker_leg["exchange"]))
+                    else:
+                        logger.warning("Taker leg didn't fill within 30s — attempting unwind")
+                        await self._attempt_unwind(maker_leg, results)
+                        self.db.update_group_status(group_id, "partial")
+                        return results
+
+            except Exception as e:
+                logger.error("Taker leg %d failed: %s", taker_leg["id"], e)
+                self.db.update_leg_status(taker_leg["id"], "rejected")
+                results.append({"leg_id": taker_leg["id"], "status": "failed", "error": str(e)})
+                # Attempt to unwind the maker leg
+                await self._attempt_unwind(maker_leg, results)
+
+        # Derive group status
         executed = sum(1 for r in results if r["status"] == "executed")
         if executed == len(legs):
             group_status = "executed"
@@ -202,8 +461,49 @@ class TUIServices:
         logger.info(
             "Group %d result: %s (%d/%d executed)", group_id, group_status, executed, len(legs)
         )
+        _emit(ExecutionProgress(group_id, f"complete:{group_status}"))
+
+        if fill_monitor:
+            await fill_monitor.close()
 
         return results
+
+    async def _attempt_unwind(
+        self, filled_leg: dict[str, Any], results: list[dict[str, Any]]
+    ) -> None:
+        """Attempt to unwind a filled leg by placing an opposite order."""
+        logger.warning(
+            "Attempting to unwind filled leg %d on %s",
+            filled_leg["id"],
+            filled_leg["exchange"],
+        )
+        # Reverse: if we bought YES, now sell YES
+        reverse_action = "sell" if filled_leg["action"] == "buy" else "buy"
+        unwind_leg = {
+            **filled_leg,
+            "action": reverse_action,
+            # Use same price — market order equivalent for limit
+        }
+        try:
+            result = await self.execute_order(unwind_leg)
+            order_id = self._extract_order_id(result)
+            logger.info("Unwind order placed: %s", order_id)
+            results.append(
+                {
+                    "leg_id": filled_leg["id"],
+                    "status": "unwind_placed",
+                    "order_id": order_id,
+                }
+            )
+        except Exception as e:
+            logger.error("Unwind failed for leg %d: %s", filled_leg["id"], e)
+            results.append(
+                {
+                    "leg_id": filled_leg["id"],
+                    "status": "unwind_failed",
+                    "error": str(e),
+                }
+            )
 
     @staticmethod
     def _extract_order_id(result: Any) -> str:

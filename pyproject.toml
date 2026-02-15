@@ -19,6 +19,8 @@ dependencies = [
     "alembic>=1.16",
     "sqlalchemy>=2.0",
     "textual>=2.1",
+    "websockets>=14.0",
+    "cryptography>=44.0",
 ]
 
 [project.optional-dependencies]

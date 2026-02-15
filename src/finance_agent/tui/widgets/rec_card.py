@@ -26,6 +26,10 @@ class RecCard(Vertical):
     RecCard .rec-detail {
         color: $text-muted;
     }
+    RecCard .rec-stale {
+        color: $error;
+        text-style: bold;
+    }
     RecCard .rec-actions {
         height: 3;
         margin-top: 1;
@@ -42,48 +46,86 @@ class RecCard(Vertical):
     def compose(self) -> ComposeResult:
         legs = self.group.get("legs", [])
         group_id = self.group["id"]
+        status = self.group.get("status", "pending")
 
         yield Static(
-            f"Group #{group_id} ({len(legs)} legs)",
+            f"Group #{group_id} ({len(legs)} legs) [{status}]",
             classes="rec-title",
         )
 
         for leg in legs:
-            exch = "K" if leg["exchange"] == "kalshi" else "PM"
-            yield Static(
-                f"  {exch}: {leg['action'].upper()} {leg['side'].upper()} "
-                f"@ {leg['price_cents']}c x{leg['quantity']}",
-            )
+            exch = "K" if leg.get("exchange") == "kalshi" else "PM"
+            action = (leg.get("action") or "?").upper()
+            side = (leg.get("side") or "?").upper()
+            price = leg.get("price_cents")
+            qty = leg.get("quantity")
+            maker = " [maker]" if leg.get("is_maker") else ""
 
-        # Group-level details
-        if self.group.get("estimated_edge_pct"):
-            yield Static(f"Edge: {self.group['estimated_edge_pct']:.1f}%", classes="rec-detail")
+            price_str = f"@ {price}c" if price is not None else "@ ?"
+            qty_str = f"x{qty}" if qty is not None else ""
+
+            yield Static(f"  {exch}: {action} {side} {price_str} {qty_str}{maker}")
+
+        # Computed edge (fee-adjusted) takes precedence over estimated
+        edge = self.group.get("computed_edge_pct") or self.group.get("estimated_edge_pct")
+        if edge is not None:
+            label = "computed" if self.group.get("computed_edge_pct") else "estimated"
+            yield Static(f"Edge: {edge:.1f}% ({label})", classes="rec-detail")
+
+        # Fee breakdown
+        if fees := self.group.get("computed_fees_usd"):
+            yield Static(f"Fees: ${fees:.4f}", classes="rec-detail")
+
+        # Total exposure
+        if exposure := self.group.get("total_exposure_usd"):
+            yield Static(f"Exposure: ${exposure:.2f}", classes="rec-detail")
+
+        # Thesis
         if thesis := self.group.get("thesis"):
             yield Static(
                 f"{thesis[:80]}..." if len(thesis) > 80 else thesis,
                 classes="rec-detail",
             )
 
-        # Expiry
+        # Staleness warning
         if expires_at := self.group.get("expires_at"):
             try:
                 mins = int(
                     (datetime.fromisoformat(expires_at) - datetime.now(UTC)).total_seconds() / 60
                 )
-                label = f"Expires in {mins}m" if mins > 0 else "[bold red]EXPIRED[/]"
-                yield Static(label, classes="rec-detail")
+                if mins <= 0:
+                    yield Static("[bold red]EXPIRED[/]", classes="rec-stale")
+                elif mins <= 10:
+                    yield Static(
+                        f"[yellow]Expires in {mins}m — prices may have moved[/]",
+                        classes="rec-stale",
+                    )
+                else:
+                    yield Static(f"Expires in {mins}m", classes="rec-detail")
             except (ValueError, TypeError):
                 pass
 
-        # Action buttons
-        with Horizontal(classes="rec-actions"):
-            yield Button(
-                "Execute All",
-                id=f"exec-group-{group_id}",
-                variant="success",
-            )
-            yield Button(
-                "Reject",
-                id=f"reject-group-{group_id}",
-                variant="error",
-            )
+        # Created-at staleness (warn if >10 min old, even if not expired)
+        if created_at := self.group.get("created_at"):
+            try:
+                age_min = int(
+                    (datetime.now(UTC) - datetime.fromisoformat(created_at)).total_seconds() / 60
+                )
+                if age_min > 10 and not self.group.get("expires_at"):
+                    yield Static(f"[yellow]Stale: created {age_min}m ago[/]", classes="rec-stale")
+            except (ValueError, TypeError):
+                pass
+
+        # Action buttons (only for pending)
+        if status == "pending":
+            with Horizontal(classes="rec-actions"):
+                yield Button(
+                    "Execute All",
+                    id=f"exec-group-{group_id}",
+                    variant="success",
+                )
+                yield Button(
+                    "Reject",
+                    id=f"reject-group-{group_id}",
+                    variant="error",
+                )

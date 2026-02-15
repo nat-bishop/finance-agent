@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Float, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -207,6 +207,9 @@ class RecommendationGroup(Base):
     expires_at: Mapped[str | None] = mapped_column(Text)
     reviewed_at: Mapped[str | None] = mapped_column(Text)
     executed_at: Mapped[str | None] = mapped_column(Text)
+    total_exposure_usd: Mapped[float | None] = mapped_column(Float)
+    computed_edge_pct: Mapped[float | None] = mapped_column(Float)
+    computed_fees_usd: Mapped[float | None] = mapped_column(Float)
 
     legs: Mapped[list[RecommendationLeg]] = relationship(
         back_populates="group",
@@ -240,14 +243,18 @@ class RecommendationLeg(Base):
     exchange: Mapped[str] = mapped_column(Text, nullable=False)
     market_id: Mapped[str] = mapped_column(Text, nullable=False)
     market_title: Mapped[str | None] = mapped_column(Text)
-    action: Mapped[str] = mapped_column(Text, nullable=False)
-    side: Mapped[str] = mapped_column(Text, nullable=False)
-    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
-    price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str | None] = mapped_column(Text)  # derived from prices by code
+    side: Mapped[str | None] = mapped_column(Text)  # derived from prices by code
+    quantity: Mapped[int | None] = mapped_column(Integer)  # computed from total_exposure_usd
+    price_cents: Mapped[int | None] = mapped_column(Integer)  # computed from orderbook
     order_type: Mapped[str | None] = mapped_column(Text, server_default="limit")
     status: Mapped[str | None] = mapped_column(Text, server_default="pending")
     order_id: Mapped[str | None] = mapped_column(Text)
     executed_at: Mapped[str | None] = mapped_column(Text)
+    is_maker: Mapped[bool | None] = mapped_column(Boolean)
+    fill_price_cents: Mapped[int | None] = mapped_column(Integer)
+    fill_quantity: Mapped[int | None] = mapped_column(Integer)
+    orderbook_snapshot_json: Mapped[str | None] = mapped_column(Text)
 
     group: Mapped[RecommendationGroup] = relationship(back_populates="legs")
 

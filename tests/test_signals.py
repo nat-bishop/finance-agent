@@ -91,7 +91,8 @@ def test_arbitrage_overpriced_signal(db):
     assert len(signals) == 1
     assert signals[0]["details_json"]["direction"] == "overpriced"
     assert signals[0]["signal_strength"] == 1.0  # 10/10 = 1.0
-    assert signals[0]["estimated_edge_pct"] == 10.0
+    # Fee-adjusted: raw 10% minus Kalshi P(1-P) fees ≈ 6.52%
+    assert 5.0 < signals[0]["estimated_edge_pct"] < 10.0
 
 
 def test_arbitrage_underpriced_signal(db):

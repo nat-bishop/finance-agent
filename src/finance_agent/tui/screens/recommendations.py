@@ -81,7 +81,7 @@ class RecommendationsScreen(Screen):
             await self._refresh()
 
     async def _confirm_and_execute(self, group: dict[str, Any]) -> None:
-        def on_confirm(confirmed: bool) -> None:
+        def on_confirm(confirmed: bool | None) -> None:
             if confirmed:
                 self.run_worker(self._do_execute(group["id"]))
 

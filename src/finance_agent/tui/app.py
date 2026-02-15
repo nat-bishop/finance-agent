@@ -66,6 +66,11 @@ class FinanceApp(App):
 
         session_id = db.create_session()
 
+        # Regenerate signals from latest DB data (idempotent, <1s)
+        from ..signals import generate_signals
+
+        generate_signals(db)
+
         # Build startup context
         startup_state = db.get_session_state()
         startup_state["watchlist"] = (
@@ -107,7 +112,14 @@ class FinanceApp(App):
         # MCP tools
         mcp_tools = {
             "markets": create_market_tools(kalshi, pm_client),
-            "db": create_db_tools(db, session_id, trading_config.recommendation_ttl_minutes),
+            "db": create_db_tools(
+                db,
+                session_id,
+                kalshi,
+                pm_client,
+                trading_config,
+                trading_config.recommendation_ttl_minutes,
+            ),
         }
         mcp_servers = {
             key: create_sdk_mcp_server(name=key, version="1.0.0", tools=tools)
@@ -118,7 +130,7 @@ class FinanceApp(App):
         hooks = create_audit_hooks(
             db=db,
             session_id=session_id,
-            on_recommendation=lambda: self.post_message(RecommendationCreated()),
+            on_recommendation=lambda: self.post_message(RecommendationCreated()) or None,  # type: ignore[arg-type]
         )
 
         # AskUserQuestion handler

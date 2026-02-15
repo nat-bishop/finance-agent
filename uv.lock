@@ -404,6 +404,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "claude-agent-sdk" },
+    { name = "cryptography" },
     { name = "kalshi-python" },
     { name = "numpy" },
     { name = "polymarket-us" },
@@ -413,6 +414,7 @@ dependencies = [
     { name = "scipy" },
     { name = "sqlalchemy" },
     { name = "textual" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -434,6 +436,7 @@ skills = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16" },
     { name = "claude-agent-sdk", specifier = ">=0.1.33" },
+    { name = "cryptography", specifier = ">=44.0" },
     { name = "kalshi-python", specifier = ">=2.1.4" },
     { name = "matplotlib", marker = "extra == 'skills'", specifier = ">=3.10" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19" },
@@ -452,6 +455,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.17" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "textual", specifier = ">=2.1" },
+    { name = "websockets", specifier = ">=14.0" },
 ]
 provides-extras = ["skills", "dev"]
 

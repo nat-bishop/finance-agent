@@ -31,6 +31,33 @@ class RecommendationExecuted(Message):
     """A recommendation was executed through the TUI."""
 
 
+class ExecutionProgress(Message):
+    """Real-time status update during leg-in execution."""
+
+    def __init__(self, group_id: int, status: str, leg_id: int | None = None) -> None:
+        super().__init__()
+        self.group_id = group_id
+        self.status = status
+        self.leg_id = leg_id
+
+
+class FillReceived(Message):
+    """WebSocket fill notification for an order."""
+
+    def __init__(
+        self,
+        order_id: str,
+        fill_price_cents: int,
+        fill_quantity: int,
+        exchange: str,
+    ) -> None:
+        super().__init__()
+        self.order_id = order_id
+        self.fill_price_cents = fill_price_cents
+        self.fill_quantity = fill_quantity
+        self.exchange = exchange
+
+
 class AskUserQuestionRequest(Message):
     """Agent needs user input via AskUserQuestion tool."""
 

@@ -22,7 +22,7 @@ def _allow_with_input(input_data: HookInput) -> HookJSONOutput:
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
-            "updatedInput": input_data,
+            "updatedInput": input_data,  # type: ignore[typeddict-item]
         }
     }
 

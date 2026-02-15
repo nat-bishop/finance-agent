@@ -32,7 +32,6 @@ class TradingConfig:
     max_portfolio_usd: float = 1000.0
     max_order_count: int = 50
     min_edge_pct: float = 7.0
-    kalshi_fee_rate: float = 0.03
 
     db_path: str = "/workspace/data/agent.db"
     backup_dir: str = "/workspace/backups"
@@ -44,8 +43,10 @@ class TradingConfig:
     recommendation_ttl_minutes: int = 60
 
     polymarket_enabled: bool = False
-    polymarket_fee_rate: float = 0.0  # 0% maker, 0% taker on Polymarket US
     polymarket_max_position_usd: float = 50.0
+
+    execution_timeout_seconds: int = 300  # 5 min fill timeout for leg-in
+    max_slippage_cents: int = 3  # reject execution if orderbook moved >N cents
 
     @property
     def polymarket_api_url(self) -> str:
@@ -91,11 +92,11 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
         "MAX_PORTFOLIO_USD": trading_config.max_portfolio_usd,
         "MAX_ORDER_COUNT": trading_config.max_order_count,
         "MIN_EDGE_PCT": trading_config.min_edge_pct,
-        "KALSHI_FEE_RATE": trading_config.kalshi_fee_rate,
-        "POLYMARKET_FEE_RATE": trading_config.polymarket_fee_rate,
         "POLYMARKET_MAX_POSITION_USD": trading_config.polymarket_max_position_usd,
         "POLYMARKET_ENABLED": trading_config.polymarket_enabled,
         "RECOMMENDATION_TTL_MINUTES": trading_config.recommendation_ttl_minutes,
+        "EXECUTION_TIMEOUT_SECONDS": trading_config.execution_timeout_seconds,
+        "MAX_SLIPPAGE_CENTS": trading_config.max_slippage_cents,
     }
     for name, value in variables.items():
         raw = raw.replace(f"{{{{{name}}}}}", str(value))
