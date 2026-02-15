@@ -348,15 +348,31 @@ def _format_market_line(m: dict[str, Any]) -> str:
     )
 
 
-def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
-    """Write category-grouped market summary for agent semantic discovery.
+def _format_event_section(
+    evt_ticker: str | None,
+    markets: list[dict[str, Any]],
+    event_map: dict[tuple[str, str], dict[str, Any]],
+    exchange: str,
+) -> list[str]:
+    """Format a single event group (or standalone markets) for the listings file."""
+    evt_meta = event_map.get((evt_ticker, exchange)) if evt_ticker else None
 
-    Markets are grouped by event within each exchange section. Mutually exclusive
-    events show the price sum so bracket arbs are visible from the file.
-    """
+    if evt_meta and len(markets) >= 2:
+        mut_excl = evt_meta.get("mutually_exclusive")
+        header = f"\n**{evt_ticker} — {evt_meta['title']}** ({len(markets)} markets"
+        if mut_excl:
+            price_sum = sum(m["mid_price_cents"] or 0 for m in markets)
+            header += f", mutually exclusive, sum: {price_sum}c"
+        header += ")"
+        return [header, *(_format_market_line(m) for m in markets)]
+
+    return [_format_market_line(m) for m in markets]
+
+
+def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
+    """Write category-grouped market summary for agent semantic discovery."""
     markets = db.get_latest_snapshots(status="open", require_mid_price=True)
 
-    # Fetch event metadata for grouping
     event_rows = db.get_all_events()
     event_map: dict[tuple[str, str], dict[str, Any]] = {
         (e["event_ticker"], e["exchange"]): e for e in event_rows
@@ -392,21 +408,7 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
             lines.append(f"\n### {exch.title()} ({total_markets} markets)")
 
             for evt_ticker, ms in evt_groups.items():
-                evt_meta = event_map.get((evt_ticker, exch)) if evt_ticker else None
-
-                if evt_meta and len(ms) >= 2:
-                    # Multi-market event — show event header
-                    mut_excl = evt_meta.get("mutually_exclusive")
-                    header = f"\n**{evt_ticker} — {evt_meta['title']}** ({len(ms)} markets"
-                    if mut_excl:
-                        price_sum = sum(m["mid_price_cents"] or 0 for m in ms)
-                        header += f", mutually exclusive, sum: {price_sum}c"
-                    header += ")"
-                    lines.append(header)
-                    lines.extend(_format_market_line(m) for m in ms)
-                else:
-                    # Standalone market(s) — no event header
-                    lines.extend(_format_market_line(m) for m in ms)
+                lines.extend(_format_event_section(evt_ticker, ms, event_map, exch))
 
         lines.append("")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,17 +44,8 @@ class RecCard(Vertical):
         super().__init__(**kwargs)
         self.group = group
 
-    def compose(self) -> ComposeResult:
-        legs = self.group.get("legs", [])
-        group_id = self.group["id"]
-        status = self.group.get("status", "pending")
-
-        yield Static(
-            f"Group #{group_id} ({len(legs)} legs) [{status}]",
-            classes="rec-title",
-        )
-
-        for leg in legs:
+    def _compose_legs(self) -> Iterable[Static]:
+        for leg in self.group.get("legs", []):
             exch = "K" if leg.get("exchange") == "kalshi" else "PM"
             action = (leg.get("action") or "?").upper()
             side = (leg.get("side") or "?").upper()
@@ -66,28 +58,25 @@ class RecCard(Vertical):
 
             yield Static(f"  {exch}: {action} {side} {price_str} {qty_str}{maker}")
 
-        # Computed edge (fee-adjusted) takes precedence over estimated
+    def _compose_metrics(self) -> Iterable[Static]:
         edge = self.group.get("computed_edge_pct") or self.group.get("estimated_edge_pct")
         if edge is not None:
             label = "computed" if self.group.get("computed_edge_pct") else "estimated"
             yield Static(f"Edge: {edge:.1f}% ({label})", classes="rec-detail")
 
-        # Fee breakdown
         if fees := self.group.get("computed_fees_usd"):
             yield Static(f"Fees: ${fees:.4f}", classes="rec-detail")
 
-        # Total exposure
         if exposure := self.group.get("total_exposure_usd"):
             yield Static(f"Exposure: ${exposure:.2f}", classes="rec-detail")
 
-        # Thesis
         if thesis := self.group.get("thesis"):
             yield Static(
                 f"{thesis[:80]}..." if len(thesis) > 80 else thesis,
                 classes="rec-detail",
             )
 
-        # Staleness warning
+    def _compose_staleness(self) -> Iterable[Static]:
         if expires_at := self.group.get("expires_at"):
             try:
                 mins = int(
@@ -105,7 +94,6 @@ class RecCard(Vertical):
             except (ValueError, TypeError):
                 pass
 
-        # Created-at staleness (warn if >10 min old, even if not expired)
         if created_at := self.group.get("created_at"):
             try:
                 age_min = int(
@@ -116,7 +104,19 @@ class RecCard(Vertical):
             except (ValueError, TypeError):
                 pass
 
-        # Action buttons (only for pending)
+    def compose(self) -> ComposeResult:
+        legs = self.group.get("legs", [])
+        group_id = self.group["id"]
+        status = self.group.get("status", "pending")
+
+        yield Static(
+            f"Group #{group_id} ({len(legs)} legs) [{status}]",
+            classes="rec-title",
+        )
+        yield from self._compose_legs()
+        yield from self._compose_metrics()
+        yield from self._compose_staleness()
+
         if status == "pending":
             with Horizontal(classes="rec-actions"):
                 yield Button(

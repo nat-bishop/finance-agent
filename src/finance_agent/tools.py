@@ -286,6 +286,20 @@ def create_market_tools(
     ]
 
 
+def _validate_leg_prices(enriched_legs: list[dict[str, Any]]) -> str | None:
+    """Check all legs have executable prices in the 1-99c range.
+
+    Returns error string or None on success.
+    """
+    for leg in enriched_legs:
+        if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
+            return (
+                f"No executable price for {leg['market_id']} "
+                f"({leg['side']} side) — orderbook may be empty"
+            )
+    return None
+
+
 def _determine_direction_2leg(enriched_legs: list[dict[str, Any]]) -> str | None:
     """Assign action/side/price/depth to a 2-leg cross-platform arb.
 
@@ -319,13 +333,7 @@ def _determine_direction_2leg(enriched_legs: list[dict[str, Any]]) -> str | None
         leg_a["price_cents"] = leg_a["no_ask"]
         leg_a["depth"] = leg_a.get("no_depth", 0)
 
-    for leg in enriched_legs:
-        if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
-            return (
-                f"No executable price for {leg['market_id']} "
-                f"({leg['side']} side) — orderbook may be empty"
-            )
-    return None
+    return _validate_leg_prices(enriched_legs)
 
 
 def _determine_direction_bracket(enriched_legs: list[dict[str, Any]]) -> str | None:
@@ -378,13 +386,7 @@ def _determine_direction_bracket(enriched_legs: list[dict[str, Any]]) -> str | N
             + " (need sum < 100c on one side)"
         )
 
-    for leg in enriched_legs:
-        if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
-            return (
-                f"No executable price for {leg['market_id']} "
-                f"({leg['side']} side) — orderbook may be empty"
-            )
-    return None
+    return _validate_leg_prices(enriched_legs)
 
 
 def _validate_position_limits(
