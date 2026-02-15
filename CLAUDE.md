@@ -117,6 +117,7 @@ Centralized via `logging_config.py`. Call `setup_logging()` once per entry point
 - **mypy** for type checking (lenient: `ignore_missing_imports`, no strict mode)
 - `workspace/` is excluded from linting (agent-authored scripts, not package code)
 - Pre-commit hooks run ruff lint + format on every commit
+- **SQLAlchemy ORM only** — all database queries must use ORM `select()`, `insert()`, `update()`, `delete()` on model classes. No raw SQL strings or `exec_driver_sql`. Add new query methods to `database.py` rather than writing inline SQL.
 
 ## Testing
 

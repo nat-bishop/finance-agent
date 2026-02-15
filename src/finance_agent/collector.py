@@ -341,18 +341,10 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
     Markets are grouped by event within each exchange section. Mutually exclusive
     events show the price sum so bracket arbs are visible from the file.
     """
-    markets = db.query("""
-        SELECT exchange, ticker, event_ticker, title, mid_price_cents, category,
-               spread_cents, volume_24h, open_interest, days_to_expiration
-        FROM market_snapshots
-        WHERE status = 'open' AND mid_price_cents IS NOT NULL
-        GROUP BY exchange, ticker
-        HAVING captured_at = MAX(captured_at)
-        ORDER BY category, exchange, event_ticker, title
-    """)
+    markets = db.get_latest_snapshots(status="open", require_mid_price=True)
 
     # Fetch event metadata for grouping
-    event_rows = db.query("SELECT event_ticker, exchange, title, mutually_exclusive FROM events")
+    event_rows = db.get_all_events()
     event_map: dict[tuple[str, str], dict[str, Any]] = {
         (e["event_ticker"], e["exchange"]): e for e in event_rows
     }

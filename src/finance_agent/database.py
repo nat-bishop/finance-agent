@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, delete, event, insert, select, update
+from sqlalchemy import create_engine, delete, event, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 
@@ -80,16 +80,63 @@ class AgentDatabase:
         logger.debug("Closing database connection")
         self._engine.dispose()
 
-    # ── Generic query (escape hatch for raw SQL) ──────────────
+    # ── Market snapshot queries ─────────────────────────────────
 
-    def query(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        """Execute a read-only SELECT query. Returns list of dicts."""
-        sql_stripped = sql.strip().upper()
-        if not sql_stripped.startswith("SELECT") and not sql_stripped.startswith("WITH"):
-            raise ValueError("Only SELECT / WITH queries allowed via db_query")
-        with self._engine.connect() as conn:
-            result = conn.exec_driver_sql(sql, params)
-            return [dict(row._mapping) for row in result]
+    def get_latest_snapshots(
+        self,
+        *,
+        exchange: str | None = None,
+        status: str = "open",
+        require_mid_price: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Get the most recent snapshot per (exchange, ticker). Returns list of dicts."""
+        with self._session_factory() as session:
+            # Subquery: max captured_at per (exchange, ticker)
+            latest_sel = (
+                select(
+                    MarketSnapshot.exchange,
+                    MarketSnapshot.ticker,
+                    func.max(MarketSnapshot.captured_at).label("max_ts"),
+                )
+                .where(MarketSnapshot.status == status)
+                .group_by(MarketSnapshot.exchange, MarketSnapshot.ticker)
+            )
+            if exchange:
+                latest_sel = latest_sel.where(MarketSnapshot.exchange == exchange)
+            latest_sub = latest_sel.subquery()
+
+            # Main query: join to get full row
+            stmt = select(MarketSnapshot).join(
+                latest_sub,
+                (MarketSnapshot.exchange == latest_sub.c.exchange)
+                & (MarketSnapshot.ticker == latest_sub.c.ticker)
+                & (MarketSnapshot.captured_at == latest_sub.c.max_ts),
+            )
+            if require_mid_price:
+                stmt = stmt.where(MarketSnapshot.mid_price_cents.isnot(None))
+            stmt = stmt.order_by(
+                MarketSnapshot.category,
+                MarketSnapshot.exchange,
+                MarketSnapshot.event_ticker,
+                MarketSnapshot.title,
+            )
+            return [s.to_dict() for s in session.scalars(stmt).all()]
+
+    # ── Event queries ────────────────────────────────────────
+
+    def get_mutually_exclusive_events(self) -> list[dict[str, Any]]:
+        """Get events with mutually_exclusive=1 and non-null markets_json."""
+        with self._session_factory() as session:
+            stmt = select(Event).where(
+                Event.mutually_exclusive == 1,
+                Event.markets_json.isnot(None),
+            )
+            return [e.to_dict() for e in session.scalars(stmt).all()]
+
+    def get_all_events(self) -> list[dict[str, Any]]:
+        """Get all events (for market listings grouping)."""
+        with self._session_factory() as session:
+            return [e.to_dict() for e in session.scalars(select(Event)).all()]
 
     # ── Sessions ──────────────────────────────────────────────
 

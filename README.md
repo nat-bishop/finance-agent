@@ -8,7 +8,7 @@ Finds markets that resolve to the same outcome across platforms, verifies identi
 
 **Three-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates enriched `active_markets.md` (category-grouped listings with price, spread, volume, OI, DTE), `signals.py` runs 2 quantitative scans: bracket arbitrage and cross-platform candidate matching.
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms, generates enriched `active_markets.md` (grouped by category → exchange → event, with price sums for bracket arb visibility), and runs signal generation. `signals.py` scans for bracket arbitrage with liquidity-weighted scoring.
 
 2. **Agent layer** (Claude) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade` with a `legs` array. All state persists in SQLite for continuity across sessions.
 
@@ -59,23 +59,22 @@ Or locally: `make scan && uv run python -m finance_agent.main`
 ## Data Pipeline
 
 ```bash
-make collect    # snapshot markets + events from both platforms to SQLite, generate active_markets.md
-make signals    # run 2 quantitative scans on collected data
-make scan       # both in sequence
+make collect    # snapshot markets + events to SQLite, generate active_markets.md, run signals
+make signals    # run signal scans standalone (also runs automatically at end of collect)
+make scan       # collect + signals (legacy alias, collect already runs signals)
 make backup     # backup the database
 make startup    # print startup context JSON (debug)
 ```
 
-The collector and signal generator are standalone scripts with no LLM dependency. Run them on a schedule (e.g. hourly cron) to keep signals fresh.
+The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data and signals fresh. Signal generation also runs at TUI startup for freshness.
 
-### Signal Types
+### Signals
 
 | Signal | Description |
 |--------|-------------|
-| `arbitrage` | Bracket YES prices not summing to ~100% (single-platform) |
-| `cross_platform_candidate` | Title-matched pairs across Kalshi/Polymarket with price gaps — agent must verify settlement equivalence |
+| `arbitrage` | Bracket YES prices not summing to ~100% — liquidity-weighted strength, fee-adjusted edge, per-leg spread/volume data. Filters out dead markets (no volume + wide spread). |
 
-The cross-platform candidate signal uses fuzzy title matching (SequenceMatcher, threshold 0.7) to surface pairs with ≥3c price gaps. These are attention flags only — the agent verifies settlement equivalence before recommending.
+Signals are pre-computed attention flags injected into the agent at startup (top 10 by strength). The agent uses `active_markets.md` event groupings and semantic matching for cross-platform discovery — this is its core competency and better than any programmatic fuzzy matcher.
 
 ## Agent Tools
 
@@ -122,7 +121,7 @@ Agent recommends → TUI review → Execute or Reject
 Discovery → Investigation → Verification → Sizing → Recommendation
 ```
 
-1. **Discovery** — Agent reads enriched `active_markets.md`, pre-filters by spread/volume/DTE, finds cross-platform connections by category; also reviews pre-computed signals (arbitrage + cross-platform candidates)
+1. **Discovery** — Agent reads `active_markets.md` (event-grouped with bracket price sums), pre-filters by spread/volume/DTE, finds cross-platform connections by category; also reviews pre-computed arbitrage signals
 2. **Investigation** — Agent follows arb-specific protocol: match markets, verify settlement equivalence (5-point checklist), check orderbooks
 3. **Verification** — Settlement equivalence verification (resolution source, timing, boundary conditions, conditional resolution, rounding), executable orderbook prices
 4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, orderbook depth for position size
@@ -201,7 +200,7 @@ src/finance_agent/
   polymarket_client.py # Polymarket US SDK wrapper, intent maps
   hooks.py             # Recommendation counting, session lifecycle
   collector.py         # Market data collector (both platforms, market listings)
-  signals.py           # Signal generator (arbitrage + cross-platform candidate)
+  signals.py           # Signal generator (bracket arbitrage with liquidity scoring)
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations

@@ -49,19 +49,10 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     signals = []
 
     # Batch-fetch latest snapshot per ticker for spread/volume enrichment
-    snapshots = db.query(
-        """SELECT ticker, spread_cents, volume_24h, volume
-           FROM market_snapshots
-           WHERE exchange = 'kalshi' AND status = 'open'
-           GROUP BY ticker
-           HAVING captured_at = MAX(captured_at)"""
-    )
+    snapshots = db.get_latest_snapshots(exchange="kalshi", status="open")
     snapshot_map = {s["ticker"]: s for s in snapshots}
 
-    events = db.query(
-        """SELECT event_ticker, title, category, mutually_exclusive, markets_json
-           FROM events WHERE mutually_exclusive = 1 AND markets_json IS NOT NULL"""
-    )
+    events = db.get_mutually_exclusive_events()
 
     for event in events:
         try:
