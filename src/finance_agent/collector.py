@@ -5,7 +5,7 @@ Standalone script, no LLM. Run via `make collect` or `python -m finance_agent.co
 Collection schedule (all in one run):
 - All open markets (paginated) -> market_snapshots
 - Event structure (paginated) -> events
-- Recently settled markets -> market_snapshots (for calibration)
+- Recently settled markets -> market_snapshots (for settlement tracking)
 """
 
 from __future__ import annotations

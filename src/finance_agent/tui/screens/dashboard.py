@@ -73,8 +73,8 @@ class DashboardScreen(Screen):
             pass
 
         try:
-            recs = self._services.get_pending_recs()
-            self.query_one("#rec-list", RecList).update_recs(recs)
+            groups = self._services.get_pending_groups()
+            self.query_one("#rec-list", RecList).update_recs(groups)
         except Exception:
             pass
 
@@ -94,8 +94,8 @@ class DashboardScreen(Screen):
     def on_recommendation_created(self, event: RecommendationCreated) -> None:
         bar = self.query_one("#status-bar", StatusBar)
         bar.rec_count += 1
-        recs = self._services.get_pending_recs()
-        self.query_one("#rec-list", RecList).update_recs(recs)
+        groups = self._services.get_pending_groups()
+        self.query_one("#rec-list", RecList).update_recs(groups)
 
     def on_recommendation_executed(self, event: RecommendationExecuted) -> None:
         self.run_worker(self._refresh_sidebar())
@@ -107,43 +107,24 @@ class DashboardScreen(Screen):
         btn_id = event.button.id or ""
 
         if btn_id.startswith("exec-group-"):
-            group_id = btn_id[len("exec-group-") :]
-            recs = [r for r in self._services.get_pending_recs() if r.get("group_id") == group_id]
-            if recs:
+            group_id = int(btn_id[len("exec-group-") :])
+            group = self._services.db.get_group(group_id)
+            if group:
                 self.app.push_screen(
-                    ConfirmModal(recs),
+                    ConfirmModal(group),
                     callback=lambda ok: (
-                        self.run_worker(self._execute_and_refresh(group_id=group_id))
-                        if ok
-                        else None
+                        self.run_worker(self._execute_and_refresh(group_id)) if ok else None
                     ),
                 )
 
-        elif btn_id.startswith("exec-"):
-            rec_id = int(btn_id[len("exec-") :])
-            recs = [r for r in self._services.get_pending_recs() if r["id"] == rec_id]
-            if recs:
-                self.app.push_screen(
-                    ConfirmModal(recs),
-                    callback=lambda ok: (
-                        self.run_worker(self._execute_and_refresh(rec_ids=[rec_id]))
-                        if ok
-                        else None
-                    ),
-                )
+        elif btn_id.startswith("reject-group-"):
+            group_id = int(btn_id[len("reject-group-") :])
+            await self._services.reject_group(group_id)
+            groups = self._services.get_pending_groups()
+            self.query_one("#rec-list", RecList).update_recs(groups)
 
-        elif btn_id.startswith("reject-"):
-            rec_id = int(btn_id[len("reject-") :])
-            await self._services.reject_recommendation(rec_id)
-            recs = self._services.get_pending_recs()
-            self.query_one("#rec-list", RecList).update_recs(recs)
-
-    async def _execute_and_refresh(
-        self,
-        group_id: str | None = None,
-        rec_ids: list[int] | None = None,
-    ) -> None:
-        await self._services.execute_recommendation_group(group_id=group_id, rec_ids=rec_ids)
+    async def _execute_and_refresh(self, group_id: int) -> None:
+        await self._services.execute_recommendation_group(group_id)
         self.post_message(RecommendationExecuted())
         await self._refresh_sidebar()
 

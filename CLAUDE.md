@@ -41,7 +41,7 @@ This is a cross-platform prediction market analyst for Kalshi and Polymarket US,
 
 **Programmatic layer** (no LLM, runs separately):
 - `collector.py` — snapshots market data from both Kalshi and Polymarket US to SQLite, generates `/workspace/data/active_markets.md` (category-grouped market listings for agent discovery)
-- `signals.py` — runs 5 quantitative scans (arbitrage, wide_spread, theta_decay, momentum, calibration) and writes signals to SQLite
+- `signals.py` — runs 4 quantitative scans (arbitrage, wide_spread, theta_decay, momentum) and writes signals to SQLite
 - Run via: `make collect && make signals` (or `make scan`)
 
 **Agent layer** (Claude REPL, runs on demand):
@@ -57,15 +57,15 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 
 ### Module roles
 
-- **main.py** — Assembles `ClaudeAgentOptions`, initializes DB, creates session, auto-resolves predictions, injects startup context into `BEGIN_SESSION`, runs the REPL loop.
+- **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point calls TUI.
 - **config.py** — Pydantic settings. Env vars override defaults. `kalshi_max_position_usd`, `polymarket_max_position_usd`, `polymarket_fee_rate = 0.0`, `recommendation_ttl_minutes = 60`. Also loads and templates `prompts/system.md`.
-- **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 8 read-only tools, `create_db_tools(db, session_id)` → 2 tools (`log_prediction`, `recommend_trade`). Exchange is a parameter, not a namespace.
+- **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 8 read-only tools, `create_db_tools(db, session_id)` → 1 tool (`recommend_trade` with legs array). Exchange is a parameter, not a namespace.
 - **kalshi_client.py** — Thin wrapper around `kalshi-python` SDK with rate limiting. Auth is RSA-PSS signing. Includes batch_create/cancel, amend_order, get_events (paginated).
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
-- **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `auto_resolve_predictions()` matches against settled market_snapshots. `_compute_calibration()` for Brier score. `get_session_state()` includes calibration, signal_history, unreconciled trades, pending/recent recommendations. Recommendation CRUD methods for frontend.
+- **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, pending_signals, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
 - **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates `active_markets.md` market listings.
-- **signals.py** — Standalone signal generator: 5 scan types (arbitrage, wide_spread, theta_decay, momentum, calibration). No LLM. Cross-platform matching is handled by the agent via semantic analysis.
+- **signals.py** — Standalone signal generator: 4 scan types (arbitrage, wide_spread, theta_decay, momentum). No LLM. Cross-platform matching is handled by the agent via semantic analysis.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
 - **prompts/system.md** — System prompt template with data sources, market discovery workflow, arithmetic signal protocols, recommendation protocol, risk rules.
@@ -73,7 +73,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 ### Key patterns
 
 - **Factory + closure** for tools: `create_market_tools(kalshi, polymarket)` returns a list of `@tool`-decorated functions closed over both clients.
-- **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 10 tools total.
+- **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 9 tools total.
 - **Unified conventions**: Exchange is a param, prices in cents, action+side for both platforms.
 - **Config**: env vars > Pydantic defaults.
 - **Hook ordering**: catch-all auto-approve → PostToolUse rec audit → Stop session end.
@@ -85,7 +85,6 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 
 `workspace/lib/` contains CLI tools for the agent's calculations:
 - `normalize_prices.py` — Cross-platform price comparison with fee-adjusted edge
-- `kelly_size.py` — Kelly criterion position sizing
 - `match_markets.py` — Bulk title similarity matching across platforms
 
 ## Code style

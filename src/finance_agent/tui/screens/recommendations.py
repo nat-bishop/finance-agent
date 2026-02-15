@@ -42,46 +42,37 @@ class RecommendationsScreen(Screen):
     async def _refresh(self) -> None:
         container = self.query_one("#recs-container", VerticalScroll)
 
-        # Clear existing cards
+        # Clear existing cards and messages
         for card in container.query(RecCard):
             card.remove()
         for static in container.query(".rec-status-msg"):
             static.remove()
 
-        # Get all recommendations (pending first, then recent executed/rejected)
-        pending = self._services.get_pending_recs()
-        recent = self._services.get_recommendations(limit=20)
+        # Get pending groups
+        pending = self._services.get_pending_groups()
 
-        # Group pending by group_id
-        groups: dict[str | int, list[dict]] = {}
-        ungrouped_idx = 0
-        for rec in pending:
-            gid = rec.get("group_id")
-            if gid:
-                groups.setdefault(gid, []).append(rec)
-            else:
-                groups[f"_single_{ungrouped_idx}"] = [rec]
-                ungrouped_idx += 1
-
-        if not groups:
+        if not pending:
             container.mount(Static("[dim]No pending recommendations[/]", classes="rec-status-msg"))
 
-        for _gid, group_recs in groups.items():
-            sorted_recs = sorted(group_recs, key=lambda r: r.get("leg_index", 0))
-            container.mount(RecCard(sorted_recs))
+        for group in pending:
+            container.mount(RecCard(group))
 
         # Show recent non-pending
-        non_pending = [r for r in recent if r.get("status") != "pending"]
+        recent = self._services.get_recommendations(limit=20)
+        non_pending = [g for g in recent if g.get("status") != "pending"]
         if non_pending:
             container.mount(Static("\n[bold]Recent[/]", classes="rec-status-msg"))
-            for rec in non_pending[:10]:
-                status = rec.get("status", "?")
-                exch = rec.get("exchange", "?").upper()
-                title = rec.get("market_title", rec.get("market_id", ""))[:40]
+            for group in non_pending[:10]:
+                status = group.get("status", "?")
+                legs = group.get("legs", [])
+                leg_summary = ", ".join(
+                    f"{lg.get('exchange', '?').upper()}: {lg.get('action', '?').upper()} "
+                    f"{lg.get('side', '?').upper()}"
+                    for lg in legs[:3]
+                )
                 container.mount(
                     Static(
-                        f"  [{status}] {exch}: {rec.get('action', '?').upper()} "
-                        f"{rec.get('side', '?').upper()} {title}",
+                        f"  [{status}] {leg_summary}",
                         classes="rec-status-msg",
                     )
                 )
@@ -90,38 +81,25 @@ class RecommendationsScreen(Screen):
         btn_id = event.button.id or ""
 
         if btn_id.startswith("exec-group-"):
-            group_id = btn_id[len("exec-group-") :]
-            recs = [r for r in self._services.get_pending_recs() if r.get("group_id") == group_id]
-            if recs:
-                await self._confirm_and_execute(recs, group_id=group_id)
+            group_id = int(btn_id[len("exec-group-") :])
+            group = self._services.db.get_group(group_id)
+            if group:
+                await self._confirm_and_execute(group)
 
-        elif btn_id.startswith("exec-"):
-            rec_id = int(btn_id[len("exec-") :])
-            recs = [r for r in self._services.get_pending_recs() if r["id"] == rec_id]
-            if recs:
-                await self._confirm_and_execute(recs, rec_ids=[rec_id])
-
-        elif btn_id.startswith("reject-"):
-            rec_id = int(btn_id[len("reject-") :])
-            await self._services.reject_recommendation(rec_id)
+        elif btn_id.startswith("reject-group-"):
+            group_id = int(btn_id[len("reject-group-") :])
+            await self._services.reject_group(group_id)
             await self._refresh()
 
-    async def _confirm_and_execute(
-        self,
-        recs: list[dict],
-        group_id: str | None = None,
-        rec_ids: list[int] | None = None,
-    ) -> None:
+    async def _confirm_and_execute(self, group: dict[str, Any]) -> None:
         def on_confirm(confirmed: bool) -> None:
             if confirmed:
-                self.run_worker(self._do_execute(group_id, rec_ids))
+                self.run_worker(self._do_execute(group["id"]))
 
-        self.app.push_screen(ConfirmModal(recs), callback=on_confirm)
+        self.app.push_screen(ConfirmModal(group), callback=on_confirm)
 
-    async def _do_execute(self, group_id: str | None, rec_ids: list[int] | None) -> None:
-        results = await self._services.execute_recommendation_group(
-            group_id=group_id, rec_ids=rec_ids
-        )
+    async def _do_execute(self, group_id: int) -> None:
+        results = await self._services.execute_recommendation_group(group_id)
 
         # Show results
         container = self.query_one("#recs-container", VerticalScroll)
@@ -129,7 +107,7 @@ class RecommendationsScreen(Screen):
             if r["status"] == "executed":
                 container.mount(
                     Static(
-                        f"  [green]Executed rec #{r['rec_id']}: "
+                        f"  [green]Executed leg #{r['leg_id']}: "
                         f"order {r.get('order_id', 'N/A')}[/]",
                         classes="rec-status-msg",
                     )
@@ -137,7 +115,7 @@ class RecommendationsScreen(Screen):
             else:
                 container.mount(
                     Static(
-                        f"  [red]Failed rec #{r['rec_id']}: {r.get('error', 'unknown')}[/]",
+                        f"  [red]Failed leg #{r['leg_id']}: {r.get('error', 'unknown')}[/]",
                         classes="rec-status-msg",
                     )
                 )

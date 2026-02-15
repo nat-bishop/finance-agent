@@ -74,44 +74,44 @@ class TUIServices:
 
     # ── Recommendations ───────────────────────────────────────────
 
-    def get_pending_recs(self) -> list[dict[str, Any]]:
-        """Get pending recommendations (sync, fast DB read)."""
-        return self.db.get_pending_recommendations()
+    def get_pending_groups(self) -> list[dict[str, Any]]:
+        """Get pending recommendation groups with legs (sync, fast DB read)."""
+        return self.db.get_pending_groups()
 
     def get_recommendations(self, **kwargs: Any) -> list[dict[str, Any]]:
-        """Get filtered recommendations (sync, fast DB read)."""
+        """Get filtered recommendation groups with legs (sync, fast DB read)."""
         return self.db.get_recommendations(**kwargs)
 
     # ── Order execution ───────────────────────────────────────────
 
-    def validate_execution(self, recs: list[dict[str, Any]]) -> str | None:
+    def validate_execution(self, group: dict[str, Any]) -> str | None:
         """Check position limits. Returns error message or None if valid."""
-        for rec in recs:
-            exchange = rec["exchange"]
+        for leg in group.get("legs", []):
+            exchange = leg["exchange"]
             if exchange == "kalshi":
                 max_usd = self._config.kalshi_max_position_usd
             else:
                 max_usd = self._config.polymarket_max_position_usd
 
-            cost_usd = rec["price_cents"] * rec["quantity"] / 100
+            cost_usd = leg["price_cents"] * leg["quantity"] / 100
             if cost_usd > max_usd:
                 return f"Order ${cost_usd:.2f} exceeds {exchange} limit ${max_usd:.2f}"
         return None
 
-    async def execute_order(self, rec: dict[str, Any]) -> dict[str, Any]:
-        """Place a single order based on a recommendation."""
+    async def execute_order(self, leg: dict[str, Any]) -> dict[str, Any]:
+        """Place a single order based on a recommendation leg."""
         loop = self._loop()
-        exchange = rec["exchange"]
+        exchange = leg["exchange"]
 
         if exchange == "kalshi":
-            price_key = "yes_price" if rec["side"] == "yes" else "no_price"
+            price_key = "yes_price" if leg["side"] == "yes" else "no_price"
             params = {
-                "ticker": rec["market_id"],
-                "action": rec["action"],
-                "side": rec["side"],
-                "count": rec["quantity"],
-                "order_type": rec.get("order_type", "limit"),
-                price_key: rec["price_cents"],
+                "ticker": leg["market_id"],
+                "action": leg["action"],
+                "side": leg["side"],
+                "count": leg["quantity"],
+                "order_type": leg.get("order_type", "limit"),
+                price_key: leg["price_cents"],
             }
             return await loop.run_in_executor(
                 self._executor,
@@ -120,42 +120,44 @@ class TUIServices:
         else:
             if not self._pm:
                 raise ValueError("Polymarket not enabled")
-            intent = PM_INTENT_MAP[(rec["action"], rec["side"])]
+            intent = PM_INTENT_MAP[(leg["action"], leg["side"])]
             params_pm = {
-                "slug": rec["market_id"],
+                "slug": leg["market_id"],
                 "intent": intent,
                 "order_type": "ORDER_TYPE_LIMIT",
-                "price": cents_to_usd(rec["price_cents"]),
-                "quantity": rec["quantity"],
+                "price": cents_to_usd(leg["price_cents"]),
+                "quantity": leg["quantity"],
             }
             return await loop.run_in_executor(
                 self._executor,
                 lambda: self._pm.create_order(**params_pm),  # type: ignore[union-attr]
             )
 
-    async def execute_recommendation_group(
-        self, group_id: str | None, rec_ids: list[int] | None = None
-    ) -> list[dict[str, Any]]:
-        """Execute all legs in a recommendation group (or specific recs by ID).
+    async def execute_recommendation_group(self, group_id: int) -> list[dict[str, Any]]:
+        """Execute all legs in a recommendation group.
 
         Returns per-leg results with status and order_id or error.
         """
-        if rec_ids:
-            recs = [r for r in self.db.get_pending_recommendations() if r["id"] in rec_ids]
-        elif group_id:
-            recs = [r for r in self.db.get_pending_recommendations() if r["group_id"] == group_id]
-        else:
+        group = self.db.get_group(group_id)
+        if not group:
             return []
 
         # Validate limits
-        error = self.validate_execution(recs)
+        error = self.validate_execution(group)
         if error:
-            return [{"rec_id": r["id"], "status": "rejected", "error": error} for r in recs]
+            self.db.update_group_status(group_id, "rejected")
+            return [
+                {"leg_id": leg["id"], "status": "rejected", "error": error}
+                for leg in group.get("legs", [])
+            ]
 
         results = []
-        for rec in recs:
+        executed_count = 0
+        failed_count = 0
+
+        for leg in group.get("legs", []):
             try:
-                result = await self.execute_order(rec)
+                result = await self.execute_order(leg)
                 order_id = ""
                 # Try to extract order_id from exchange response
                 if isinstance(result, dict):
@@ -166,40 +168,55 @@ class TUIServices:
 
                 self.db.log_trade(
                     session_id=self._session_id,
-                    ticker=rec["market_id"],
-                    action=rec["action"],
-                    side=rec["side"],
-                    count=rec["quantity"],
-                    price_cents=rec["price_cents"],
-                    order_type=rec.get("order_type", "limit"),
+                    ticker=leg["market_id"],
+                    action=leg["action"],
+                    side=leg["side"],
+                    count=leg["quantity"],
+                    price_cents=leg["price_cents"],
+                    order_type=leg.get("order_type", "limit"),
                     order_id=order_id,
                     status="placed",
                     result_json=json.dumps(result, default=str),
-                    exchange=rec["exchange"],
+                    exchange=leg["exchange"],
                 )
-                self.db.update_recommendation_status(rec["id"], "executed", order_id)
+                self.db.update_leg_status(leg["id"], "executed", order_id)
+                executed_count += 1
                 results.append(
                     {
-                        "rec_id": rec["id"],
+                        "leg_id": leg["id"],
                         "status": "executed",
                         "order_id": order_id,
                     }
                 )
             except Exception as e:
-                self.db.update_recommendation_status(rec["id"], "rejected")
+                self.db.update_leg_status(leg["id"], "rejected")
+                failed_count += 1
                 results.append(
                     {
-                        "rec_id": rec["id"],
+                        "leg_id": leg["id"],
                         "status": "failed",
                         "error": str(e),
                     }
                 )
 
+        # Determine group status
+        if executed_count == len(group.get("legs", [])):
+            group_status = "executed"
+        elif failed_count == len(group.get("legs", [])):
+            group_status = "rejected"
+        else:
+            group_status = "partial"
+        self.db.update_group_status(group_id, group_status)
+
         return results
 
-    async def reject_recommendation(self, rec_id: int) -> None:
-        """Mark a recommendation as rejected."""
-        self.db.update_recommendation_status(rec_id, "rejected")
+    async def reject_group(self, group_id: int) -> None:
+        """Mark an entire recommendation group as rejected."""
+        group = self.db.get_group(group_id)
+        if group:
+            for leg in group.get("legs", []):
+                self.db.update_leg_status(leg["id"], "rejected")
+        self.db.update_group_status(group_id, "rejected")
 
     # ── Order management ──────────────────────────────────────────
 

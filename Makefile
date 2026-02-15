@@ -1,4 +1,4 @@
-.PHONY: build run dev shell clean logs setup lock install lint format check collect signals scan backup
+.PHONY: build run dev shell clean logs setup lock install lint format check collect signals scan backup startup
 
 build:
 	docker compose build
@@ -50,3 +50,6 @@ scan: collect signals
 
 backup:
 	uv run python -c "from finance_agent.database import AgentDatabase; from finance_agent.config import load_configs; _, tc = load_configs(); db = AgentDatabase(tc.db_path); print(db.backup_if_needed(tc.backup_dir) or 'No backup needed'); db.close()"
+
+startup:
+	uv run python -c "from finance_agent.config import load_configs; from finance_agent.database import AgentDatabase; import json; _, tc = load_configs(); db = AgentDatabase(tc.db_path); state = db.get_session_state(); print(json.dumps(state, indent=2, default=str)); db.close()"

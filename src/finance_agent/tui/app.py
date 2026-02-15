@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -19,7 +20,7 @@ from ..config import load_configs
 from ..database import AgentDatabase
 from ..hooks import create_audit_hooks
 from ..kalshi_client import KalshiAPIClient
-from ..main import _WATCHLIST_PATH, _init_watchlist, build_options
+from ..main import build_options
 from ..polymarket_client import PolymarketAPIClient
 from ..tools import create_db_tools, create_market_tools
 from .messages import AskUserQuestionRequest, RecommendationCreated
@@ -30,9 +31,11 @@ from .screens.recommendations import RecommendationsScreen
 from .screens.signals import SignalsScreen
 from .services import TUIServices
 
+_WATCHLIST_PATH = Path("/workspace/data/watchlist.md")
+
 
 class FinanceApp(App):
-    """Cross-platform prediction market analyst TUI."""
+    """Cross-platform arbitrage analyst TUI."""
 
     TITLE = "Finance Agent"
     CSS_PATH = "agent.tcss"
@@ -63,17 +66,19 @@ class FinanceApp(App):
 
         session_id = db.create_session()
 
-        # Auto-resolve predictions
-        resolved = db.auto_resolve_predictions()
-
         # Build startup context
         startup_state = db.get_session_state()
-        if resolved:
-            startup_state["newly_resolved_predictions"] = resolved
-        startup_state["watchlist_file"] = str(_WATCHLIST_PATH)
-
-        # Migrate watchlist
-        _init_watchlist(db)
+        startup_state["watchlist"] = (
+            _WATCHLIST_PATH.read_text(encoding="utf-8") if _WATCHLIST_PATH.exists() else ""
+        )
+        active_markets = Path("/workspace/data/active_markets.md")
+        startup_state["data_freshness"] = {
+            "active_markets_updated_at": (
+                datetime.fromtimestamp(active_markets.stat().st_mtime, tz=UTC).isoformat()
+                if active_markets.exists()
+                else None
+            ),
+        }
 
         # Clear session scratch file
         session_log = Path("/workspace/data/session.log")

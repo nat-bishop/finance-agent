@@ -13,9 +13,9 @@ from textual.widgets import Button, Static
 class ConfirmModal(ModalScreen[bool]):
     """Shows order details and asks for confirmation."""
 
-    def __init__(self, recs: list[dict[str, Any]], **kwargs: Any) -> None:
+    def __init__(self, group: dict[str, Any], **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.recs = recs
+        self.group = group
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
@@ -23,24 +23,21 @@ class ConfirmModal(ModalScreen[bool]):
             yield Static("")
 
             total_cost = 0.0
-            for rec in self.recs:
-                exch = rec["exchange"].upper()
-                cost = rec["price_cents"] * rec["quantity"] / 100
+            for leg in self.group.get("legs", []):
+                exch = leg["exchange"].upper()
+                cost = leg["price_cents"] * leg["quantity"] / 100
                 total_cost += cost
                 yield Static(
-                    f"  {exch}: {rec['action'].upper()} {rec['side'].upper()} "
-                    f"{rec.get('market_title', rec['market_id'])[:40]}"
+                    f"  {exch}: {leg['action'].upper()} {leg['side'].upper()} "
+                    f"{(leg.get('market_title') or leg['market_id'])[:40]}"
                 )
-                yield Static(f"    @ {rec['price_cents']}c x{rec['quantity']} = ${cost:.2f}")
+                yield Static(f"    @ {leg['price_cents']}c x{leg['quantity']} = ${cost:.2f}")
 
             yield Static("")
             yield Static(f"[bold]Total cost: ${total_cost:.2f}[/]")
 
-            if any(r.get("equivalence_notes") for r in self.recs):
-                notes = next(
-                    r["equivalence_notes"] for r in self.recs if r.get("equivalence_notes")
-                )
-                yield Static(f"[dim]Equivalence: {notes[:60]}[/]")
+            if self.group.get("equivalence_notes"):
+                yield Static(f"[dim]Equivalence: {self.group['equivalence_notes'][:60]}[/]")
 
             with Horizontal(id="confirm-actions"):
                 yield Button("Confirm", id="confirm-yes", variant="success")

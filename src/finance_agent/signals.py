@@ -9,7 +9,6 @@ Scans:
 - Wide spread: wide spreads with volume (limit order at mid captures half-spread)
 - Theta decay: near-expiry markets with uncertain prices
 - Momentum: consistent directional price movement
-- Calibration: meta-signal from prediction accuracy (10+ resolved required)
 """
 
 from __future__ import annotations
@@ -276,67 +275,11 @@ def _generate_momentum_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     return signals
 
 
-def _generate_calibration_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Meta-signal from prediction accuracy.
-
-    Only runs when 10+ predictions have been resolved. Reports Brier score
-    and per-bucket calibration so the agent can adjust its confidence.
-    """
-    resolved = db.query(
-        """SELECT prediction, outcome
-           FROM predictions
-           WHERE outcome IS NOT NULL"""
-    )
-
-    if len(resolved) < 10:
-        return []
-
-    # Brier score
-    brier = sum((r["prediction"] - r["outcome"]) ** 2 for r in resolved) / len(resolved)
-
-    # Bucket calibration (0-0.2, 0.2-0.4, 0.4-0.6, 0.6-0.8, 0.8-1.0)
-    buckets: dict[str, dict] = {}
-    for label, lo, hi in [
-        ("0-20%", 0.0, 0.2),
-        ("20-40%", 0.2, 0.4),
-        ("40-60%", 0.4, 0.6),
-        ("60-80%", 0.6, 0.8),
-        ("80-100%", 0.8, 1.01),
-    ]:
-        in_bucket = [r for r in resolved if lo <= r["prediction"] < hi]
-        if in_bucket:
-            avg_pred = sum(r["prediction"] for r in in_bucket) / len(in_bucket)
-            avg_outcome = sum(r["outcome"] for r in in_bucket) / len(in_bucket)
-            buckets[label] = {
-                "count": len(in_bucket),
-                "avg_prediction": round(avg_pred, 3),
-                "avg_outcome": round(avg_outcome, 3),
-                "calibration_error": round(abs(avg_pred - avg_outcome), 3),
-            }
-
-    strength = max(0.1, 1.0 - brier * 4)
-    return [
-        _signal(
-            "calibration",
-            "META_CALIBRATION",
-            strength,
-            (1 - brier) * 100,
-            {
-                "brier_score": round(brier, 4),
-                "total_predictions": len(resolved),
-                "buckets": buckets,
-            },
-            exchange="meta",
-        )
-    ]
-
-
 _SCANS: list[tuple[str, Any]] = [
     ("arbitrage", _generate_arbitrage_signals),
     ("wide_spread", _generate_wide_spread_signals),
     ("theta_decay", _generate_theta_decay_signals),
     ("momentum", _generate_momentum_signals),
-    ("calibration", _generate_calibration_signals),
 ]
 
 

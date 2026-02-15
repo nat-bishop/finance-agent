@@ -149,72 +149,6 @@ class AgentDatabase:
         )
         return cursor.lastrowid or 0
 
-    # ── Predictions ──────────────────────────────────────────────
-
-    def log_prediction(
-        self,
-        market_ticker: str,
-        prediction: float,
-        market_price_cents: int | None = None,
-        methodology: str | None = None,
-        notes: str | None = None,
-    ) -> int:
-        cursor = self.execute(
-            """INSERT INTO predictions
-               (created_at, market_ticker, prediction, market_price_cents,
-                methodology, notes)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (_now(), market_ticker, prediction, market_price_cents, methodology, notes),
-        )
-        return cursor.lastrowid or 0
-
-    def resolve_prediction(self, prediction_id: int, outcome: int) -> None:
-        self.execute(
-            "UPDATE predictions SET outcome = ?, resolved_at = ? WHERE id = ?",
-            (outcome, _now(), prediction_id),
-        )
-
-    def auto_resolve_predictions(self) -> list[dict[str, Any]]:
-        """Auto-resolve unresolved predictions by matching against settled market_snapshots.
-
-        Returns list of newly resolved predictions for startup context.
-        """
-        unresolved = self.query(
-            """SELECT p.id, p.market_ticker, p.prediction
-               FROM predictions p
-               WHERE p.outcome IS NULL"""
-        )
-        if not unresolved:
-            return []
-
-        resolved = []
-        now = _now()
-        for pred in unresolved:
-            ticker = pred["market_ticker"]
-            settled = self.query(
-                """SELECT settlement_value
-                   FROM market_snapshots
-                   WHERE ticker = ? AND status = 'settled' AND settlement_value IS NOT NULL
-                   ORDER BY captured_at DESC LIMIT 1""",
-                (ticker,),
-            )
-            if settled:
-                outcome = settled[0]["settlement_value"]
-                self.execute(
-                    "UPDATE predictions SET outcome = ?, resolved_at = ? WHERE id = ?",
-                    (outcome, now, pred["id"]),
-                )
-                resolved.append(
-                    {
-                        "prediction_id": pred["id"],
-                        "market_ticker": ticker,
-                        "prediction": pred["prediction"],
-                        "outcome": outcome,
-                        "correct": (pred["prediction"] >= 0.5) == (outcome == 1),
-                    }
-                )
-        return resolved
-
     # ── Portfolio snapshots ──────────────────────────────────────
 
     def log_portfolio_snapshot(
@@ -231,112 +165,108 @@ class AgentDatabase:
             (_now(), session_id, balance_usd, positions_json, open_orders_json),
         )
 
-    # ── Recommendations ────────────────────────────────────────────
+    # ── Recommendation Groups ────────────────────────────────────
 
-    _REC_COLS = (
-        "session_id",
-        "created_at",
-        "group_id",
-        "leg_index",
-        "exchange",
-        "market_id",
-        "market_title",
-        "action",
-        "side",
-        "quantity",
-        "price_cents",
-        "order_type",
-        "thesis",
-        "signal_id",
-        "estimated_edge_pct",
-        "kelly_fraction",
-        "confidence",
-        "equivalence_notes",
-        "expires_at",
-    )
-
-    def log_recommendation(
+    def log_recommendation_group(
         self,
         session_id: str,
-        exchange: str,
-        market_id: str,
-        market_title: str,
-        action: str,
-        side: str,
-        quantity: int,
-        price_cents: int,
         thesis: str | None = None,
         estimated_edge_pct: float | None = None,
-        kelly_fraction: float | None = None,
-        confidence: str | None = None,
-        signal_id: int | None = None,
-        group_id: str | None = None,
-        leg_index: int = 0,
         equivalence_notes: str | None = None,
-        order_type: str = "limit",
+        signal_id: int | None = None,
+        legs: list[dict[str, Any]] | None = None,
         ttl_minutes: int = 60,
     ) -> int:
+        """Insert a recommendation group + legs atomically. Returns group_id."""
         now = _now()
         expires_at = (datetime.fromisoformat(now) + timedelta(minutes=ttl_minutes)).isoformat()
-        vals = (
-            session_id,
-            now,
-            group_id,
-            leg_index,
-            exchange,
-            market_id,
-            market_title,
-            action,
-            side,
-            quantity,
-            price_cents,
-            order_type,
-            thesis,
-            signal_id,
-            estimated_edge_pct,
-            kelly_fraction,
-            confidence,
-            equivalence_notes,
-            expires_at,
-        )
-        placeholders = ", ".join(["?"] * len(self._REC_COLS))
         cursor = self.execute(
-            f"INSERT INTO recommendations ({', '.join(self._REC_COLS)}) VALUES ({placeholders})",
-            vals,
+            """INSERT INTO recommendation_groups
+               (session_id, created_at, thesis, equivalence_notes,
+                estimated_edge_pct, signal_id, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                now,
+                thesis,
+                equivalence_notes,
+                estimated_edge_pct,
+                signal_id,
+                expires_at,
+            ),
         )
-        return cursor.lastrowid or 0
+        group_id = cursor.lastrowid or 0
+        for i, leg in enumerate(legs or []):
+            self.execute(
+                """INSERT INTO recommendation_legs
+                   (group_id, leg_index, exchange, market_id, market_title,
+                    action, side, quantity, price_cents)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    group_id,
+                    i,
+                    leg["exchange"],
+                    leg["market_id"],
+                    leg.get("market_title"),
+                    leg["action"],
+                    leg["side"],
+                    leg["quantity"],
+                    leg["price_cents"],
+                ),
+            )
+        return group_id
 
-    def get_pending_recommendations(self) -> list[dict[str, Any]]:
-        return self.query(
-            """SELECT id, session_id, created_at, group_id, leg_index, exchange,
-                      market_id, market_title, action, side, quantity, price_cents,
-                      order_type, thesis, estimated_edge_pct, kelly_fraction,
-                      confidence, equivalence_notes, expires_at
-               FROM recommendations
+    def get_pending_groups(self) -> list[dict[str, Any]]:
+        """Return pending groups with nested legs list."""
+        groups = self.query(
+            """SELECT id, session_id, created_at, thesis, equivalence_notes,
+                      estimated_edge_pct, signal_id, status, expires_at
+               FROM recommendation_groups
                WHERE status = 'pending'
-               ORDER BY group_id, leg_index"""
+               ORDER BY created_at DESC"""
+        )
+        for group in groups:
+            group["legs"] = self.query(
+                """SELECT id, leg_index, exchange, market_id, market_title,
+                          action, side, quantity, price_cents, order_type,
+                          status, order_id
+                   FROM recommendation_legs
+                   WHERE group_id = ?
+                   ORDER BY leg_index""",
+                (group["id"],),
+            )
+        return groups
+
+    def get_group(self, group_id: int) -> dict[str, Any] | None:
+        """Return a single group with legs."""
+        rows = self.query("SELECT * FROM recommendation_groups WHERE id = ?", (group_id,))
+        if not rows:
+            return None
+        group = rows[0]
+        group["legs"] = self.query(
+            """SELECT * FROM recommendation_legs
+               WHERE group_id = ? ORDER BY leg_index""",
+            (group_id,),
+        )
+        return group
+
+    def update_leg_status(self, leg_id: int, status: str, order_id: str | None = None) -> None:
+        """Update a single leg's status after exchange API call."""
+        self.execute(
+            """UPDATE recommendation_legs
+               SET status = ?, order_id = ?, executed_at = ?
+               WHERE id = ?""",
+            (status, order_id, _now() if status == "executed" else None, leg_id),
         )
 
-    def get_recommendation(self, rec_id: int) -> dict[str, Any] | None:
-        rows = self.query(
-            "SELECT * FROM recommendations WHERE id = ?",
-            (rec_id,),
-        )
-        return rows[0] if rows else None
-
-    def update_recommendation_status(
-        self,
-        rec_id: int,
-        status: str,
-        order_id: str | None = None,
-    ) -> None:
-        now = _now()
+    def update_group_status(self, group_id: int, status: str) -> None:
+        """Set group status. Also sets reviewed_at or executed_at timestamp."""
         ts_col = "executed_at" if status == "executed" else "reviewed_at"
         self.execute(
-            f"""UPDATE recommendations
-               SET status = ?, {ts_col} = ?, order_id = ?
+            f"""UPDATE recommendation_groups
+               SET status = ?, {ts_col} = ?
                WHERE id = ?""",
-            (status, now, order_id, rec_id),
+            (status, _now(), group_id),
         )
 
     # ── Market snapshots (bulk insert for collector) ─────────────
@@ -459,99 +389,24 @@ class AgentDatabase:
 
     # ── Session state (for startup) ──────────────────────────────
 
-    def _compute_calibration(self) -> dict[str, Any] | None:
-        """Compute calibration summary from resolved predictions."""
-        resolved = self.query(
-            "SELECT prediction, outcome FROM predictions WHERE outcome IS NOT NULL"
-        )
-        if not resolved:
-            return None
-        total = len(resolved)
-        correct = sum(1 for r in resolved if (r["prediction"] >= 0.5) == (r["outcome"] == 1))
-        brier = sum((r["prediction"] - r["outcome"]) ** 2 for r in resolved) / total
-        buckets: dict[str, dict[str, int]] = {}
-        for r in resolved:
-            b = min(int(r["prediction"] * 5), 4)
-            label = f"{b * 20}-{(b + 1) * 20}%"
-            buckets.setdefault(label, {"count": 0, "correct": 0})
-            buckets[label]["count"] += 1
-            if (r["prediction"] >= 0.5) == (r["outcome"] == 1):
-                buckets[label]["correct"] += 1
-        return {
-            "total": total,
-            "correct": correct,
-            "brier_score": round(brier, 4),
-            "buckets": [
-                {
-                    "range": k,
-                    "count": v["count"],
-                    "accuracy": round(v["correct"] / v["count"], 2) if v["count"] else 0,
-                }
-                for k, v in sorted(buckets.items())
-            ],
-        }
-
     def get_session_state(self) -> dict[str, Any]:
         last_sessions = self.query(
             """SELECT id, ended_at, summary, trades_placed, pnl_usd
                FROM sessions WHERE ended_at IS NOT NULL
                ORDER BY ended_at DESC LIMIT 1"""
         )
-
-        snapshots = self.query(
-            """SELECT balance_usd FROM portfolio_snapshots
-               ORDER BY captured_at DESC LIMIT 2"""
-        )
-        portfolio_delta = None
-        if snapshots:
-            latest = snapshots[0]["balance_usd"] or 0
-            prev = snapshots[1]["balance_usd"] or 0 if len(snapshots) > 1 else latest
-            portfolio_delta = {"balance_change": latest - prev, "latest_balance": latest}
-
-        signal_history = self.query(
-            """SELECT scan_type, COUNT(*) as count,
-                      ROUND(AVG(estimated_edge_pct), 2) as avg_edge
-               FROM signals GROUP BY scan_type ORDER BY count DESC"""
-        )
-
         return {
             "last_session": last_sessions[0] if last_sessions else None,
             "pending_signals": self.query(
-                """SELECT scan_type, exchange, ticker, event_ticker, signal_strength,
-                          estimated_edge_pct, details_json
+                """SELECT scan_type, exchange, ticker, event_ticker,
+                          signal_strength, estimated_edge_pct
                    FROM signals WHERE status = 'pending'
                    ORDER BY signal_strength DESC LIMIT 10"""
-            ),
-            "unresolved_predictions": self.query(
-                """SELECT id, market_ticker, prediction, market_price_cents, methodology
-                   FROM predictions WHERE outcome IS NULL
-                   ORDER BY created_at DESC LIMIT 20"""
-            ),
-            "calibration": self._compute_calibration(),
-            "signal_history": signal_history,
-            "portfolio_delta": portfolio_delta,
-            "recent_trades": self.query(
-                """SELECT exchange, ticker, action, side, count, price_cents, status
-                   FROM trades ORDER BY timestamp DESC LIMIT 5"""
             ),
             "unreconciled_trades": self.query(
                 """SELECT exchange, ticker, action, side, count, price_cents, order_id
                    FROM trades WHERE status = 'placed'
                    ORDER BY timestamp DESC LIMIT 10"""
-            ),
-            "pending_recommendations": self.query(
-                """SELECT id, group_id, leg_index, exchange, market_id, market_title,
-                          action, side, quantity, price_cents, thesis,
-                          estimated_edge_pct, confidence, expires_at
-                   FROM recommendations
-                   WHERE status = 'pending'
-                   ORDER BY group_id, leg_index"""
-            ),
-            "recent_recommendations": self.query(
-                """SELECT id, group_id, exchange, market_id, market_title,
-                          action, side, quantity, price_cents, status, created_at
-                   FROM recommendations
-                   ORDER BY created_at DESC LIMIT 10"""
             ),
         }
 
@@ -561,27 +416,31 @@ class AgentDatabase:
         self,
         *,
         status: str | None = None,
-        group_id: str | None = None,
         session_id: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Filtered recommendation query for TUI screens."""
-        clauses, params = ["1=1"], []
+        """Filtered group query for TUI screens. Returns groups with nested legs."""
+        clauses: list[str] = ["1=1"]
+        params: list[Any] = []
         if status:
-            clauses.append("status = ?")
+            clauses.append("g.status = ?")
             params.append(status)
-        if group_id:
-            clauses.append("group_id = ?")
-            params.append(group_id)
         if session_id:
-            clauses.append("session_id = ?")
+            clauses.append("g.session_id = ?")
             params.append(session_id)
         where = " AND ".join(clauses)
-        return self.query(
-            f"""SELECT * FROM recommendations WHERE {where}
-                ORDER BY created_at DESC, group_id, leg_index LIMIT ?""",
+        groups = self.query(
+            f"""SELECT g.* FROM recommendation_groups g
+                WHERE {where} ORDER BY g.created_at DESC LIMIT ?""",
             (*params, limit),
         )
+        for group in groups:
+            group["legs"] = self.query(
+                """SELECT * FROM recommendation_legs
+                   WHERE group_id = ? ORDER BY leg_index""",
+                (group["id"],),
+            )
+        return groups
 
     def get_trades(
         self,

@@ -296,46 +296,9 @@ def create_db_tools(
     """Database tools for agent persistence."""
 
     @tool(
-        "log_prediction",
-        "Record a probability prediction for calibration tracking.",
-        {
-            "market_ticker": {"type": "string", "description": "Market ticker or slug"},
-            "prediction": {
-                "type": "number",
-                "description": "Predicted probability (0.0 to 1.0)",
-            },
-            "context": {
-                "type": "string",
-                "description": "Exchange, current price, methodology, notes (freeform)",
-                "optional": True,
-            },
-        },
-    )
-    async def log_prediction(args: dict) -> dict:
-        pred_id = db.log_prediction(
-            market_ticker=args["market_ticker"],
-            prediction=args["prediction"],
-            notes=args.get("context"),
-        )
-        return _text({"prediction_id": pred_id, "status": "logged"})
-
-    @tool(
         "recommend_trade",
-        "Record a trade recommendation for review and execution by a separate system.",
+        "Record a trade recommendation with one or more legs for review and execution.",
         {
-            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
-            "market_id": {
-                "type": "string",
-                "description": "Market ticker (Kalshi) or slug (Polymarket)",
-            },
-            "market_title": {"type": "string", "description": "Human-readable market title"},
-            "action": {"type": "string", "description": "'buy' or 'sell'"},
-            "side": {"type": "string", "description": "'yes' or 'no'"},
-            "quantity": {"type": "integer", "description": "Number of contracts"},
-            "price_cents": {
-                "type": "integer",
-                "description": "Limit price in cents (1-99)",
-            },
             "thesis": {
                 "type": "string",
                 "description": "1-3 sentences explaining reasoning and opportunity",
@@ -344,60 +307,63 @@ def create_db_tools(
                 "type": "number",
                 "description": "Fee-adjusted edge percentage",
             },
-            "kelly_fraction": {
-                "type": "number",
-                "description": "Kelly fraction used for sizing",
-                "optional": True,
-            },
-            "confidence": {
+            "equivalence_notes": {
                 "type": "string",
-                "description": "high, medium, or low",
+                "description": "How you verified markets settle identically (for arbs)",
                 "optional": True,
             },
             "signal_id": {
                 "type": "integer",
-                "description": "ID of the signal that prompted this recommendation",
+                "description": "Signal ID that prompted this",
                 "optional": True,
             },
-            "group_id": {
-                "type": "string",
-                "description": "Group ID for paired arb legs (same group_id = same trade)",
-                "optional": True,
-            },
-            "leg_index": {
-                "type": "integer",
-                "description": "Leg index within a group (0, 1, ...)",
-                "optional": True,
-            },
-            "equivalence_notes": {
-                "type": "string",
-                "description": "How you verified the markets settle identically (for arbs)",
-                "optional": True,
+            "legs": {
+                "type": "array",
+                "description": "Trade legs (1 for directional, 2+ for arbs)",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "exchange": {
+                            "type": "string",
+                            "description": "'kalshi' or 'polymarket'",
+                        },
+                        "market_id": {
+                            "type": "string",
+                            "description": "Market ticker (Kalshi) or slug (Polymarket)",
+                        },
+                        "market_title": {
+                            "type": "string",
+                            "description": "Human-readable market title",
+                        },
+                        "action": {"type": "string", "description": "'buy' or 'sell'"},
+                        "side": {"type": "string", "description": "'yes' or 'no'"},
+                        "quantity": {"type": "integer", "description": "Number of contracts"},
+                        "price_cents": {
+                            "type": "integer",
+                            "description": "Limit price in cents (1-99)",
+                        },
+                    },
+                },
             },
         },
     )
     async def recommend_trade(args: dict) -> dict:
-        # Forward all matching args; add session_id + ttl + default leg_index
-        forwarded = (
-            "exchange", "market_id", "market_title", "action", "side",
-            "quantity", "price_cents", "thesis", "estimated_edge_pct",
-            "kelly_fraction", "confidence", "signal_id", "group_id",
-            "equivalence_notes",
-        )  # fmt: skip
-        kwargs = {k: args[k] for k in forwarded if k in args}
-        rec_id = db.log_recommendation(
+        group_id = db.log_recommendation_group(
             session_id=session_id,
+            thesis=args.get("thesis"),
+            estimated_edge_pct=args.get("estimated_edge_pct"),
+            equivalence_notes=args.get("equivalence_notes"),
+            signal_id=args.get("signal_id"),
+            legs=args.get("legs", []),
             ttl_minutes=recommendation_ttl_minutes,
-            leg_index=args.get("leg_index", 0),
-            **kwargs,
         )
-        rec = db.get_recommendation(rec_id)
+        group = db.get_group(group_id)
         return _text(
             {
-                "recommendation_id": rec_id,
-                "status": "pending",
-                "expires_at": rec["expires_at"] if rec else None,
+                "group_id": group_id,
+                "leg_count": len(args.get("legs", [])),
+                "expires_at": group["expires_at"] if group else None,
             }
         )
 
-    return [log_prediction, recommend_trade]
+    return [recommend_trade]

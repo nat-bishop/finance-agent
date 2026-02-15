@@ -94,20 +94,6 @@ def upgrade() -> None:
     """)
 
     op.execute("""
-        CREATE TABLE IF NOT EXISTS predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            market_ticker TEXT NOT NULL,
-            prediction REAL NOT NULL,
-            market_price_cents INTEGER,
-            methodology TEXT,
-            outcome INTEGER,
-            resolved_at TEXT,
-            notes TEXT
-        )
-    """)
-
-    op.execute("""
         CREATE TABLE IF NOT EXISTS portfolio_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             captured_at TEXT NOT NULL,
@@ -123,9 +109,9 @@ def upgrade() -> None:
             id TEXT PRIMARY KEY,
             started_at TEXT NOT NULL,
             ended_at TEXT,
-            profile TEXT,
             summary TEXT,
             trades_placed INTEGER DEFAULT 0,
+            recommendations_made INTEGER DEFAULT 0,
             pnl_usd REAL
         )
     """)
@@ -138,6 +124,41 @@ def upgrade() -> None:
             reason TEXT,
             alert_condition TEXT,
             PRIMARY KEY (ticker, exchange)
+        )
+    """)
+
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            thesis TEXT,
+            equivalence_notes TEXT,
+            estimated_edge_pct REAL,
+            signal_id INTEGER,
+            status TEXT DEFAULT 'pending',
+            expires_at TEXT,
+            reviewed_at TEXT,
+            executed_at TEXT
+        )
+    """)
+
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS recommendation_legs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL REFERENCES recommendation_groups(id),
+            leg_index INTEGER DEFAULT 0,
+            exchange TEXT NOT NULL,
+            market_id TEXT NOT NULL,
+            market_title TEXT,
+            action TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            price_cents INTEGER NOT NULL,
+            order_type TEXT DEFAULT 'limit',
+            status TEXT DEFAULT 'pending',
+            order_id TEXT,
+            executed_at TEXT
         )
     """)
 
@@ -187,17 +208,26 @@ def upgrade() -> None:
             ON trades(status)
     """)
     op.execute("""
-        CREATE INDEX IF NOT EXISTS idx_predictions_unresolved
-            ON predictions(outcome) WHERE outcome IS NULL
+        CREATE INDEX IF NOT EXISTS idx_group_status
+            ON recommendation_groups(status)
+    """)
+    op.execute("""
+        CREATE INDEX IF NOT EXISTS idx_leg_group
+            ON recommendation_legs(group_id)
+    """)
+    op.execute("""
+        CREATE INDEX IF NOT EXISTS idx_rec_session
+            ON recommendation_groups(session_id)
     """)
 
 
 def downgrade() -> None:
     for table in [
+        "recommendation_legs",
+        "recommendation_groups",
         "watchlist",
         "sessions",
         "portfolio_snapshots",
-        "predictions",
         "trades",
         "signals",
         "events",
