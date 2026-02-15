@@ -7,8 +7,6 @@ Reads from SQLite (market_snapshots, events), writes to signals table.
 Scans:
 - Arbitrage: bracket price sums != ~100%
 - Wide spread: wide spreads with volume (limit order at mid captures half-spread)
-- Cross-platform mismatch: same market, different prices on Kalshi vs Polymarket
-- Structural arb: Kalshi brackets vs Polymarket individual markets
 - Theta decay: near-expiry markets with uncertain prices
 - Momentum: consistent directional price movement
 - Calibration: meta-signal from prediction accuracy (10+ resolved required)
@@ -18,15 +16,10 @@ from __future__ import annotations
 
 import json
 import time
-from difflib import SequenceMatcher
 from typing import Any
 
 from .config import load_configs
 from .database import AgentDatabase
-
-
-def _norm_title(title: str) -> str:
-    return title.lower().strip().replace("?", "").replace("will ", "")
 
 
 def _signal(
@@ -160,135 +153,6 @@ def _generate_wide_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
             )
         )
 
-    return signals
-
-
-def _latest_open_markets(db: AgentDatabase, exchange: str) -> list[dict[str, Any]]:
-    """Fetch the latest snapshot per market for an exchange."""
-    return db.query(
-        """SELECT ticker, title, mid_price_cents, implied_probability,
-                  yes_bid, yes_ask, volume
-           FROM market_snapshots
-           WHERE exchange = ? AND status = 'open'
-             AND mid_price_cents IS NOT NULL
-           GROUP BY ticker HAVING captured_at = MAX(captured_at)""",
-        (exchange,),
-    )
-
-
-def _generate_cross_platform_mismatch_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find equivalent markets on Kalshi and Polymarket with price discrepancies."""
-    kalshi = _latest_open_markets(db, "kalshi")
-    polymarket = _latest_open_markets(db, "polymarket")
-    if not kalshi or not polymarket:
-        return []
-
-    # Build Polymarket lookup by normalized title
-    pm_lookup: dict[str, list[dict]] = {}
-    for pm in polymarket:
-        n = _norm_title(pm["title"] or "")
-        if n:
-            pm_lookup.setdefault(n, []).append(pm)
-
-    signals: list[dict[str, Any]] = []
-    for km in kalshi:
-        kn = _norm_title(km["title"] or "")
-        if not kn:
-            continue
-
-        # Try exact match first, then fuzzy
-        matches = pm_lookup.get(kn, [])
-        if not matches:
-            for pn, pms in pm_lookup.items():
-                if SequenceMatcher(None, kn, pn).ratio() > 0.8:
-                    matches = pms
-                    break
-
-        for pm in matches:
-            k_prob = km["implied_probability"] or km["mid_price_cents"] / 100
-            p_prob = pm["implied_probability"] or pm["mid_price_cents"] / 100
-            diff_pct = abs(k_prob - p_prob) * 100
-
-            if diff_pct < 2.0:
-                continue
-
-            signals.append(
-                _signal(
-                    "cross_platform_mismatch",
-                    km["ticker"],
-                    diff_pct / 15,
-                    diff_pct,
-                    {
-                        "kalshi_ticker": km["ticker"],
-                        "polymarket_slug": pm["ticker"],
-                        "kalshi_prob": round(k_prob, 4),
-                        "polymarket_prob": round(p_prob, 4),
-                        "diff_pct": round(diff_pct, 2),
-                        "direction": "kalshi_high" if k_prob > p_prob else "polymarket_high",
-                    },
-                    exchange="cross_platform",
-                )
-            )
-    return signals
-
-
-def _generate_structural_arb_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find structural arb between Kalshi brackets and Polymarket individual markets."""
-    events = db.query(
-        "SELECT event_ticker, title, markets_json FROM events WHERE mutually_exclusive = 1"
-    )
-    pm_markets = _latest_open_markets(db, "polymarket")
-    if not events or not pm_markets:
-        return []
-
-    pm_by_title = {_norm_title(m["title"] or ""): m for m in pm_markets if m["title"]}
-
-    signals: list[dict[str, Any]] = []
-    for event in events:
-        try:
-            k_markets = json.loads(event["markets_json"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if len(k_markets) < 2:
-            continue
-
-        matched = [
-            {"kalshi": km, "polymarket": pm_by_title[_norm_title(km.get("title", ""))]}
-            for km in k_markets
-            if _norm_title(km.get("title", "")) in pm_by_title
-        ]
-
-        if len(matched) < 2:
-            continue
-
-        k_sum = sum(
-            ((m["kalshi"].get("yes_bid", 0) or 0) + (m["kalshi"].get("yes_ask", 0) or 0)) / 2
-            for m in matched
-        )
-        p_sum = sum(m["polymarket"]["mid_price_cents"] for m in matched)
-
-        diff = abs(k_sum - p_sum)
-        if diff < 3:
-            continue
-
-        signals.append(
-            _signal(
-                "structural_arb",
-                event["event_ticker"],
-                diff / 15,
-                diff / len(matched),
-                {
-                    "event_title": event["title"],
-                    "kalshi_sum": round(k_sum, 1),
-                    "polymarket_sum": round(p_sum, 1),
-                    "diff_cents": round(diff, 1),
-                    "matched_legs": len(matched),
-                    "total_legs": len(k_markets),
-                },
-                event_ticker=event["event_ticker"],
-                exchange="cross_platform",
-            )
-        )
     return signals
 
 
@@ -470,8 +334,6 @@ def _generate_calibration_signals(db: AgentDatabase) -> list[dict[str, Any]]:
 _SCANS: list[tuple[str, Any]] = [
     ("arbitrage", _generate_arbitrage_signals),
     ("wide_spread", _generate_wide_spread_signals),
-    ("cross_platform_mismatch", _generate_cross_platform_mismatch_signals),
-    ("structural_arb", _generate_structural_arb_signals),
     ("theta_decay", _generate_theta_decay_signals),
     ("momentum", _generate_momentum_signals),
     ("calibration", _generate_calibration_signals),

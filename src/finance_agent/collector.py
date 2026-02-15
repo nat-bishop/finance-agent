@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .config import load_configs
@@ -304,6 +305,50 @@ def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) ->
     return total
 
 
+def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
+    """Write category-grouped market summary for agent semantic discovery."""
+    markets = db.query("""
+        SELECT exchange, ticker, title, mid_price_cents, category, days_to_expiration
+        FROM market_snapshots
+        WHERE status = 'open' AND mid_price_cents IS NOT NULL
+        GROUP BY exchange, ticker
+        HAVING captured_at = MAX(captured_at)
+        ORDER BY category, exchange, title
+    """)
+
+    # Group by category → exchange
+    by_cat: dict[str, dict[str, list]] = {}
+    for m in markets:
+        cat = m["category"] or "Other"
+        exch = m["exchange"]
+        by_cat.setdefault(cat, {}).setdefault(exch, []).append(m)
+
+    now = _now_iso()
+    total_k = sum(len(v.get("kalshi", [])) for v in by_cat.values())
+    total_p = sum(len(v.get("polymarket", [])) for v in by_cat.values())
+
+    lines = [
+        f"# Active Markets — {now}\n",
+        f"\n{total_k} Kalshi markets, {total_p} Polymarket markets. All prices in cents.\n",
+    ]
+
+    for cat in sorted(by_cat):
+        lines.append(f"\n## {cat}\n")
+        for exch in ["kalshi", "polymarket"]:
+            ms = by_cat[cat].get(exch, [])
+            if not ms:
+                continue
+            lines.append(f"\n### {exch.title()} ({len(ms)} markets)")
+            for m in ms:
+                price = m["mid_price_cents"]
+                lines.append(f"- {m['title']} — {price}c [{m['ticker']}]")
+        lines.append("")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+    print(f"  -> Market listings written to {output_path}")
+
+
 def run_collector() -> None:
     """Main entry point for the collector."""
     _, trading_config = load_configs()
@@ -326,6 +371,10 @@ def run_collector() -> None:
             pm_client = PolymarketAPIClient(trading_config)
             pm_count = collect_polymarket_markets(pm_client, db)
             pm_event_count = collect_polymarket_events(pm_client, db)
+
+        # Generate market listings for agent semantic discovery
+        listings_path = str(Path(trading_config.db_path).parent / "active_markets.md")
+        _generate_market_listings(db, listings_path)
 
         elapsed = time.time() - start
         print(f"\nCollection complete in {elapsed:.1f}s")

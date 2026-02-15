@@ -9,6 +9,22 @@ from polymarket_us import PolymarketUS
 from .api_base import BaseAPIClient
 from .config import TradingConfig
 
+# Map agent action+side to Polymarket intent
+PM_INTENT_MAP = {
+    ("buy", "yes"): "ORDER_INTENT_BUY_LONG",
+    ("sell", "yes"): "ORDER_INTENT_SELL_LONG",
+    ("buy", "no"): "ORDER_INTENT_BUY_SHORT",
+    ("sell", "no"): "ORDER_INTENT_SELL_SHORT",
+}
+
+# Map Polymarket intent back to action+side
+PM_INTENT_REVERSE = {v: k for k, v in PM_INTENT_MAP.items()}
+
+
+def cents_to_usd(cents: int) -> str:
+    """Convert price in cents (1-99) to USD string for Polymarket."""
+    return f"{cents / 100:.2f}"
+
 
 class PolymarketAPIClient(BaseAPIClient):
     """Convenience wrapper providing typed methods around the Polymarket US SDK."""

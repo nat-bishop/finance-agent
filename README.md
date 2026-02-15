@@ -1,16 +1,16 @@
 # Finance Agent
 
-Cross-platform prediction market arbitrage agent for [Kalshi](https://kalshi.com) and [Polymarket US](https://polymarket.us), built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
+Cross-platform prediction market analyst for [Kalshi](https://kalshi.com) and [Polymarket US](https://polymarket.us), built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
 
-Finds price discrepancies between platforms, verifies market equivalence, and recommends paired trades with full reasoning — waiting for your approval before executing.
+Finds price discrepancies between platforms, verifies market equivalence, and produces structured trade recommendations reviewed and executed separately.
 
 ## Architecture
 
 **Two-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms, `signals.py` runs 7 quantitative scans to surface opportunities: arbitrage, wide spreads, cross-platform mismatch, structural arb, theta decay, momentum, and calibration.
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates `active_markets.md` (category-grouped listings), `signals.py` runs 5 quantitative scans to surface opportunities: arbitrage, wide spreads, theta decay, momentum, and calibration.
 
-2. **Agent layer** (Claude REPL) — loads pre-computed signals and session state on startup, presents a cross-platform dashboard, investigates opportunities using unified market tools, and recommends paired trades. All state persists in SQLite for continuity across sessions.
+2. **Agent layer** (Claude REPL) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade`. All state persists in SQLite for continuity across sessions.
 
 ## Quickstart
 
@@ -47,8 +47,8 @@ Or locally: `make scan && uv run python -m finance_agent.main`
 ## Data Pipeline
 
 ```bash
-make collect    # snapshot markets + events from both platforms to SQLite
-make signals    # run 7 quantitative scans on collected data
+make collect    # snapshot markets + events from both platforms to SQLite, generate active_markets.md
+make signals    # run 5 quantitative scans on collected data
 make scan       # both in sequence
 make backup     # backup the database
 ```
@@ -61,17 +61,17 @@ The collector and signal generator are standalone scripts with no LLM dependency
 |--------|-------------|
 | `arbitrage` | Bracket YES prices not summing to ~100% (single-platform) |
 | `wide_spread` | Wide bid-ask with volume — limit order at mid captures half-spread |
-| `cross_platform_mismatch` | Same market, different prices on Kalshi vs Polymarket |
-| `structural_arb` | Kalshi bracket events vs Polymarket individual markets |
 | `theta_decay` | Near-expiry (<3 days) markets with uncertain prices (20-80c) |
 | `momentum` | Consistent directional movement (3+ snapshots, >5c move) |
 | `calibration` | Meta-signal from prediction accuracy (Brier score, 10+ resolved) |
 
+Cross-platform matching (formerly `cross_platform_mismatch` and `structural_arb`) is now handled by the agent via semantic analysis of `active_markets.md`.
+
 ## Agent Tools
 
-12 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
+10 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
 
-### Market Tools (11)
+### Market Tools (8)
 
 | Tool | Params | Notes |
 |------|--------|-------|
@@ -83,31 +83,27 @@ The collector and signal generator are standalone scripts with no LLM dependency
 | `get_trades` | `exchange`, `market_id`, `limit?` | Recent executions |
 | `get_portfolio` | `exchange?`, `include_fills?`, `include_settlements?` | Omit exchange = both |
 | `get_orders` | `exchange?`, `market_id?`, `status?` | Omit exchange = all platforms |
-| `place_order` | `exchange`, `orders[]` | Batch on Kalshi (up to 20), single on Polymarket |
-| `amend_order` | `order_id`, `price_cents?`, `quantity?` | Kalshi only, preserves FIFO |
-| `cancel_order` | `exchange`, `order_ids[]` | Batch cancel supported |
 
-### Database Tools (1)
+### Database Tools (2)
 
 | Tool | Notes |
 |------|-------|
 | `log_prediction` | Record probability prediction for calibration (market_ticker, prediction, context) |
+| `recommend_trade` | Record trade recommendation with thesis, edge, confidence. Use `group_id` for paired arb legs. |
 
-**Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`. The tool layer handles all conversion (Polymarket USD decimals, intents).
+**Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`.
 
-## Trading Flow
+## Analysis Flow
 
 ```
-Signal → Investigation → Verification → Sizing → Approval → Execution → Audit
+Discovery → Investigation → Verification → Sizing → Recommendation
 ```
 
-1. **Signal** — Pre-computed by `signals.py`, loaded at startup
-2. **Investigation** — Agent follows per-signal protocol (cross-platform mismatch, arbitrage, etc.)
+1. **Discovery** — Agent reads `active_markets.md`, finds cross-platform connections by category; also reviews pre-computed arithmetic signals
+2. **Investigation** — Agent follows per-signal protocol (semantic matching, arbitrage, etc.)
 3. **Verification** — Settlement equivalence, executable orderbook prices
 4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, `kelly_size.py` for position size
-5. **Approval** — Agent presents trade, user approves via hook prompt
-6. **Execution** — Unified `place_order` routes to correct exchange
-7. **Audit** — PostToolUse hook logs to `trades` table in SQLite
+5. **Recommendation** — Agent calls `recommend_trade` for each leg, stored in DB for review
 
 ## Configuration
 
@@ -123,22 +119,24 @@ Signal → Investigation → Verification → Sizing → Approval → Execution 
 | Kalshi fee rate | 3% | 3% |
 | Polymarket fee rate | 0% | 0% |
 | Claude budget/session | $1 | $2 |
+| Recommendation TTL | 60 min | 60 min |
 
 Environment variables override TOML values.
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto-migrated on startup). 8 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto-migrated on startup). 9 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
 | `market_snapshots` | collector | signals, agent | exchange, ticker, mid_price_cents, status |
 | `events` | collector | signals, agent | (event_ticker, exchange) PK, markets_json |
 | `signals` | signals | agent | scan_type, exchange, signal_strength, status |
-| `trades` | hooks | agent | exchange, ticker, action, side, price_cents |
+| `trades` | executor (future) | agent | exchange, ticker, action, side, price_cents |
+| `recommendations` | agent | frontend | exchange, market_id, action, side, status, group_id |
 | `predictions` | agent | signals, startup | prediction, outcome, market_ticker |
 | `portfolio_snapshots` | startup | agent | balance_usd, positions_json |
-| `sessions` | main | agent | started_at, summary, trades_placed |
+| `sessions` | main | agent | started_at, summary, trades_placed, recommendations_made |
 | `watchlist` | legacy | — | (ticker, exchange) PK — migrated to `/workspace/data/watchlist.md` |
 
 ## Workspace
@@ -152,6 +150,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
   analysis/               # Agent-written analysis (writable)
   data/
     agent.db              # SQLite database
+    active_markets.md     # Category-grouped market listings (generated by collector)
     watchlist.md          # Markets to monitor across sessions
     session.log           # Session scratch notes
   backups/                # DB backups (auto, max 7)
@@ -163,13 +162,13 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 src/finance_agent/
   main.py              # REPL entry point, session lifecycle, startup context injection
   config.py            # Pydantic settings, TOML profile loading
-  database.py          # SQLite (WAL mode), Alembic migrations, auto-resolve predictions
-  tools.py             # Unified MCP tool factories (market + DB)
+  database.py          # SQLite (WAL mode), Alembic migrations, recommendation CRUD
+  tools.py             # Unified MCP tool factories (8 market + 2 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
-  polymarket_client.py # Polymarket US SDK wrapper
-  hooks.py             # Audit hooks, trade validation, session lifecycle
-  collector.py         # Market data collector (both platforms, paginated events)
-  signals.py           # Signal generator (7 scan types)
+  polymarket_client.py # Polymarket US SDK wrapper, intent maps
+  hooks.py             # Recommendation counting, session lifecycle
+  collector.py         # Market data collector (both platforms, market listings)
+  signals.py           # Signal generator (5 scan types)
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations

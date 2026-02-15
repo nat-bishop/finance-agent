@@ -24,13 +24,7 @@ from .kalshi_client import KalshiAPIClient
 from .polymarket_client import PolymarketAPIClient
 from .tools import create_db_tools, create_market_tools
 
-# ── canUseTool — handles AskUserQuestion + trade safety net ──────
-
-_TRADE_TOOLS = {
-    "mcp__markets__place_order",
-    "mcp__markets__amend_order",
-    "mcp__markets__cancel_order",
-}
+# ── canUseTool — handles AskUserQuestion ─────────────────────
 
 
 def _parse_response(response: str, options: list[dict]) -> str:
@@ -61,18 +55,6 @@ async def _can_use_tool(
         return PermissionResultAllow(
             updated_input={"questions": input_data.get("questions", []), "answers": answers}
         )
-
-    if tool_name in _TRADE_TOOLS:
-        # Safety net: if hooks didn't resolve, prompt explicitly
-        print(f"\n{tool_name} requires approval.")
-        print(json.dumps(input_data, indent=2, default=str))
-        try:
-            response = input("Approve? (y/n): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            response = "n"
-        if response != "y":
-            return PermissionResultDeny(message="User rejected trade")
-        return PermissionResultAllow(updated_input=input_data)
 
     return PermissionResultAllow(updated_input=input_data)
 
@@ -133,7 +115,7 @@ def build_options(
         mcp_servers=mcp_servers,
         permission_mode="acceptEdits",
         can_use_tool=_can_use_tool,
-        hooks=create_audit_hooks(db=db, session_id=session_id, trading_config=trading_config),
+        hooks=create_audit_hooks(db=db, session_id=session_id),
         max_budget_usd=agent_config.max_budget_usd,
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
     )
@@ -177,8 +159,8 @@ async def run_repl() -> None:
     pm_client = PolymarketAPIClient(trading_config) if polymarket_enabled else None
 
     mcp_tools = {
-        "markets": create_market_tools(kalshi, pm_client, trading_config),
-        "db": create_db_tools(db),
+        "markets": create_market_tools(kalshi, pm_client),
+        "db": create_db_tools(db, session_id, trading_config.recommendation_ttl_minutes),
     }
     mcp_servers = {
         key: create_sdk_mcp_server(name=key, version="1.0.0", tools=tools)
@@ -188,7 +170,7 @@ async def run_repl() -> None:
     options = build_options(agent_config, trading_config, mcp_servers, db, session_id)
 
     # Startup banner
-    print("Cross-Platform Prediction Market Arbitrage Agent")
+    print("Cross-Platform Prediction Market Analyst")
     print(f"Profile: {agent_config.profile}  |  Model: {agent_config.model}")
     print(f"Kalshi: {trading_config.kalshi_env}")
     if polymarket_enabled:

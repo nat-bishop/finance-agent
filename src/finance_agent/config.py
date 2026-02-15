@@ -48,6 +48,7 @@ class TradingConfig(BaseSettings):
     polymarket_rate_limit_reads_per_sec: int = 15  # tightest: /positions (150/10s)
     polymarket_rate_limit_writes_per_sec: int = 50  # tightest: DELETE /order (500/10s)
     auto_scan_on_startup: bool = True
+    recommendation_ttl_minutes: int = 60
 
     # Polymarket credentials
     polymarket_key_id: str = ""
@@ -151,6 +152,7 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
         "POLYMARKET_FEE_RATE": trading_config.polymarket_fee_rate,
         "POLYMARKET_MAX_POSITION_USD": trading_config.polymarket_max_position_usd,
         "POLYMARKET_ENABLED": trading_config.polymarket_enabled,
+        "RECOMMENDATION_TTL_MINUTES": trading_config.recommendation_ttl_minutes,
     }
     for name, value in variables.items():
         raw = raw.replace(f"{{{{{name}}}}}", str(value))

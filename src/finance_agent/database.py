@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -100,13 +100,15 @@ class AgentDatabase:
         session_id: str,
         summary: str | None = None,
         trades_placed: int = 0,
+        recommendations_made: int = 0,
         pnl_usd: float | None = None,
     ) -> None:
         self.execute(
             """UPDATE sessions
-               SET ended_at = ?, summary = ?, trades_placed = ?, pnl_usd = ?
+               SET ended_at = ?, summary = ?, trades_placed = ?,
+                   recommendations_made = ?, pnl_usd = ?
                WHERE id = ?""",
-            (_now(), summary, trades_placed, pnl_usd, session_id),
+            (_now(), summary, trades_placed, recommendations_made, pnl_usd, session_id),
         )
 
     # ── Trades (lean schema) ─────────────────────────────────────
@@ -228,6 +230,102 @@ class AgentDatabase:
                VALUES (?, ?, ?, ?, ?)""",
             (_now(), session_id, balance_usd, positions_json, open_orders_json),
         )
+
+    # ── Recommendations ────────────────────────────────────────────
+
+    def log_recommendation(
+        self,
+        session_id: str,
+        exchange: str,
+        market_id: str,
+        market_title: str,
+        action: str,
+        side: str,
+        quantity: int,
+        price_cents: int,
+        thesis: str | None = None,
+        estimated_edge_pct: float | None = None,
+        kelly_fraction: float | None = None,
+        confidence: str | None = None,
+        signal_id: int | None = None,
+        group_id: str | None = None,
+        leg_index: int = 0,
+        equivalence_notes: str | None = None,
+        order_type: str = "limit",
+        ttl_minutes: int = 60,
+    ) -> int:
+        now = _now()
+        expires_at = (datetime.fromisoformat(now) + timedelta(minutes=ttl_minutes)).isoformat()
+        cursor = self.execute(
+            """INSERT INTO recommendations
+               (session_id, created_at, group_id, leg_index, exchange, market_id,
+                market_title, action, side, quantity, price_cents, order_type,
+                thesis, signal_id, estimated_edge_pct, kelly_fraction, confidence,
+                equivalence_notes, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                now,
+                group_id,
+                leg_index,
+                exchange,
+                market_id,
+                market_title,
+                action,
+                side,
+                quantity,
+                price_cents,
+                order_type,
+                thesis,
+                signal_id,
+                estimated_edge_pct,
+                kelly_fraction,
+                confidence,
+                equivalence_notes,
+                expires_at,
+            ),
+        )
+        return cursor.lastrowid or 0
+
+    def get_pending_recommendations(self) -> list[dict[str, Any]]:
+        return self.query(
+            """SELECT id, session_id, created_at, group_id, leg_index, exchange,
+                      market_id, market_title, action, side, quantity, price_cents,
+                      order_type, thesis, estimated_edge_pct, kelly_fraction,
+                      confidence, equivalence_notes, expires_at
+               FROM recommendations
+               WHERE status = 'pending'
+               ORDER BY group_id, leg_index"""
+        )
+
+    def get_recommendation(self, rec_id: int) -> dict[str, Any] | None:
+        rows = self.query(
+            "SELECT * FROM recommendations WHERE id = ?",
+            (rec_id,),
+        )
+        return rows[0] if rows else None
+
+    def update_recommendation_status(
+        self,
+        rec_id: int,
+        status: str,
+        order_id: str | None = None,
+    ) -> None:
+        now = _now()
+        if status == "executed":
+            self.execute(
+                """UPDATE recommendations
+                   SET status = ?, executed_at = ?, order_id = ?
+                   WHERE id = ?""",
+                (status, now, order_id, rec_id),
+            )
+        else:
+            self.execute(
+                """UPDATE recommendations
+                   SET status = ?, reviewed_at = ?
+                   WHERE id = ?""",
+                (status, now, rec_id),
+            )
 
     # ── Market snapshots (bulk insert for collector) ─────────────
 
@@ -428,6 +526,20 @@ class AgentDatabase:
                 """SELECT exchange, ticker, action, side, count, price_cents, order_id
                    FROM trades WHERE status = 'placed'
                    ORDER BY timestamp DESC LIMIT 10"""
+            ),
+            "pending_recommendations": self.query(
+                """SELECT id, group_id, leg_index, exchange, market_id, market_title,
+                          action, side, quantity, price_cents, thesis,
+                          estimated_edge_pct, confidence, expires_at
+                   FROM recommendations
+                   WHERE status = 'pending'
+                   ORDER BY group_id, leg_index"""
+            ),
+            "recent_recommendations": self.query(
+                """SELECT id, group_id, exchange, market_id, market_title,
+                          action, side, quantity, price_cents, status, created_at
+                   FROM recommendations
+                   ORDER BY created_at DESC LIMIT 10"""
             ),
         }
 

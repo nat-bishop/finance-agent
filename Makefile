@@ -16,7 +16,7 @@ clean:
 	docker compose down -v
 
 logs:
-	@echo "Trade journal is now in SQLite. Use: make shell -> sqlite3 /workspace/data/agent.db"
+	@echo "Recommendations and trades are in SQLite. Use: make shell -> sqlite3 /workspace/data/agent.db"
 
 setup:
 	cp .env.example .env

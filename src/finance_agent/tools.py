@@ -7,31 +7,14 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
-from .config import TradingConfig
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
 from .polymarket_client import PolymarketAPIClient
-
-# Map agent action+side to Polymarket intent
-_PM_INTENT_MAP = {
-    ("buy", "yes"): "ORDER_INTENT_BUY_LONG",
-    ("sell", "yes"): "ORDER_INTENT_SELL_LONG",
-    ("buy", "no"): "ORDER_INTENT_BUY_SHORT",
-    ("sell", "no"): "ORDER_INTENT_SELL_SHORT",
-}
-
-# Map Polymarket intent back to action+side for audit
-_PM_INTENT_REVERSE = {v: k for k, v in _PM_INTENT_MAP.items()}
 
 
 def _text(data: Any) -> dict:
     """Wrap data as MCP text content."""
     return {"content": [{"type": "text", "text": json.dumps(data, default=str)}]}
-
-
-def _cents_to_usd(cents: int) -> str:
-    """Convert price in cents (1-99) to USD string for Polymarket."""
-    return f"{cents / 100:.2f}"
 
 
 def _require_exchange(args: dict, polymarket: PolymarketAPIClient | None) -> str:
@@ -47,9 +30,8 @@ def _require_exchange(args: dict, polymarket: PolymarketAPIClient | None) -> str
 def create_market_tools(
     kalshi: KalshiAPIClient,
     polymarket: PolymarketAPIClient | None,
-    config: TradingConfig,
 ) -> list:
-    """Unified market tools. Exchange param routes to correct client."""
+    """Unified market tools (read-only). Exchange param routes to correct client."""
 
     @tool(
         "search_markets",
@@ -197,8 +179,7 @@ def create_market_tools(
 
     @tool(
         "get_trades",
-        "Get recent trade executions. Check before placing limit orders — "
-        "recent trades at your target price indicate quick fills.",
+        "Get recent trade executions. Check activity levels and recent prices.",
         {
             "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
             "market_id": {"type": "string", "description": "Market ticker or slug"},
@@ -263,8 +244,7 @@ def create_market_tools(
 
     @tool(
         "get_orders",
-        "List resting orders. Check after placing to verify status. "
-        "Omit exchange for all platforms.",
+        "List resting orders. Omit exchange for all platforms.",
         {
             "exchange": {
                 "type": "string",
@@ -296,134 +276,6 @@ def create_market_tools(
             )
         return _text(data)
 
-    @tool(
-        "place_order",
-        "Place order(s) on an exchange. Pass multiple orders for batch execution. "
-        "All prices in cents (1-99), action is 'buy'/'sell', side is 'yes'/'no'. "
-        f"Kalshi max ${config.kalshi_max_position_usd}/position, "
-        f"Polymarket max ${config.polymarket_max_position_usd}/position.",
-        {
-            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
-            "orders": {
-                "type": "array",
-                "description": (
-                    "Array of orders. Each: {market_id, action, side, quantity, "
-                    "price_cents, type?}. type defaults to 'limit'."
-                ),
-            },
-        },
-    )
-    async def place_order(args: dict) -> dict:
-        exchange = _require_exchange(args, polymarket)
-        orders = args.get("orders", [])
-        if not orders:
-            raise ValueError("orders array cannot be empty")
-
-        if exchange == "kalshi":
-            if len(orders) == 1:
-                o = orders[0]
-                return _text(
-                    kalshi.create_order(
-                        ticker=o["market_id"],
-                        action=o["action"],
-                        side=o["side"],
-                        count=o["quantity"],
-                        order_type=o.get("type", "limit"),
-                        yes_price=o["price_cents"] if o["side"] == "yes" else None,
-                        no_price=o["price_cents"] if o["side"] == "no" else None,
-                    )
-                )
-            # Batch create for multiple orders
-            batch = []
-            for o in orders:
-                batch.append(
-                    {
-                        "ticker": o["market_id"],
-                        "action": o["action"],
-                        "side": o["side"],
-                        "count": o["quantity"],
-                        "type": o.get("type", "limit"),
-                        **(
-                            {"yes_price": o["price_cents"]}
-                            if o["side"] == "yes"
-                            else {"no_price": o["price_cents"]}
-                        ),
-                    }
-                )
-            return _text(kalshi.batch_create_orders(batch))
-
-        # Polymarket
-        assert polymarket is not None
-        if len(orders) > 1:
-            raise ValueError("Polymarket does not support batch orders — submit one at a time")
-        o = orders[0]
-        intent_key = (o["action"].lower(), o["side"].lower())
-        intent = _PM_INTENT_MAP.get(intent_key)
-        if not intent:
-            raise ValueError(
-                f"Invalid action+side: {o['action']}+{o['side']}. Use buy/sell + yes/no."
-            )
-        return _text(
-            polymarket.create_order(
-                slug=o["market_id"],
-                intent=intent,
-                price=_cents_to_usd(o["price_cents"]),
-                quantity=o["quantity"],
-                order_type=o.get("type", "ORDER_TYPE_LIMIT"),
-            )
-        )
-
-    @tool(
-        "amend_order",
-        "Amend a resting order's price or quantity. Kalshi only — preserves FIFO queue position.",
-        {
-            "order_id": {"type": "string", "description": "Order ID to amend"},
-            "price_cents": {
-                "type": "integer",
-                "description": "New price in cents",
-                "optional": True,
-            },
-            "quantity": {
-                "type": "integer",
-                "description": "New quantity",
-                "optional": True,
-            },
-        },
-    )
-    async def amend_order(args: dict) -> dict:
-        return _text(
-            kalshi.amend_order(
-                args["order_id"],
-                price=args.get("price_cents"),
-                count=args.get("quantity"),
-            )
-        )
-
-    @tool(
-        "cancel_order",
-        "Cancel order(s). Pass multiple IDs for batch cancel.",
-        {
-            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
-            "order_ids": {
-                "type": "array",
-                "description": "Array of order ID strings to cancel",
-            },
-        },
-    )
-    async def cancel_order(args: dict) -> dict:
-        exchange = _require_exchange(args, polymarket)
-        ids = args.get("order_ids", [])
-        if not ids:
-            raise ValueError("order_ids cannot be empty")
-
-        if exchange == "kalshi":
-            if len(ids) == 1:
-                return _text(kalshi.cancel_order(ids[0]))
-            return _text(kalshi.batch_cancel_orders(ids))
-
-        assert polymarket is not None
-        return _text([polymarket.cancel_order(oid) for oid in ids])
-
     return [
         search_markets,
         get_market,
@@ -433,13 +285,14 @@ def create_market_tools(
         get_trades,
         get_portfolio,
         get_orders,
-        place_order,
-        amend_order,
-        cancel_order,
     ]
 
 
-def create_db_tools(db: AgentDatabase) -> list:
+def create_db_tools(
+    db: AgentDatabase,
+    session_id: str,
+    recommendation_ttl_minutes: int = 60,
+) -> list:
     """Database tools for agent persistence."""
 
     @tool(
@@ -466,4 +319,90 @@ def create_db_tools(db: AgentDatabase) -> list:
         )
         return _text({"prediction_id": pred_id, "status": "logged"})
 
-    return [log_prediction]
+    @tool(
+        "recommend_trade",
+        "Record a trade recommendation for review and execution by a separate system.",
+        {
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "market_id": {
+                "type": "string",
+                "description": "Market ticker (Kalshi) or slug (Polymarket)",
+            },
+            "market_title": {"type": "string", "description": "Human-readable market title"},
+            "action": {"type": "string", "description": "'buy' or 'sell'"},
+            "side": {"type": "string", "description": "'yes' or 'no'"},
+            "quantity": {"type": "integer", "description": "Number of contracts"},
+            "price_cents": {
+                "type": "integer",
+                "description": "Limit price in cents (1-99)",
+            },
+            "thesis": {
+                "type": "string",
+                "description": "1-3 sentences explaining reasoning and opportunity",
+            },
+            "estimated_edge_pct": {
+                "type": "number",
+                "description": "Fee-adjusted edge percentage",
+            },
+            "kelly_fraction": {
+                "type": "number",
+                "description": "Kelly fraction used for sizing",
+                "optional": True,
+            },
+            "confidence": {
+                "type": "string",
+                "description": "high, medium, or low",
+                "optional": True,
+            },
+            "signal_id": {
+                "type": "integer",
+                "description": "ID of the signal that prompted this recommendation",
+                "optional": True,
+            },
+            "group_id": {
+                "type": "string",
+                "description": "Group ID for paired arb legs (same group_id = same trade)",
+                "optional": True,
+            },
+            "leg_index": {
+                "type": "integer",
+                "description": "Leg index within a group (0, 1, ...)",
+                "optional": True,
+            },
+            "equivalence_notes": {
+                "type": "string",
+                "description": "How you verified the markets settle identically (for arbs)",
+                "optional": True,
+            },
+        },
+    )
+    async def recommend_trade(args: dict) -> dict:
+        rec_id = db.log_recommendation(
+            session_id=session_id,
+            exchange=args["exchange"],
+            market_id=args["market_id"],
+            market_title=args["market_title"],
+            action=args["action"],
+            side=args["side"],
+            quantity=args["quantity"],
+            price_cents=args["price_cents"],
+            thesis=args.get("thesis"),
+            estimated_edge_pct=args.get("estimated_edge_pct"),
+            kelly_fraction=args.get("kelly_fraction"),
+            confidence=args.get("confidence"),
+            signal_id=args.get("signal_id"),
+            group_id=args.get("group_id"),
+            leg_index=args.get("leg_index", 0),
+            equivalence_notes=args.get("equivalence_notes"),
+            ttl_minutes=recommendation_ttl_minutes,
+        )
+        rec = db.get_recommendation(rec_id)
+        return _text(
+            {
+                "recommendation_id": rec_id,
+                "status": "pending",
+                "expires_at": rec["expires_at"] if rec else None,
+            }
+        )
+
+    return [log_prediction, recommend_trade]
