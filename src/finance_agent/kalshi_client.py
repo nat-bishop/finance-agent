@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from kalshi_python import Configuration, KalshiClient
@@ -35,7 +36,7 @@ class KalshiAPIClient(BaseAPIClient):
         if credentials.kalshi_private_key:
             cfg.private_key_pem = credentials.kalshi_private_key.replace("\\n", "\n")
         else:
-            with open(credentials.kalshi_private_key_path) as f:
+            with Path(credentials.kalshi_private_key_path).open() as f:
                 cfg.private_key_pem = f.read()
 
         return KalshiClient(cfg)

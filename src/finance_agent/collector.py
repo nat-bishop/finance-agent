@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ def _parse_days_to_expiry(close_time: Any) -> float | None:
         return None
     try:
         if isinstance(close_time, str):
-            close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+            close_dt = datetime.fromisoformat(close_time)
         elif isinstance(close_time, int | float):
             close_dt = datetime.fromtimestamp(close_time, tz=UTC)
         else:
@@ -194,8 +195,8 @@ def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
 
 
 def _collect_and_process_events(
-    fetch_page: Any,
-    process_event: Any,
+    fetch_page: Callable,
+    process_event: Callable,
     db: AgentDatabase,
     label: str,
 ) -> int:
@@ -402,12 +403,10 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
                         header += f", mutually exclusive, sum: {price_sum}c"
                     header += ")"
                     lines.append(header)
-                    for m in ms:
-                        lines.append(_format_market_line(m))
+                    lines.extend(_format_market_line(m) for m in ms)
                 else:
                     # Standalone market(s) — no event header
-                    for m in ms:
-                        lines.append(_format_market_line(m))
+                    lines.extend(_format_market_line(m) for m in ms)
 
         lines.append("")
 

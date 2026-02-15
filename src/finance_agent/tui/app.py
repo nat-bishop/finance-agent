@@ -135,14 +135,12 @@ class FinanceApp(App):
         )
 
         # AskUserQuestion handler
-        app_ref = self
-
         async def can_use_tool_tui(
             tool_name: str, input_data: dict[str, Any], context: Any
         ) -> PermissionResultAllow:
             if tool_name == "AskUserQuestion":
                 future: asyncio.Future[dict[str, str]] = asyncio.get_event_loop().create_future()
-                app_ref.post_message(
+                self.post_message(
                     AskUserQuestionRequest(
                         questions=input_data.get("questions", []),
                         future=future,

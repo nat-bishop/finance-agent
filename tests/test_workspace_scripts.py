@@ -10,7 +10,8 @@ def _import_script(name: str):
     """Import a workspace script by name."""
     script_path = Path(__file__).parent.parent / "workspace" / "lib" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, str(script_path))
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

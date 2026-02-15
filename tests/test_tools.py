@@ -25,9 +25,9 @@ def test_text_wraps_as_mcp_content():
 
 
 def test_text_handles_non_serializable():
-    from datetime import datetime
+    from datetime import UTC, datetime
 
-    result = _text({"dt": datetime(2025, 1, 1)})
+    result = _text({"dt": datetime(2025, 1, 1, tzinfo=UTC)})
     text = result["content"][0]["text"]
     assert "2025" in text
 

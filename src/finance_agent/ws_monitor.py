@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import websockets
@@ -49,7 +50,7 @@ class KalshiFillMonitor:
 
         pem = self._credentials.kalshi_private_key
         if not pem:
-            with open(self._credentials.kalshi_private_key_path) as f:
+            with Path(self._credentials.kalshi_private_key_path).open() as f:
                 pem = f.read()
         else:
             pem = pem.replace("\\n", "\n")

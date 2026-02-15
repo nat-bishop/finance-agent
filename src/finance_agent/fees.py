@@ -42,7 +42,7 @@ def leg_fee(exchange: str, contracts: int, price_cents: int, *, maker: bool = Fa
     """Dispatch to exchange-specific fee function."""
     if exchange == "kalshi":
         return kalshi_fee(contracts, price_cents, maker=maker)
-    elif exchange == "polymarket":
+    if exchange == "polymarket":
         return polymarket_fee(contracts, price_cents, maker=maker)
     raise ValueError(f"Unknown exchange: {exchange}")
 
@@ -62,7 +62,7 @@ def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | No
     first = asks[0]
     if isinstance(first, list | tuple):
         return int(first[0]), int(first[1])
-    elif isinstance(first, dict):
+    if isinstance(first, dict):
         return int(first.get("price", 0)), int(first.get("quantity", 0))
     return None, 0
 

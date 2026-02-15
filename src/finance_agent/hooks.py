@@ -17,16 +17,6 @@ logger = logging.getLogger(__name__)
 _EMPTY: HookJSONOutput = {}  # type: ignore[assignment]
 
 
-def _allow_with_input(input_data: HookInput) -> HookJSONOutput:
-    return {  # type: ignore[return-value]
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "updatedInput": input_data,  # type: ignore[typeddict-item]
-        }
-    }
-
-
 def create_audit_hooks(
     db: AgentDatabase,
     session_id: str,
@@ -40,9 +30,15 @@ def create_audit_hooks(
     ) -> HookJSONOutput:
         """Auto-approve all tools except AskUserQuestion (handled by canUseTool)."""
         data: dict[str, Any] = input_data  # type: ignore[assignment]
-        return (
-            _EMPTY if data.get("tool_name") == "AskUserQuestion" else _allow_with_input(input_data)
-        )
+        if data.get("tool_name") == "AskUserQuestion":
+            return _EMPTY
+        return {  # type: ignore[return-value]
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": input_data,  # type: ignore[typeddict-item]
+            }
+        }
 
     async def audit_recommendation(
         _input_data: HookInput, _tool_use_id: str | None, _context: HookContext

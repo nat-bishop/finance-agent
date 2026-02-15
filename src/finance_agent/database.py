@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -524,6 +522,8 @@ class AgentDatabase:
         backup_dir = Path(backup_dir)
         backup_dir.mkdir(parents=True, exist_ok=True)
 
+        import time
+
         backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
         if backups:
             age_hours = (time.time() - backups[-1].stat().st_mtime) / 3600
@@ -532,6 +532,8 @@ class AgentDatabase:
 
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"agent_{ts}.db"
+
+        import sqlite3
 
         raw_conn = self._engine.raw_connection()
         try:

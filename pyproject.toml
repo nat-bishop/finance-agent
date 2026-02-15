@@ -45,19 +45,38 @@ extend-exclude = ["workspace"]
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-    "SIM", # flake8-simplify
-    "RUF", # ruff-specific rules
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "T20",  # flake8-print (no stray prints)
+    "C4",   # flake8-comprehensions
+    "FA",   # flake8-future-annotations
+    "ISC",  # flake8-implicit-str-concat
+    "ICN",  # flake8-import-conventions
+    "A",    # flake8-builtins (no shadowed builtins)
+    "PIE",  # flake8-pie (misc unnecessary code)
+    "DTZ",  # flake8-datetimez (timezone-aware datetimes)
+    "PT",   # flake8-pytest-style
+    "PTH",  # flake8-use-pathlib
+    "PERF", # perflint (performance anti-patterns)
+    "FURB", # refurb (modern Python idioms)
+    "S",    # flake8-bandit (security)
+    "NPY",  # numpy-specific rules
+    "TD",   # flake8-todo (TODO hygiene)
 ]
 ignore = [
-    "E501",  # line length (formatter handles this)
+    "E501",    # line length (formatter handles)
+    "ISC001",  # single-line implicit string concat (conflicts with formatter)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S106"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["finance_agent"]

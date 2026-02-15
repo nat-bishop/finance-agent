@@ -9,7 +9,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
-    pass
+    def to_dict(self) -> dict[str, Any]:
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 # ── Market Snapshots ──────────────────────────────────────────
@@ -53,9 +54,6 @@ class MarketSnapshot(Base):
         Index("idx_snapshots_exchange_status", "exchange", "status"),
     )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
 
 # ── Events ────────────────────────────────────────────────────
 
@@ -71,9 +69,6 @@ class Event(Base):
     mutually_exclusive: Mapped[int | None] = mapped_column(Integer)
     last_updated: Mapped[str | None] = mapped_column(Text)
     markets_json: Mapped[str | None] = mapped_column(Text)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 # ── Signals ───────────────────────────────────────────────────
@@ -105,9 +100,6 @@ class Signal(Base):
         Index("idx_signals_exchange", "exchange"),
     )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
 
 # ── Trades ────────────────────────────────────────────────────
 
@@ -135,9 +127,6 @@ class Trade(Base):
         Index("idx_trades_status", "status"),
     )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
 
 # ── Portfolio Snapshots ───────────────────────────────────────
 
@@ -151,9 +140,6 @@ class PortfolioSnapshot(Base):
     balance_usd: Mapped[float | None] = mapped_column(Float)
     positions_json: Mapped[str | None] = mapped_column(Text)
     open_orders_json: Mapped[str | None] = mapped_column(Text)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 # ── Sessions ──────────────────────────────────────────────────
@@ -170,9 +156,6 @@ class Session(Base):
     recommendations_made: Mapped[int] = mapped_column(Integer, server_default="0")
     pnl_usd: Mapped[float | None] = mapped_column(Float)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
-
 
 # ── Watchlist (legacy — watchlist is now /workspace/data/watchlist.md) ──
 
@@ -185,9 +168,6 @@ class Watchlist(Base):
     added_at: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text)
     alert_condition: Mapped[str | None] = mapped_column(Text)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 # ── Recommendation Groups ────────────────────────────────────
@@ -224,7 +204,7 @@ class RecommendationGroup(Base):
     )
 
     def to_dict(self) -> dict[str, Any]:
-        d = {c.name: getattr(self, c.name) for c in self.__table__.columns}
+        d = super().to_dict()
         d["legs"] = [leg.to_dict() for leg in self.legs]
         return d
 
@@ -259,6 +239,3 @@ class RecommendationLeg(Base):
     group: Mapped[RecommendationGroup] = relationship(back_populates="legs")
 
     __table_args__ = (Index("idx_leg_group", "group_id"),)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}

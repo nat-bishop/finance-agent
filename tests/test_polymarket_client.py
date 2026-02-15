@@ -31,7 +31,7 @@ def test_pm_intent_reverse_roundtrip():
 
 
 @pytest.mark.parametrize(
-    "cents,expected",
+    ("cents", "expected"),
     [(50, "0.50"), (1, "0.01"), (99, "0.99"), (0, "0.00"), (100, "1.00")],
 )
 def test_cents_to_usd(cents, expected):

@@ -104,9 +104,7 @@ def create_market_tools(
         mid = args["market_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_market(mid))
-        if polymarket is None:
-            raise RuntimeError("polymarket client is unexpectedly None")
-        return _text(polymarket.get_market(mid))
+        return _text(polymarket.get_market(mid))  # type: ignore[union-attr]
 
     @tool(
         "get_orderbook",
@@ -126,11 +124,9 @@ def create_market_tools(
         mid = args["market_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_orderbook(mid, depth=args.get("depth", 10)))
-        if polymarket is None:
-            raise RuntimeError("polymarket client is unexpectedly None")
         if args.get("depth", 10) <= 1:
-            return _text(polymarket.get_bbo(mid))
-        return _text(polymarket.get_orderbook(mid))
+            return _text(polymarket.get_bbo(mid))  # type: ignore[union-attr]
+        return _text(polymarket.get_orderbook(mid))  # type: ignore[union-attr]
 
     @tool(
         "get_event",
@@ -145,9 +141,7 @@ def create_market_tools(
         eid = args["event_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_event(eid))
-        if polymarket is None:
-            raise RuntimeError("polymarket client is unexpectedly None")
-        return _text(polymarket.get_event(eid))
+        return _text(polymarket.get_event(eid))  # type: ignore[union-attr]
 
     @tool(
         "get_price_history",
@@ -200,9 +194,7 @@ def create_market_tools(
         mid, limit = args["market_id"], args.get("limit", 50)
         if exchange == "kalshi":
             return _text(kalshi.get_trades(mid, limit=limit))
-        if polymarket is None:
-            raise RuntimeError("polymarket client is unexpectedly None")
-        return _text(polymarket.get_trades(mid, limit=limit))
+        return _text(polymarket.get_trades(mid, limit=limit))  # type: ignore[union-attr]
 
     @tool(
         "get_portfolio",

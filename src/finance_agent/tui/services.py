@@ -41,9 +41,6 @@ class TUIServices:
         self._executor = ThreadPoolExecutor(max_workers=4)
         self._fill_monitor: FillMonitor | None = None
 
-    def _loop(self) -> asyncio.AbstractEventLoop:
-        return asyncio.get_running_loop()
-
     def _get_fill_monitor(self) -> FillMonitor:
         if not self._fill_monitor and self._credentials:
             self._fill_monitor = FillMonitor(self._credentials, self._config)
@@ -55,7 +52,7 @@ class TUIServices:
 
     async def get_portfolio(self) -> dict[str, Any]:
         """Fetch balances and positions from both exchanges."""
-        loop = self._loop()
+        loop = asyncio.get_running_loop()
         data: dict[str, Any] = {}
 
         data["kalshi"] = {
@@ -73,7 +70,7 @@ class TUIServices:
 
     async def get_orders(self, exchange: str | None = None) -> dict[str, Any]:
         """Fetch resting orders from exchange(s)."""
-        loop = self._loop()
+        loop = asyncio.get_running_loop()
         data: dict[str, Any] = {}
 
         if exchange in ("kalshi", None):
@@ -104,22 +101,17 @@ class TUIServices:
 
     async def _fetch_orderbook(self, exchange: str, market_id: str) -> dict[str, Any]:
         """Fetch orderbook from exchange (async wrapper)."""
-        loop = self._loop()
+        loop = asyncio.get_running_loop()
         if exchange == "kalshi":
             return await loop.run_in_executor(
                 self._executor, lambda: self._kalshi.get_orderbook(market_id)
             )
-        elif self._pm:
+        if self._pm:
             return await loop.run_in_executor(
                 self._executor,
                 lambda: self._pm.get_orderbook(market_id),  # type: ignore[union-attr]
             )
         raise ValueError(f"Exchange {exchange} not available")
-
-    @staticmethod
-    def _best_price_from_orderbook(ob: dict[str, Any], side: str) -> tuple[int | None, int]:
-        """Extract best executable price and depth from orderbook."""
-        return best_price_and_depth(ob, side)
 
     # ── Order execution ───────────────────────────────────────────
 
@@ -158,7 +150,7 @@ class TUIServices:
 
     async def execute_order(self, leg: dict[str, Any]) -> dict[str, Any]:
         """Place a single order based on a recommendation leg."""
-        loop = self._loop()
+        loop = asyncio.get_running_loop()
         exchange = leg["exchange"]
         logger.info(
             "Executing order: %s %s %s on %s @ %dc x%d (maker=%s)",
@@ -185,21 +177,21 @@ class TUIServices:
                 self._executor,
                 lambda: self._kalshi.create_order(**params),
             )
-        else:
-            if not self._pm:
-                raise ValueError("Polymarket not enabled")
-            intent = PM_INTENT_MAP[(leg["action"], leg["side"])]
-            params_pm = {
-                "slug": leg["market_id"],
-                "intent": intent,
-                "order_type": "ORDER_TYPE_LIMIT",
-                "price": cents_to_usd(leg["price_cents"]),
-                "quantity": leg["quantity"],
-            }
-            return await loop.run_in_executor(
-                self._executor,
-                lambda: self._pm.create_order(**params_pm),  # type: ignore[union-attr]
-            )
+
+        if not self._pm:
+            raise ValueError("Polymarket not enabled")
+        intent = PM_INTENT_MAP[(leg["action"], leg["side"])]
+        params_pm = {
+            "slug": leg["market_id"],
+            "intent": intent,
+            "order_type": "ORDER_TYPE_LIMIT",
+            "price": cents_to_usd(leg["price_cents"]),
+            "quantity": leg["quantity"],
+        }
+        return await loop.run_in_executor(
+            self._executor,
+            lambda: self._pm.create_order(**params_pm),  # type: ignore[union-attr]
+        )
 
     # ── Execution helpers ─────────────────────────────────────────
 
@@ -257,7 +249,7 @@ class TUIServices:
                 return None, self._reject_all_legs(group_id, legs, f"Orderbook fetch failed: {e}")
 
             side = leg.get("side", "yes")
-            price, depth = self._best_price_from_orderbook(ob, side)
+            price, depth = best_price_and_depth(ob, side)
 
             rec_price = leg.get("price_cents")
             if price and rec_price:
@@ -526,13 +518,13 @@ class TUIServices:
     async def cancel_order(self, exchange: str, order_id: str) -> dict[str, Any]:
         """Cancel an order on the specified exchange."""
         logger.info("Cancelling order %s on %s", order_id, exchange)
-        loop = self._loop()
+        loop = asyncio.get_running_loop()
         if exchange == "kalshi":
             return await loop.run_in_executor(
                 self._executor,
                 lambda: self._kalshi.cancel_order(order_id),
             )
-        elif self._pm:
+        if self._pm:
             return await loop.run_in_executor(
                 self._executor,
                 lambda: self._pm.cancel_order(order_id),  # type: ignore[union-attr]
@@ -547,7 +539,7 @@ class TUIServices:
         count: int | None = None,
     ) -> dict[str, Any]:
         """Amend a Kalshi order (price and/or count)."""
-        loop = self._loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
             lambda: self._kalshi.amend_order(order_id, price=price, count=count),
@@ -563,6 +555,3 @@ class TUIServices:
 
     def get_signals(self, **kwargs: Any) -> list[dict[str, Any]]:
         return self.db.get_signals(**kwargs)
-
-    def get_session_state(self) -> dict[str, Any]:
-        return self.db.get_session_state()

@@ -409,8 +409,7 @@ def test_insert_signals_string_details(db):
 
 def test_expire_old_signals(db, sample_signal):
     db.insert_signals([sample_signal()])
-    # Backdate via raw SQL through the query escape hatch won't work (SELECT only).
-    # Instead, insert a signal with an old generated_at by manipulating the data.
+    # Backdate the signal's generated_at to make it expire-eligible
     old_time = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
     with db._session_factory() as session:
         from sqlalchemy import select
@@ -473,14 +472,14 @@ def test_backup_skips_recent(db, tmp_path):
 
 
 def test_backup_prunes_old(db, tmp_path):
+    import time
+
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
     first = db.backup_if_needed(str(backup_dir), max_age_hours=24)
     assert first is not None
     for _ in range(4):
-        import time as _time
-
-        _time.sleep(0.01)
+        time.sleep(0.01)
         db.backup_if_needed(str(backup_dir), max_age_hours=0, max_backups=3)
     remaining = list(backup_dir.glob("agent_*.db"))
     assert len(remaining) <= 3

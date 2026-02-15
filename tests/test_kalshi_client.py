@@ -40,7 +40,7 @@ def kalshi_client(monkeypatch):
     config = TradingConfig()
     with (
         patch("finance_agent.kalshi_client.KalshiClient") as mock_sdk,
-        patch("builtins.open", mock_open(read_data="FAKE_PEM_KEY")),
+        patch("pathlib.Path.open", mock_open(read_data="FAKE_PEM_KEY")),
     ):
         client = KalshiAPIClient(credentials, config)
         client._client = mock_sdk.return_value

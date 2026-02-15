@@ -144,8 +144,6 @@ class PolymarketAPIClient(BaseAPIClient):
 
     def cancel_order(self, order_id: str, slug: str = "") -> dict[str, Any]:
         self._rate_write()
-        params: dict[str, str] = {}
-        if slug:
-            params["marketSlug"] = slug
+        params = {"marketSlug": slug} if slug else {}
         self._client.orders.cancel(order_id, params)  # type: ignore[arg-type]
         return {"status": "cancelled", "order_id": order_id}
