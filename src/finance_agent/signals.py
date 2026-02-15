@@ -26,8 +26,25 @@ from .database import AgentDatabase
 
 
 def _norm_title(title: str) -> str:
-    """Normalize a market title for fuzzy matching."""
     return title.lower().strip().replace("?", "").replace("will ", "")
+
+
+def _signal(
+    scan_type: str,
+    ticker: str,
+    strength: float,
+    edge_pct: float,
+    details: dict[str, Any],
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "scan_type": scan_type,
+        "ticker": ticker,
+        "signal_strength": min(1.0, round(strength, 3)),
+        "estimated_edge_pct": round(edge_pct, 2),
+        "details_json": details,
+        **extra,
+    }
 
 
 def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
@@ -67,16 +84,14 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
         price_sum = sum(leg["mid_price"] for leg in legs)
         deviation = abs(price_sum - 100)
 
-        # Flag if sum deviates by more than 2 cents
         if deviation > 2:
             signals.append(
-                {
-                    "scan_type": "arbitrage",
-                    "ticker": event["event_ticker"],
-                    "event_ticker": event["event_ticker"],
-                    "signal_strength": min(1.0, deviation / 10),
-                    "estimated_edge_pct": deviation,
-                    "details_json": {
+                _signal(
+                    "arbitrage",
+                    event["event_ticker"],
+                    deviation / 10,
+                    deviation,
+                    {
                         "title": event["title"],
                         "price_sum": round(price_sum, 1),
                         "deviation_cents": round(deviation, 1),
@@ -87,7 +102,8 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
                         ],
                         "num_markets": len(legs),
                     },
-                }
+                    event_ticker=event["event_ticker"],
+                )
             )
 
     return signals
@@ -125,12 +141,12 @@ def _generate_wide_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
             continue
 
         signals.append(
-            {
-                "scan_type": "wide_spread",
-                "ticker": m["ticker"],
-                "signal_strength": min(1.0, liq_score),
-                "estimated_edge_pct": spread / 2,
-                "details_json": {
+            _signal(
+                "wide_spread",
+                m["ticker"],
+                liq_score,
+                spread / 2,
+                {
                     "title": m["title"],
                     "spread_cents": spread,
                     "yes_bid": m["yes_bid"],
@@ -141,7 +157,7 @@ def _generate_wide_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
                     "open_interest": m["open_interest"],
                     "liquidity_score": round(liq_score, 3),
                 },
-            }
+            )
         )
 
     return signals
@@ -197,13 +213,12 @@ def _generate_cross_platform_mismatch_signals(db: AgentDatabase) -> list[dict[st
                 continue
 
             signals.append(
-                {
-                    "scan_type": "cross_platform_mismatch",
-                    "ticker": km["ticker"],
-                    "exchange": "cross_platform",
-                    "signal_strength": min(1.0, diff_pct / 15),
-                    "estimated_edge_pct": round(diff_pct, 2),
-                    "details_json": {
+                _signal(
+                    "cross_platform_mismatch",
+                    km["ticker"],
+                    diff_pct / 15,
+                    diff_pct,
+                    {
                         "kalshi_ticker": km["ticker"],
                         "polymarket_slug": pm["ticker"],
                         "kalshi_prob": round(k_prob, 4),
@@ -211,7 +226,8 @@ def _generate_cross_platform_mismatch_signals(db: AgentDatabase) -> list[dict[st
                         "diff_pct": round(diff_pct, 2),
                         "direction": "kalshi_high" if k_prob > p_prob else "polymarket_high",
                     },
-                }
+                    exchange="cross_platform",
+                )
             )
     return signals
 
@@ -256,14 +272,12 @@ def _generate_structural_arb_signals(db: AgentDatabase) -> list[dict[str, Any]]:
             continue
 
         signals.append(
-            {
-                "scan_type": "structural_arb",
-                "ticker": event["event_ticker"],
-                "event_ticker": event["event_ticker"],
-                "exchange": "cross_platform",
-                "signal_strength": min(1.0, diff / 15),
-                "estimated_edge_pct": round(diff / len(matched), 2),
-                "details_json": {
+            _signal(
+                "structural_arb",
+                event["event_ticker"],
+                diff / 15,
+                diff / len(matched),
+                {
                     "event_title": event["title"],
                     "kalshi_sum": round(k_sum, 1),
                     "polymarket_sum": round(p_sum, 1),
@@ -271,7 +285,9 @@ def _generate_structural_arb_signals(db: AgentDatabase) -> list[dict[str, Any]]:
                     "matched_legs": len(matched),
                     "total_legs": len(k_markets),
                 },
-            }
+                event_ticker=event["event_ticker"],
+                exchange="cross_platform",
+            )
         )
     return signals
 
@@ -302,19 +318,17 @@ def _generate_theta_decay_signals(db: AgentDatabase) -> list[dict[str, Any]]:
         mid = m["mid_price_cents"]
         dist_from_50 = abs(mid - 50) / 50  # 0 at 50, 1 at 0/100
 
-        # Higher signal when closer to expiry AND price is away from 50
-        strength = min(1.0, (1 - dte / 3) * dist_from_50 * 2)
+        strength = (1 - dte / 3) * dist_from_50 * 2
         if strength < 0.2:
             continue
 
         signals.append(
-            {
-                "scan_type": "theta_decay",
-                "ticker": m["ticker"],
-                "exchange": m["exchange"],
-                "signal_strength": round(strength, 3),
-                "estimated_edge_pct": round(dist_from_50 * 10, 2),
-                "details_json": {
+            _signal(
+                "theta_decay",
+                m["ticker"],
+                strength,
+                dist_from_50 * 10,
+                {
                     "title": m["title"],
                     "mid_price_cents": mid,
                     "days_to_expiration": round(dte, 2),
@@ -323,7 +337,8 @@ def _generate_theta_decay_signals(db: AgentDatabase) -> list[dict[str, Any]]:
                     "yes_ask": m["yes_ask"],
                     "volume": m["volume"],
                 },
-            }
+                exchange=m["exchange"],
+            )
         )
 
     return signals
@@ -375,16 +390,13 @@ def _generate_momentum_signals(db: AgentDatabase) -> list[dict[str, Any]]:
         if consistency < 0.6:
             continue
 
-        strength = min(1.0, abs_move / 20 * consistency)
-
         signals.append(
-            {
-                "scan_type": "momentum",
-                "ticker": m["ticker"],
-                "exchange": m["exchange"],
-                "signal_strength": round(strength, 3),
-                "estimated_edge_pct": round(abs_move / 2, 2),
-                "details_json": {
+            _signal(
+                "momentum",
+                m["ticker"],
+                abs_move / 20 * consistency,
+                abs_move / 2,
+                {
                     "title": m["title"],
                     "direction": "up" if move > 0 else "down",
                     "move_cents": move,
@@ -393,7 +405,8 @@ def _generate_momentum_signals(db: AgentDatabase) -> list[dict[str, Any]]:
                     "first_price": prices[0],
                     "last_price": prices[-1],
                 },
-            }
+                exchange=m["exchange"],
+            )
         )
 
     return signals
@@ -437,22 +450,20 @@ def _generate_calibration_signals(db: AgentDatabase) -> list[dict[str, Any]]:
                 "calibration_error": round(abs(avg_pred - avg_outcome), 3),
             }
 
-    # Signal strength: inverse of Brier score (lower = better calibrated)
     strength = max(0.1, 1.0 - brier * 4)
-
     return [
-        {
-            "scan_type": "calibration",
-            "ticker": "META_CALIBRATION",
-            "exchange": "meta",
-            "signal_strength": round(strength, 3),
-            "estimated_edge_pct": round((1 - brier) * 100, 1),
-            "details_json": {
+        _signal(
+            "calibration",
+            "META_CALIBRATION",
+            strength,
+            (1 - brier) * 100,
+            {
                 "brier_score": round(brier, 4),
                 "total_predictions": len(resolved),
                 "buckets": buckets,
             },
-        }
+            exchange="meta",
+        )
     ]
 
 

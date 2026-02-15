@@ -104,6 +104,10 @@ def create_market_tools(
             )
         return _text(results)
 
+    def _dispatch(args: dict, k_fn, pm_fn):
+        exchange = _require_exchange(args, polymarket)
+        return _text(k_fn() if exchange == "kalshi" else pm_fn())
+
     @tool(
         "get_market",
         "Get full details for a single market: rules, prices, volume, settlement source.",
@@ -116,11 +120,8 @@ def create_market_tools(
         },
     )
     async def get_market(args: dict) -> dict:
-        exchange = _require_exchange(args, polymarket)
         mid = args["market_id"]
-        if exchange == "kalshi":
-            return _text(kalshi.get_market(mid))
-        return _text(polymarket.get_market(mid))
+        return _dispatch(args, lambda: kalshi.get_market(mid), lambda: polymarket.get_market(mid))
 
     @tool(
         "get_orderbook",
@@ -153,11 +154,8 @@ def create_market_tools(
         },
     )
     async def get_event(args: dict) -> dict:
-        exchange = _require_exchange(args, polymarket)
         eid = args["event_id"]
-        if exchange == "kalshi":
-            return _text(kalshi.get_event(eid))
-        return _text(polymarket.get_event(eid))
+        return _dispatch(args, lambda: kalshi.get_event(eid), lambda: polymarket.get_event(eid))
 
     @tool(
         "get_price_history",
@@ -207,12 +205,12 @@ def create_market_tools(
         },
     )
     async def get_trades(args: dict) -> dict:
-        exchange = _require_exchange(args, polymarket)
-        mid = args["market_id"]
-        limit = args.get("limit", 50)
-        if exchange == "kalshi":
-            return _text(kalshi.get_trades(mid, limit=limit))
-        return _text(polymarket.get_trades(mid, limit=limit))
+        mid, limit = args["market_id"], args.get("limit", 50)
+        return _dispatch(
+            args,
+            lambda: kalshi.get_trades(mid, limit=limit),
+            lambda: polymarket.get_trades(mid, limit=limit),
+        )
 
     @tool(
         "get_portfolio",
@@ -417,11 +415,7 @@ def create_market_tools(
                 return _text(kalshi.cancel_order(ids[0]))
             return _text(kalshi.batch_cancel_orders(ids))
 
-        # Polymarket: cancel one at a time
-        results = []
-        for oid in ids:
-            results.append(polymarket.cancel_order(oid))
-        return _text(results)
+        return _text([polymarket.cancel_order(oid) for oid in ids])
 
     return [
         search_markets,

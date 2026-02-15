@@ -43,13 +43,21 @@ def _parse_days_to_expiry(close_time: Any) -> float | None:
 
 
 def _base_snapshot(now: str, exchange: str, market: dict[str, Any]) -> dict[str, Any]:
-    """Build a snapshot dict with fields common to both platforms."""
     return {
         "captured_at": now,
         "source": "collector",
         "exchange": exchange,
         "raw_json": json.dumps(market, default=str),
     }
+
+
+def _as_list(resp: Any, *keys: str) -> list:
+    if isinstance(resp, list):
+        return resp
+    for k in keys:
+        if k in resp:
+            return resp[k]
+    return []
 
 
 def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
@@ -90,28 +98,17 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
 
 
 def _compute_derived_polymarket(market: dict[str, Any], now: str) -> dict[str, Any]:
-    """Compute derived fields from Polymarket market data.
-
-    Prices are stored as cents for consistency with Kalshi.
-    """
     yes_price = market.get("yes_price") or market.get("lastTradePrice")
+    mid_cents = int(float(yes_price) * 100) if yes_price is not None else None
+    implied_prob = float(yes_price) if yes_price is not None else None
 
-    yes_bid_cents = None
-    yes_ask_cents = None
-    mid_cents = None
+    def _to_cents(key1: str, key2: str) -> int | None:
+        v = market.get(key1) or market.get(key2)
+        return int(float(v) * 100) if v is not None else None
+
+    yes_bid_cents = _to_cents("bestBid", "best_bid")
+    yes_ask_cents = _to_cents("bestAsk", "best_ask")
     spread_cents = None
-    implied_prob = None
-
-    if yes_price is not None:
-        mid_cents = int(float(yes_price) * 100)
-        implied_prob = float(yes_price)
-
-    best_bid = market.get("bestBid") or market.get("best_bid")
-    best_ask = market.get("bestAsk") or market.get("best_ask")
-    if best_bid is not None:
-        yes_bid_cents = int(float(best_bid) * 100)
-    if best_ask is not None:
-        yes_ask_cents = int(float(best_ask) * 100)
 
     if yes_bid_cents is not None and yes_ask_cents is not None:
         spread_cents = yes_ask_cents - yes_bid_cents
@@ -250,7 +247,7 @@ def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -
     offset = 0
     while True:
         resp = client.search_markets(status="open", limit=100, offset=offset)
-        markets = resp if isinstance(resp, list) else resp.get("markets", resp.get("data", []))
+        markets = _as_list(resp, "markets", "data")
         if not markets:
             break
         batch.extend(_compute_derived_polymarket(m, now) for m in markets)
@@ -273,7 +270,7 @@ def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) ->
 
     while True:
         resp = client.list_events(active=True, limit=100, offset=offset)
-        events = resp if isinstance(resp, list) else resp.get("events", resp.get("data", []))
+        events = _as_list(resp, "events", "data")
         if not events:
             break
 

@@ -23,45 +23,26 @@ from .permissions import create_permission_handler
 from .polymarket_client import PolymarketAPIClient
 from .tools import create_db_tools, create_market_tools
 
-# Tools allowed regardless of platform configuration
-_ALLOWED_TOOLS = [
-    # Unified market MCP tools
-    "mcp__markets__search_markets",
-    "mcp__markets__get_market",
-    "mcp__markets__get_orderbook",
-    "mcp__markets__get_event",
-    "mcp__markets__get_price_history",
-    "mcp__markets__get_trades",
-    "mcp__markets__get_portfolio",
-    "mcp__markets__get_orders",
-    "mcp__markets__place_order",
-    "mcp__markets__amend_order",
-    "mcp__markets__cancel_order",
-    # Database MCP tools
-    "mcp__db__db_query",
-    "mcp__db__db_log_prediction",
-    "mcp__db__db_add_watchlist",
-    "mcp__db__db_remove_watchlist",
-    # Filesystem + interaction
-    "Read",
-    "Write",
-    "Edit",
-    "Bash",
-    "Glob",
-    "Grep",
-    "AskUserQuestion",
-]
+_BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "AskUserQuestion"]
+
+
+def _mcp_tool_names(server_key: str, tools: list) -> list[str]:
+    return [f"mcp__{server_key}__{t.name}" for t in tools]
 
 
 def build_options(
     agent_config: AgentConfig,
     trading_config: TradingConfig,
     mcp_servers: dict,
+    mcp_tools: dict[str, list],
     db: AgentDatabase,
     session_id: str,
     workspace: str = "/workspace",
 ) -> ClaudeAgentOptions:
-    """Assemble ClaudeAgentOptions from configs."""
+    allowed = list(_BUILTIN_TOOLS)
+    for key, tools in mcp_tools.items():
+        allowed.extend(_mcp_tool_names(key, tools))
+
     return ClaudeAgentOptions(
         system_prompt={
             "type": "preset",
@@ -71,7 +52,7 @@ def build_options(
         model=agent_config.model,
         cwd=workspace,
         mcp_servers=mcp_servers,
-        allowed_tools=_ALLOWED_TOOLS,
+        allowed_tools=allowed,
         can_use_tool=create_permission_handler(
             workspace_path=workspace,
             permissions=agent_config.permissions,
@@ -112,26 +93,21 @@ async def run_repl() -> None:
     session_log.parent.mkdir(parents=True, exist_ok=True)
     session_log.write_text("", encoding="utf-8")
 
-    # Build MCP servers — unified "markets" server
     polymarket_enabled = trading_config.polymarket_enabled and bool(
         trading_config.polymarket_key_id
     )
     pm_client = PolymarketAPIClient(trading_config) if polymarket_enabled else None
 
-    mcp_servers: dict = {
-        "markets": create_sdk_mcp_server(
-            name="markets",
-            version="1.0.0",
-            tools=create_market_tools(kalshi, pm_client, trading_config),
-        ),
-        "db": create_sdk_mcp_server(
-            name="db",
-            version="1.0.0",
-            tools=create_db_tools(db),
-        ),
+    mcp_tools = {
+        "markets": create_market_tools(kalshi, pm_client, trading_config),
+        "db": create_db_tools(db),
+    }
+    mcp_servers = {
+        key: create_sdk_mcp_server(name=key, version="1.0.0", tools=tools)
+        for key, tools in mcp_tools.items()
     }
 
-    options = build_options(agent_config, trading_config, mcp_servers, db, session_id)
+    options = build_options(agent_config, trading_config, mcp_servers, mcp_tools, db, session_id)
 
     # Startup banner
     print("Cross-Platform Prediction Market Arbitrage Agent")

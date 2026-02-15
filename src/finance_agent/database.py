@@ -10,6 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 _SCHEMA = """
 -- Market data snapshots (populated by collector)
 CREATE TABLE IF NOT EXISTS market_snapshots (
@@ -230,10 +235,9 @@ class AgentDatabase:
     def create_session(self, profile: str = "demo") -> str:
         """Create a new session, return its ID."""
         session_id = str(uuid.uuid4())[:8]
-        now = datetime.now(UTC).isoformat()
         self.execute(
             "INSERT INTO sessions (id, started_at, profile) VALUES (?, ?, ?)",
-            (session_id, now, profile),
+            (session_id, _now(), profile),
         )
         return session_id
 
@@ -244,13 +248,11 @@ class AgentDatabase:
         trades_placed: int = 0,
         pnl_usd: float | None = None,
     ) -> None:
-        """Mark a session as ended."""
-        now = datetime.now(UTC).isoformat()
         self.execute(
             """UPDATE sessions
                SET ended_at = ?, summary = ?, trades_placed = ?, pnl_usd = ?
                WHERE id = ?""",
-            (now, summary, trades_placed, pnl_usd, session_id),
+            (_now(), summary, trades_placed, pnl_usd, session_id),
         )
 
     # ── Trades (lean schema) ─────────────────────────────────────
@@ -269,8 +271,6 @@ class AgentDatabase:
         result_json: str | None = None,
         exchange: str = "kalshi",
     ) -> int:
-        """Insert a trade record, return its ID."""
-        now = datetime.now(UTC).isoformat()
         cursor = self.execute(
             """INSERT INTO trades
                (session_id, exchange, timestamp, ticker, action, side, count, price_cents,
@@ -279,7 +279,7 @@ class AgentDatabase:
             (
                 session_id,
                 exchange,
-                now,
+                _now(),
                 ticker,
                 action,
                 side,
@@ -303,23 +303,19 @@ class AgentDatabase:
         methodology: str | None = None,
         notes: str | None = None,
     ) -> int:
-        """Insert a prediction, return its ID."""
-        now = datetime.now(UTC).isoformat()
         cursor = self.execute(
             """INSERT INTO predictions
                (created_at, market_ticker, prediction, market_price_cents,
                 methodology, notes)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (now, market_ticker, prediction, market_price_cents, methodology, notes),
+            (_now(), market_ticker, prediction, market_price_cents, methodology, notes),
         )
         return cursor.lastrowid or 0
 
     def resolve_prediction(self, prediction_id: int, outcome: int) -> None:
-        """Resolve a prediction (outcome: 1=yes, 0=no)."""
-        now = datetime.now(UTC).isoformat()
         self.execute(
             "UPDATE predictions SET outcome = ?, resolved_at = ? WHERE id = ?",
-            (outcome, now, prediction_id),
+            (outcome, _now(), prediction_id),
         )
 
     def auto_resolve_predictions(self) -> list[dict[str, Any]]:
@@ -336,7 +332,7 @@ class AgentDatabase:
             return []
 
         resolved = []
-        now = datetime.now(UTC).isoformat()
+        now = _now()
         for pred in unresolved:
             ticker = pred["market_ticker"]
             settled = self.query(
@@ -372,12 +368,11 @@ class AgentDatabase:
         positions_json: str | None = None,
         open_orders_json: str | None = None,
     ) -> None:
-        now = datetime.now(UTC).isoformat()
         self.execute(
             """INSERT INTO portfolio_snapshots
                (captured_at, session_id, balance_usd, positions_json, open_orders_json)
                VALUES (?, ?, ?, ?, ?)""",
-            (now, session_id, balance_usd, positions_json, open_orders_json),
+            (_now(), session_id, balance_usd, positions_json, open_orders_json),
         )
 
     # ── Market snapshots (bulk insert for collector) ─────────────
@@ -433,7 +428,6 @@ class AgentDatabase:
         mutually_exclusive: bool | None = None,
         markets_json: str | None = None,
     ) -> None:
-        now = datetime.now(UTC).isoformat()
         self.execute(
             """INSERT INTO events
                (event_ticker, exchange, series_ticker, title, category, mutually_exclusive,
@@ -453,7 +447,7 @@ class AgentDatabase:
                 title,
                 category,
                 1 if mutually_exclusive else 0,
-                now,
+                _now(),
                 markets_json,
             ),
         )
@@ -461,10 +455,9 @@ class AgentDatabase:
     # ── Signals (bulk insert for signal generator) ───────────────
 
     def insert_signals(self, rows: list[dict[str, Any]]) -> int:
-        """Bulk insert signals. Returns count inserted."""
         if not rows:
             return 0
-        now = datetime.now(UTC).isoformat()
+        now = _now()
         params_list = []
         for row in rows:
             details = row.get("details_json")
@@ -492,13 +485,11 @@ class AgentDatabase:
         return len(params_list)
 
     def expire_old_signals(self, max_age_hours: int = 48) -> int:
-        """Mark old pending signals as expired. Returns count expired."""
-        cutoff = datetime.now(UTC).isoformat()
         cursor = self.execute(
             """UPDATE signals SET status = 'expired'
                WHERE status = 'pending'
                AND generated_at < datetime(?, '-' || ? || ' hours')""",
-            (cutoff, max_age_hours),
+            (_now(), max_age_hours),
         )
         return cursor.rowcount
 
@@ -511,14 +502,13 @@ class AgentDatabase:
         alert_condition: str | None = None,
         exchange: str = "kalshi",
     ) -> None:
-        now = datetime.now(UTC).isoformat()
         self.execute(
             """INSERT INTO watchlist (ticker, exchange, added_at, reason, alert_condition)
                VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(ticker, exchange) DO UPDATE SET
                  reason = excluded.reason,
                  alert_condition = excluded.alert_condition""",
-            (ticker, exchange, now, reason, alert_condition),
+            (ticker, exchange, _now(), reason, alert_condition),
         )
 
     def remove_from_watchlist(self, ticker: str, exchange: str | None = None) -> None:
@@ -532,74 +522,48 @@ class AgentDatabase:
     # ── Session state (for startup) ──────────────────────────────
 
     def get_session_state(self) -> dict[str, Any]:
-        """Build compact session state for agent startup context."""
-        # Last session
         last_sessions = self.query(
             """SELECT id, ended_at, summary, trades_placed, pnl_usd
                FROM sessions WHERE ended_at IS NOT NULL
                ORDER BY ended_at DESC LIMIT 1"""
         )
-        last_session = last_sessions[0] if last_sessions else None
 
-        # Pending signals (top 10 by strength, include exchange)
-        pending_signals = self.query(
-            """SELECT scan_type, exchange, ticker, event_ticker, signal_strength,
-                      estimated_edge_pct, details_json
-               FROM signals WHERE status = 'pending'
-               ORDER BY signal_strength DESC LIMIT 10"""
-        )
-
-        # Unresolved predictions
-        unresolved = self.query(
-            """SELECT id, market_ticker, prediction, market_price_cents, methodology
-               FROM predictions WHERE outcome IS NULL
-               ORDER BY created_at DESC LIMIT 20"""
-        )
-
-        # Watchlist (include exchange)
-        watchlist = self.query("SELECT ticker, exchange, reason, alert_condition FROM watchlist")
-
-        # Portfolio delta (last two snapshots)
         snapshots = self.query(
-            """SELECT balance_usd, captured_at
-               FROM portfolio_snapshots
+            """SELECT balance_usd FROM portfolio_snapshots
                ORDER BY captured_at DESC LIMIT 2"""
         )
         portfolio_delta = None
-        if len(snapshots) >= 2:
-            portfolio_delta = {
-                "balance_change": (snapshots[0]["balance_usd"] or 0)
-                - (snapshots[1]["balance_usd"] or 0),
-                "latest_balance": snapshots[0]["balance_usd"],
-            }
-        elif len(snapshots) == 1:
-            portfolio_delta = {
-                "balance_change": 0,
-                "latest_balance": snapshots[0]["balance_usd"],
-            }
-
-        # Recent trades (include exchange)
-        recent_trades = self.query(
-            """SELECT exchange, ticker, action, side, count, price_cents, status
-               FROM trades ORDER BY timestamp DESC LIMIT 5"""
-        )
-
-        # Unreconciled trades (placed but not confirmed from recent sessions)
-        unreconciled = self.query(
-            """SELECT exchange, ticker, action, side, count, price_cents, order_id
-               FROM trades
-               WHERE status = 'placed'
-               ORDER BY timestamp DESC LIMIT 10"""
-        )
+        if snapshots:
+            latest = snapshots[0]["balance_usd"] or 0
+            prev = snapshots[1]["balance_usd"] or 0 if len(snapshots) >= 2 else latest
+            portfolio_delta = {"balance_change": latest - prev, "latest_balance": latest}
 
         return {
-            "last_session": last_session,
-            "pending_signals": pending_signals,
-            "unresolved_predictions": unresolved,
-            "watchlist": watchlist,
+            "last_session": last_sessions[0] if last_sessions else None,
+            "pending_signals": self.query(
+                """SELECT scan_type, exchange, ticker, event_ticker, signal_strength,
+                          estimated_edge_pct, details_json
+                   FROM signals WHERE status = 'pending'
+                   ORDER BY signal_strength DESC LIMIT 10"""
+            ),
+            "unresolved_predictions": self.query(
+                """SELECT id, market_ticker, prediction, market_price_cents, methodology
+                   FROM predictions WHERE outcome IS NULL
+                   ORDER BY created_at DESC LIMIT 20"""
+            ),
+            "watchlist": self.query(
+                "SELECT ticker, exchange, reason, alert_condition FROM watchlist"
+            ),
             "portfolio_delta": portfolio_delta,
-            "recent_trades": recent_trades,
-            "unreconciled_trades": unreconciled,
+            "recent_trades": self.query(
+                """SELECT exchange, ticker, action, side, count, price_cents, status
+                   FROM trades ORDER BY timestamp DESC LIMIT 5"""
+            ),
+            "unreconciled_trades": self.query(
+                """SELECT exchange, ticker, action, side, count, price_cents, order_id
+                   FROM trades WHERE status = 'placed'
+                   ORDER BY timestamp DESC LIMIT 10"""
+            ),
         }
 
     # ── Backup ───────────────────────────────────────────────────
@@ -610,31 +574,23 @@ class AgentDatabase:
         max_age_hours: int = 24,
         max_backups: int = 7,
     ) -> str | None:
-        """Create a backup if the most recent is older than max_age_hours.
-
-        Returns the backup path if created, None if skipped.
-        """
         backup_dir = Path(backup_dir)
         backup_dir.mkdir(parents=True, exist_ok=True)
 
-        # Find most recent backup
         backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
         if backups:
-            newest = backups[-1]
-            age_hours = (time.time() - newest.stat().st_mtime) / 3600
+            age_hours = (time.time() - backups[-1].stat().st_mtime) / 3600
             if age_hours < max_age_hours:
                 return None
 
-        # Create backup
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"agent_{ts}.db"
         backup_conn = sqlite3.connect(str(backup_path))
         self._conn.backup(backup_conn)
         backup_conn.close()
 
-        # Prune old backups
         backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
-        while len(backups) > max_backups:
-            backups.pop(0).unlink()
+        for old in backups[:-max_backups]:
+            old.unlink()
 
         return str(backup_path)
