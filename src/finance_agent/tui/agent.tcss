@@ -1,0 +1,177 @@
+/* Finance Agent TUI stylesheet */
+
+Screen {
+    layout: vertical;
+}
+
+/* Dashboard split layout */
+#main-content {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#agent-chat {
+    width: 3fr;
+    height: 1fr;
+    border: solid $accent;
+}
+
+#sidebar {
+    width: 1fr;
+    min-width: 30;
+    max-width: 50;
+    padding: 0 1;
+}
+
+/* Chat */
+#chat-log {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#chat-input {
+    dock: bottom;
+    height: 3;
+    border-top: solid $accent;
+}
+
+/* Status bar */
+StatusBar {
+    dock: bottom;
+    height: 1;
+    background: $surface;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+/* Portfolio panel */
+PortfolioPanel {
+    height: auto;
+    padding: 1;
+    border: solid $primary;
+    margin: 0 0 1 0;
+}
+
+/* Rec cards */
+RecCard {
+    height: auto;
+    padding: 1;
+    border: solid $warning;
+    margin: 0 0 1 0;
+}
+
+RecCard .rec-title {
+    text-style: bold;
+}
+
+RecCard .rec-detail {
+    color: $text-muted;
+}
+
+RecCard .rec-actions {
+    height: 3;
+    margin-top: 1;
+}
+
+RecCard .rec-actions Button {
+    margin-right: 1;
+}
+
+/* Rec list */
+RecList {
+    height: 1fr;
+}
+
+/* AskModal */
+AskModal {
+    align: center middle;
+}
+
+#ask-dialog {
+    width: 70;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    padding: 1 2;
+    background: $surface;
+}
+
+#ask-dialog .question-header {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#ask-dialog .option-btn {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+/* Confirm modal */
+ConfirmModal {
+    align: center middle;
+}
+
+#confirm-dialog {
+    width: 60;
+    height: auto;
+    border: thick $warning;
+    padding: 1 2;
+    background: $surface;
+}
+
+#confirm-actions {
+    height: 3;
+    margin-top: 1;
+    align: center middle;
+}
+
+#confirm-actions Button {
+    margin: 0 1;
+}
+
+/* Recommendations screen */
+RecommendationsScreen {
+    layout: vertical;
+}
+
+#recs-container {
+    height: 1fr;
+    padding: 1;
+}
+
+/* Portfolio screen */
+PortfolioScreen {
+    layout: vertical;
+}
+
+#portfolio-container {
+    height: 1fr;
+    padding: 1;
+}
+
+.balance-card {
+    height: auto;
+    padding: 1;
+    border: solid $primary;
+    margin: 0 0 1 0;
+}
+
+/* Signals screen */
+SignalsScreen {
+    layout: vertical;
+}
+
+#signals-container {
+    height: 1fr;
+    padding: 1;
+}
+
+/* History screen */
+HistoryScreen {
+    layout: vertical;
+}
+
+#history-container {
+    height: 1fr;
+    padding: 1;
+}

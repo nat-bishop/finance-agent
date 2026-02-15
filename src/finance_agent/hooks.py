@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
@@ -22,6 +23,7 @@ _EMPTY: HookJSONOutput = {}  # type: ignore[assignment]
 def create_audit_hooks(
     db: AgentDatabase,
     session_id: str,
+    on_recommendation: Callable[[], None] | None = None,
 ) -> dict[HookEvent, list[HookMatcher]]:
     session_start = time.time()
     rec_count = 0
@@ -38,6 +40,8 @@ def create_audit_hooks(
     ) -> HookJSONOutput:
         nonlocal rec_count
         rec_count += 1
+        if on_recommendation:
+            on_recommendation()
         return _EMPTY
 
     async def session_end(

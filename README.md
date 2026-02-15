@@ -2,15 +2,27 @@
 
 Cross-platform prediction market analyst for [Kalshi](https://kalshi.com) and [Polymarket US](https://polymarket.us), built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
 
-Finds price discrepancies between platforms, verifies market equivalence, and produces structured trade recommendations reviewed and executed separately.
+Finds price discrepancies between platforms, verifies market equivalence, and produces structured trade recommendations. Includes a terminal UI for reviewing recommendations, executing trades, and monitoring positions.
 
 ## Architecture
 
-**Two-layer design:**
+**Three-layer design:**
 
 1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates `active_markets.md` (category-grouped listings), `signals.py` runs 5 quantitative scans to surface opportunities: arbitrage, wide spreads, theta decay, momentum, and calibration.
 
-2. **Agent layer** (Claude REPL) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade`. All state persists in SQLite for continuity across sessions.
+2. **Agent layer** (Claude) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade`. All state persists in SQLite for continuity across sessions.
+
+3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. Replaces the raw REPL with 5 navigable screens.
+
+### TUI Screens
+
+| Key | Screen | Purpose |
+|-----|--------|---------|
+| F1 | Dashboard | Agent chat (left) + portfolio summary & pending recs sidebar (right) |
+| F2 | Recommendations | Full recommendation review with grouped execution and rejection |
+| F3 | Portfolio | Balances, positions, resting orders, recent trades across both exchanges |
+| F4 | Signals | Pending signals, calibration summary (Brier score), signal history |
+| F5 | History | Session list with drill-down to per-session trades and recommendations |
 
 ## Quickstart
 
@@ -39,7 +51,7 @@ cp .env.example .env
 ```bash
 make build    # build Docker container
 make scan     # collect market data + generate signals
-make run      # start the agent REPL
+make run      # start the TUI
 ```
 
 Or locally: `make scan && uv run python -m finance_agent.main`
@@ -93,6 +105,20 @@ Cross-platform matching (formerly `cross_platform_mismatch` and `structural_arb`
 
 **Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`.
 
+## Recommendation Lifecycle
+
+```
+Agent recommends → TUI review → Execute or Reject
+```
+
+1. **Agent calls `recommend_trade`** — creates a pending recommendation in SQLite with thesis, edge estimate, confidence, and optional `group_id` for paired arb legs. Recommendations expire after `recommendation_ttl_minutes` (default 60).
+
+2. **TUI displays pending recs** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Grouped by `group_id` for multi-leg arbs. Shows edge, confidence, expiry countdown.
+
+3. **Execute** — confirmation modal shows order details and cost. On confirm, the TUI service layer validates position limits, places orders via the exchange clients, logs trades for audit, and updates recommendation status.
+
+4. **Reject** — marks the recommendation as rejected. Visible in history.
+
 ## Analysis Flow
 
 ```
@@ -131,12 +157,12 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 |-------|-----------|---------|-------------|
 | `market_snapshots` | collector | signals, agent | exchange, ticker, mid_price_cents, status |
 | `events` | collector | signals, agent | (event_ticker, exchange) PK, markets_json |
-| `signals` | signals | agent | scan_type, exchange, signal_strength, status |
-| `trades` | executor (future) | agent | exchange, ticker, action, side, price_cents |
-| `recommendations` | agent | frontend | exchange, market_id, action, side, status, group_id |
+| `signals` | signals | agent, TUI | scan_type, exchange, signal_strength, status |
+| `trades` | TUI executor | agent, TUI | exchange, ticker, action, side, price_cents |
+| `recommendations` | agent | TUI | exchange, market_id, action, side, status, group_id |
 | `predictions` | agent | signals, startup | prediction, outcome, market_ticker |
-| `portfolio_snapshots` | startup | agent | balance_usd, positions_json |
-| `sessions` | main | agent | started_at, summary, trades_placed, recommendations_made |
+| `portfolio_snapshots` | TUI | TUI | balance_usd, positions_json |
+| `sessions` | main | agent, TUI | started_at, summary, trades_placed, recommendations_made |
 | `watchlist` | legacy | — | (ticker, exchange) PK — migrated to `/workspace/data/watchlist.md` |
 
 ## Workspace
@@ -160,9 +186,9 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto
 
 ```
 src/finance_agent/
-  main.py              # REPL entry point, session lifecycle, startup context injection
+  main.py              # Entry point, SDK options, launches TUI
   config.py            # Pydantic settings, TOML profile loading
-  database.py          # SQLite (WAL mode), Alembic migrations, recommendation CRUD
+  database.py          # SQLite (WAL mode), Alembic migrations, recommendation + trade CRUD
   tools.py             # Unified MCP tool factories (8 market + 2 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
   polymarket_client.py # Polymarket US SDK wrapper, intent maps
@@ -173,6 +199,25 @@ src/finance_agent/
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations
   prompts/system.md    # System prompt template
+  tui/                 # Textual TUI frontend
+    app.py             # FinanceApp: init, screen registration, keybindings
+    services.py        # Async service layer (DB queries, order execution)
+    messages.py        # Inter-widget message types
+    agent.tcss         # CSS stylesheet
+    screens/
+      dashboard.py     # F1: agent chat + sidebar (portfolio + pending recs)
+      recommendations.py # F2: full recommendation review + execution
+      portfolio.py     # F3: balances, positions, orders
+      signals.py       # F4: signal table + calibration
+      history.py       # F5: session history with drill-down
+    widgets/
+      agent_chat.py    # RichLog + Input with async streaming
+      rec_card.py      # Single recommendation card
+      rec_list.py      # Grouped recommendation list
+      portfolio_panel.py # Compact balance summary
+      status_bar.py    # Session info bar
+      ask_modal.py     # Agent question dialog
+      confirm_modal.py # Order confirmation dialog
 ```
 
 ## Development

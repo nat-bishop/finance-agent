@@ -555,6 +555,103 @@ class AgentDatabase:
             ),
         }
 
+    # ── TUI query methods ────────────────────────────────────────
+
+    def get_recommendations(
+        self,
+        *,
+        status: str | None = None,
+        group_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Filtered recommendation query for TUI screens."""
+        clauses, params = ["1=1"], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if group_id:
+            clauses.append("group_id = ?")
+            params.append(group_id)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = " AND ".join(clauses)
+        return self.query(
+            f"""SELECT * FROM recommendations WHERE {where}
+                ORDER BY created_at DESC, group_id, leg_index LIMIT ?""",
+            (*params, limit),
+        )
+
+    def get_trades(
+        self,
+        *,
+        session_id: str | None = None,
+        exchange: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Filtered trade query for TUI screens."""
+        clauses, params = ["1=1"], []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if exchange:
+            clauses.append("exchange = ?")
+            params.append(exchange)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = " AND ".join(clauses)
+        return self.query(
+            f"""SELECT * FROM trades WHERE {where}
+                ORDER BY timestamp DESC LIMIT ?""",
+            (*params, limit),
+        )
+
+    def get_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Session listing for history screen."""
+        return self.query(
+            """SELECT id, started_at, ended_at, profile, summary,
+                      trades_placed, recommendations_made, pnl_usd
+               FROM sessions ORDER BY started_at DESC LIMIT ?""",
+            (limit,),
+        )
+
+    def get_signals(
+        self,
+        *,
+        status: str | None = None,
+        scan_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Filtered signal query for TUI screen."""
+        clauses, params = ["1=1"], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if scan_type:
+            clauses.append("scan_type = ?")
+            params.append(scan_type)
+        where = " AND ".join(clauses)
+        return self.query(
+            f"""SELECT * FROM signals WHERE {where}
+                ORDER BY signal_strength DESC LIMIT ?""",
+            (*params, limit),
+        )
+
+    def update_trade_status(
+        self,
+        trade_id: int,
+        status: str,
+        result_json: str | None = None,
+    ) -> None:
+        """Update trade status after order fills/cancels."""
+        self.execute(
+            "UPDATE trades SET status = ?, result_json = COALESCE(?, result_json) WHERE id = ?",
+            (status, result_json, trade_id),
+        )
+
     # ── Backup ───────────────────────────────────────────────────
 
     def backup_if_needed(
