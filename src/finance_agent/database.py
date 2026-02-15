@@ -528,33 +528,6 @@ class AgentDatabase:
                     trade.result_json = result_json
                 session.commit()
 
-    # ── Read-only query (for tests and ad-hoc debugging) ─────
-
-    def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        """Execute a read-only SQL query and return rows as dicts.
-
-        Only SELECT and WITH (CTE) statements are allowed.
-        Positional '?' params are rewritten to ':p0', ':p1' etc. for SQLAlchemy text().
-        """
-        stripped = sql.strip().upper()
-        if not (stripped.startswith("SELECT") or stripped.startswith("WITH")):
-            raise ValueError("Only SELECT/WITH queries are allowed via query()")
-
-        from sqlalchemy import text
-
-        # Rewrite positional ? params to named :pN for SQLAlchemy text()
-        rewritten = sql
-        param_dict: dict[str, Any] = {}
-        for i, val in enumerate(params):
-            key = f"p{i}"
-            rewritten = rewritten.replace("?", f":{key}", 1)
-            param_dict[key] = val
-
-        with self._session_factory() as session:
-            result = session.execute(text(rewritten), param_dict)
-            columns = list(result.keys())
-            return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
-
     # ── Backup ────────────────────────────────────────────────
 
     def backup_if_needed(

@@ -253,8 +253,9 @@ def test_collect_events(db, mock_kalshi):
     ]
     total = collect_events(mock_kalshi, db)
     assert total == 1
-    events = db.query("SELECT title FROM events WHERE event_ticker = 'EVT-1'")
-    assert events[0]["title"] == "Test Event"
+    events = db.get_all_events()
+    matching = [e for e in events if e["event_ticker"] == "EVT-1"]
+    assert matching[0]["title"] == "Test Event"
 
 
 # ── collect_polymarket_markets ───────────────────────────────────

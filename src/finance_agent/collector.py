@@ -193,51 +193,70 @@ def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
     return _collect_markets_by_status(client, db, "settled", "settled market snapshots", 1000)
 
 
-def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    """Collect event structures with nested markets via paginated GET /events."""
-    logger.info("Collecting events...")
+def _collect_and_process_events(
+    fetch_page: Any,
+    process_event: Any,
+    db: AgentDatabase,
+    label: str,
+) -> int:
+    """Generic paginated event collection.
 
-    cursor = None
+    fetch_page(cursor) -> (events_list, next_cursor_or_None)
+    process_event(event) -> upsert_event kwargs dict, or None to skip
+    """
+    logger.info("Collecting %s...", label)
     total = 0
+    cursor: Any = None
 
     while True:
-        resp = client.get_events(status="open", with_nested_markets=True, limit=200, cursor=cursor)
-        events = resp.get("events", [])
+        events, cursor = fetch_page(cursor)
         if not events:
             break
-
         for event in events:
-            et = event.get("event_ticker")
-            if not et:
-                continue
-            nested = event.get("markets", [])
-            markets_summary = [
-                {
-                    "ticker": m.get("ticker"),
-                    "title": m.get("title"),
-                    "yes_bid": m.get("yes_bid"),
-                    "yes_ask": m.get("yes_ask"),
-                    "status": m.get("status"),
-                }
-                for m in nested
-            ]
-            db.upsert_event(
-                event_ticker=et,
-                exchange="kalshi",
-                series_ticker=event.get("series_ticker"),
-                title=event.get("title"),
-                category=event.get("category"),
-                mutually_exclusive=event.get("mutually_exclusive"),
-                markets_json=json.dumps(markets_summary, default=str),
-            )
-            total += 1
-
-        cursor = resp.get("cursor")
+            kwargs = process_event(event)
+            if kwargs:
+                db.upsert_event(**kwargs)
+                total += 1
         if not cursor:
             break
 
-    logger.info("  -> %d events", total)
+    logger.info("  -> %d %s", total, label)
     return total
+
+
+def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
+    """Collect event structures with nested markets via paginated GET /events."""
+
+    def fetch_page(cursor: str | None) -> tuple[list, str | None]:
+        resp = client.get_events(status="open", with_nested_markets=True, limit=200, cursor=cursor)
+        return resp.get("events", []), resp.get("cursor")
+
+    def process_event(event: dict[str, Any]) -> dict[str, Any] | None:
+        et = event.get("event_ticker")
+        if not et:
+            return None
+        nested = event.get("markets", [])
+        markets_summary = [
+            {
+                "ticker": m.get("ticker"),
+                "title": m.get("title"),
+                "yes_bid": m.get("yes_bid"),
+                "yes_ask": m.get("yes_ask"),
+                "status": m.get("status"),
+            }
+            for m in nested
+        ]
+        return {
+            "event_ticker": et,
+            "exchange": "kalshi",
+            "series_ticker": event.get("series_ticker"),
+            "title": event.get("title"),
+            "category": event.get("category"),
+            "mutually_exclusive": event.get("mutually_exclusive"),
+            "markets_json": json.dumps(markets_summary, default=str),
+        }
+
+    return _collect_and_process_events(fetch_page, process_event, db, "events")
 
 
 def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -> int:
@@ -267,45 +286,38 @@ def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -
 
 def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) -> int:
     """Collect event structures from Polymarket US."""
-    logger.info("Collecting Polymarket events...")
-    total = 0
-    offset = 0
 
-    while True:
+    def fetch_page(cursor: int | None) -> tuple[list, int | None]:
+        offset = cursor or 0
         resp = client.list_events(active=True, limit=100, offset=offset)
         events = _as_list(resp, "events", "data")
-        if not events:
-            break
+        return events, (offset + len(events)) if events else None
 
-        for event in events:
-            slug = event.get("slug") or event.get("id", "")
-            if not slug:
-                continue
-            markets = event.get("markets", [])
-            markets_summary = [
-                {
-                    "slug": m.get("slug"),
-                    "title": m.get("title") or m.get("question"),
-                    "yes_price": m.get("yes_price") or m.get("lastTradePrice"),
-                    "active": m.get("active"),
-                }
-                for m in markets
-            ]
-            db.upsert_event(
-                event_ticker=slug,
-                exchange="polymarket",
-                title=event.get("title"),
-                category=event.get("category"),
-                mutually_exclusive=event.get("mutuallyExclusive")
-                or event.get("mutually_exclusive"),
-                markets_json=json.dumps(markets_summary, default=str),
-            )
-            total += 1
+    def process_event(event: dict[str, Any]) -> dict[str, Any] | None:
+        slug = event.get("slug") or event.get("id", "")
+        if not slug:
+            return None
+        markets = event.get("markets", [])
+        markets_summary = [
+            {
+                "slug": m.get("slug"),
+                "title": m.get("title") or m.get("question"),
+                "yes_price": m.get("yes_price") or m.get("lastTradePrice"),
+                "active": m.get("active"),
+            }
+            for m in markets
+        ]
+        return {
+            "event_ticker": slug,
+            "exchange": "polymarket",
+            "title": event.get("title"),
+            "category": event.get("category"),
+            "mutually_exclusive": event.get("mutuallyExclusive")
+            or event.get("mutually_exclusive"),
+            "markets_json": json.dumps(markets_summary, default=str),
+        }
 
-        offset += len(events)
-
-    logger.info("  -> %d Polymarket events", total)
-    return total
+    return _collect_and_process_events(fetch_page, process_event, db, "Polymarket events")
 
 
 def _fmt_volume(n: int | float | None) -> str:

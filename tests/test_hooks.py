@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from helpers import get_row
+
 from finance_agent.hooks import create_audit_hooks
+from finance_agent.models import Session
 
 # ── auto_approve ─────────────────────────────────────────────────
 
@@ -39,8 +42,8 @@ async def test_audit_recommendation_increments_count(db, session_id):
     stop_hook = hooks["Stop"][0].hooks[0]
     await stop_hook({}, None, None)
 
-    rows = db.query("SELECT recommendations_made FROM sessions WHERE id = ?", (session_id,))
-    assert rows[0]["recommendations_made"] == 3
+    row = get_row(db, Session, session_id)
+    assert row["recommendations_made"] == 3
 
 
 # ── session_end ──────────────────────────────────────────────────
@@ -51,10 +54,10 @@ async def test_session_end_writes_db(db, session_id):
     stop_hook = hooks["Stop"][0].hooks[0]
     await stop_hook({}, None, None)
 
-    rows = db.query("SELECT ended_at, summary FROM sessions WHERE id = ?", (session_id,))
-    assert rows[0]["ended_at"] is not None
-    assert "Duration:" in rows[0]["summary"]
-    assert "Recommendations:" in rows[0]["summary"]
+    row = get_row(db, Session, session_id)
+    assert row["ended_at"] is not None
+    assert "Duration:" in row["summary"]
+    assert "Recommendations:" in row["summary"]
 
 
 async def test_session_end_returns_watchlist_reminder(db, session_id):
@@ -73,8 +76,8 @@ async def test_session_end_duration_in_summary(db, session_id):
         stop_hook = hooks["Stop"][0].hooks[0]
         await stop_hook({}, None, None)
 
-    rows = db.query("SELECT summary FROM sessions WHERE id = ?", (session_id,))
-    assert "60s" in rows[0]["summary"]
+    row = get_row(db, Session, session_id)
+    assert "60s" in row["summary"]
 
 
 # ── Hook structure ───────────────────────────────────────────────

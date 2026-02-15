@@ -7,7 +7,9 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from .config import TradingConfig
 from .database import AgentDatabase
+from .fees import best_price_and_depth, compute_arb_edge, leg_fee
 from .kalshi_client import KalshiAPIClient
 from .polymarket_client import PolymarketAPIClient
 
@@ -102,7 +104,8 @@ def create_market_tools(
         mid = args["market_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_market(mid))
-        assert polymarket is not None
+        if polymarket is None:
+            raise RuntimeError("polymarket client is unexpectedly None")
         return _text(polymarket.get_market(mid))
 
     @tool(
@@ -123,7 +126,8 @@ def create_market_tools(
         mid = args["market_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_orderbook(mid, depth=args.get("depth", 10)))
-        assert polymarket is not None
+        if polymarket is None:
+            raise RuntimeError("polymarket client is unexpectedly None")
         if args.get("depth", 10) <= 1:
             return _text(polymarket.get_bbo(mid))
         return _text(polymarket.get_orderbook(mid))
@@ -141,7 +145,8 @@ def create_market_tools(
         eid = args["event_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_event(eid))
-        assert polymarket is not None
+        if polymarket is None:
+            raise RuntimeError("polymarket client is unexpectedly None")
         return _text(polymarket.get_event(eid))
 
     @tool(
@@ -195,7 +200,8 @@ def create_market_tools(
         mid, limit = args["market_id"], args.get("limit", 50)
         if exchange == "kalshi":
             return _text(kalshi.get_trades(mid, limit=limit))
-        assert polymarket is not None
+        if polymarket is None:
+            raise RuntimeError("polymarket client is unexpectedly None")
         return _text(polymarket.get_trades(mid, limit=limit))
 
     @tool(
@@ -288,6 +294,213 @@ def create_market_tools(
     ]
 
 
+def _determine_direction_2leg(enriched_legs: list[dict[str, Any]]) -> str | None:
+    """Assign action/side/price/depth to a 2-leg cross-platform arb.
+
+    Buys YES on the cheaper exchange, buys NO on the expensive exchange.
+    Mutates legs in-place. Returns error string or None on success.
+    """
+    leg_a, leg_b = enriched_legs
+    a_yes = leg_a.get("yes_ask")
+    b_yes = leg_b.get("yes_ask")
+
+    if a_yes is None or b_yes is None:
+        empty_id = leg_a["market_id"] if a_yes is None else leg_b["market_id"]
+        return f"No executable price — empty orderbook for {empty_id}"
+
+    if a_yes <= b_yes:
+        leg_a["action"], leg_a["side"] = "buy", "yes"
+        leg_a["price_cents"] = a_yes
+        leg_a["depth"] = leg_a["yes_depth"]
+        leg_b["action"], leg_b["side"] = "buy", "no"
+        if not leg_b.get("no_ask"):
+            return f"No executable NO price for {leg_b['market_id']} — NO orderbook is empty"
+        leg_b["price_cents"] = leg_b["no_ask"]
+        leg_b["depth"] = leg_b.get("no_depth", 0)
+    else:
+        leg_b["action"], leg_b["side"] = "buy", "yes"
+        leg_b["price_cents"] = b_yes
+        leg_b["depth"] = leg_b["yes_depth"]
+        leg_a["action"], leg_a["side"] = "buy", "no"
+        if not leg_a.get("no_ask"):
+            return f"No executable NO price for {leg_a['market_id']} — NO orderbook is empty"
+        leg_a["price_cents"] = leg_a["no_ask"]
+        leg_a["depth"] = leg_a.get("no_depth", 0)
+
+    for leg in enriched_legs:
+        if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
+            return (
+                f"No executable price for {leg['market_id']} "
+                f"({leg['side']} side) — orderbook may be empty"
+            )
+    return None
+
+
+def _determine_direction_bracket(enriched_legs: list[dict[str, Any]]) -> str | None:
+    """Assign action/side/price/depth to an N-leg bracket arb (same exchange).
+
+    Compares buying all YES vs all NO, picks the profitable direction.
+    Mutates legs in-place. Returns error string or None on success.
+    """
+    leg_exchanges = {leg["exchange"] for leg in enriched_legs}
+    if len(leg_exchanges) != 1:
+        return (
+            "Multi-leg arbs with mixed exchanges are not supported. "
+            "Use 2-leg cross-platform arbs or N-leg bracket arbs on one exchange."
+        )
+
+    yes_prices = [leg.get("yes_ask") for leg in enriched_legs]
+    no_prices = [leg.get("no_ask") for leg in enriched_legs]
+
+    if any(p is None for p in yes_prices):
+        missing = [
+            leg["market_id"] for leg, p in zip(enriched_legs, yes_prices, strict=True) if p is None
+        ]
+        return f"Empty YES orderbook for: {', '.join(missing)}"
+
+    yes_cost = sum(yes_prices)  # type: ignore[arg-type]
+    buy_yes_edge = 100 - yes_cost
+
+    if all(p is not None for p in no_prices):
+        no_cost = sum(no_prices)  # type: ignore[arg-type]
+        buy_no_edge = 100 - no_cost
+    else:
+        no_cost = None
+        buy_no_edge = -999
+
+    if buy_yes_edge > 0 and buy_yes_edge >= buy_no_edge:
+        for leg in enriched_legs:
+            leg["action"], leg["side"] = "buy", "yes"
+            leg["price_cents"] = leg["yes_ask"]
+            leg["depth"] = leg["yes_depth"]
+    elif buy_no_edge > 0:
+        for leg in enriched_legs:
+            leg["action"], leg["side"] = "buy", "no"
+            leg["price_cents"] = leg["no_ask"]
+            leg["depth"] = leg["no_depth"]
+    else:
+        return (
+            f"No bracket arb edge at executable prices: "
+            f"YES sum {yes_cost}c"
+            + (f", NO sum {no_cost}c" if no_cost is not None else "")
+            + " (need sum < 100c on one side)"
+        )
+
+    for leg in enriched_legs:
+        if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
+            return (
+                f"No executable price for {leg['market_id']} "
+                f"({leg['side']} side) — orderbook may be empty"
+            )
+    return None
+
+
+def _validate_position_limits(
+    enriched_legs: list[dict[str, Any]],
+    contracts: int,
+    cfg: TradingConfig,
+) -> str | None:
+    """Check fee-inclusive cost per leg against exchange position limits.
+
+    Returns error string or None on success.
+    """
+    for leg in enriched_legs:
+        cost = leg["price_cents"] * contracts / 100.0
+        fee = leg_fee(leg["exchange"], contracts, leg["price_cents"], maker=leg["is_maker"])
+        cost_with_fee = cost + fee
+        if leg["exchange"] == "kalshi" and cost_with_fee > cfg.kalshi_max_position_usd:
+            return (
+                f"Kalshi leg ${cost_with_fee:.2f} (incl ${fee:.4f} fee) "
+                f"exceeds limit ${cfg.kalshi_max_position_usd:.2f}"
+            )
+        if leg["exchange"] == "polymarket" and cost_with_fee > cfg.polymarket_max_position_usd:
+            return (
+                f"Polymarket leg ${cost_with_fee:.2f} (incl ${fee:.4f} fee) "
+                f"exceeds limit ${cfg.polymarket_max_position_usd:.2f}"
+            )
+    return None
+
+
+def _build_recommendation_response(
+    *,
+    enriched_legs: list[dict[str, Any]],
+    contracts: int,
+    cost_per_pair_usd: float,
+    edge_result: dict[str, Any],
+    args: dict[str, Any],
+    db: AgentDatabase,
+    session_id: str,
+    recommendation_ttl_minutes: int,
+    total_exposure: float,
+) -> dict:
+    """Store recommendation to DB and build the MCP response."""
+    db_legs = []
+    for leg in enriched_legs:
+        ob_snapshot = {
+            "yes_ask": leg.get("yes_ask"),
+            "no_ask": leg.get("no_ask"),
+            "yes_depth": leg.get("yes_depth"),
+            "no_depth": leg.get("no_depth"),
+        }
+        db_legs.append(
+            {
+                "exchange": leg["exchange"],
+                "market_id": leg["market_id"],
+                "market_title": leg["market_title"],
+                "action": leg["action"],
+                "side": leg["side"],
+                "quantity": contracts,
+                "price_cents": leg["price_cents"],
+                "is_maker": leg["is_maker"],
+                "orderbook_snapshot_json": json.dumps(ob_snapshot),
+            }
+        )
+
+    group_id, expires_at = db.log_recommendation_group(
+        session_id=session_id,
+        thesis=args.get("thesis"),
+        estimated_edge_pct=edge_result["net_edge_pct"],
+        equivalence_notes=args.get("equivalence_notes"),
+        signal_id=args.get("signal_id"),
+        legs=db_legs,
+        ttl_minutes=recommendation_ttl_minutes,
+        total_exposure_usd=total_exposure,
+        computed_edge_pct=edge_result["net_edge_pct"],
+        computed_fees_usd=edge_result["total_fees_usd"],
+    )
+
+    return _text(
+        {
+            "group_id": group_id,
+            "status": "pending",
+            "expires_at": expires_at,
+            "computed": {
+                "contracts_per_leg": contracts,
+                "cost_per_pair_usd": round(cost_per_pair_usd, 4),
+                "total_cost_usd": round(contracts * cost_per_pair_usd, 2),
+                "gross_edge_usd": edge_result["gross_edge_usd"],
+                "total_fees_usd": edge_result["total_fees_usd"],
+                "net_edge_usd": edge_result["net_edge_usd"],
+                "net_edge_pct": edge_result["net_edge_pct"],
+                "fee_breakdown": edge_result["fee_breakdown"],
+            },
+            "legs": [
+                {
+                    "exchange": leg["exchange"],
+                    "market_id": leg["market_id"],
+                    "market_title": leg["market_title"],
+                    "action": leg["action"],
+                    "side": leg["side"],
+                    "quantity": contracts,
+                    "price_cents": leg["price_cents"],
+                    "is_maker": leg["is_maker"],
+                }
+                for leg in enriched_legs
+            ],
+        }
+    )
+
+
 def create_db_tools(
     db: AgentDatabase,
     session_id: str,
@@ -301,9 +514,6 @@ def create_db_tools(
     Exchange clients are needed to fetch orderbooks at recommendation time
     for auto-pricing and balanced sizing.
     """
-    from .config import TradingConfig
-    from .fees import best_price_and_depth, compute_arb_edge, leg_fee
-
     cfg: TradingConfig = trading_config or TradingConfig()
 
     def _get_client(exchange: str) -> KalshiAPIClient | PolymarketAPIClient:
@@ -432,8 +642,7 @@ def create_db_tools(
                 }
             )
 
-        # ── Determine direction from prices ─────────────────────
-        # For 2-leg cross-platform: buy YES on cheaper exchange, buy NO on expensive
+        # ── Extract prices from orderbooks ──────────────────────
         for leg in enriched_legs:
             ob = leg["orderbook"]
             yes_price, yes_depth = best_price_and_depth(ob, "yes")
@@ -443,123 +652,13 @@ def create_db_tools(
             leg["no_ask"] = no_price
             leg["no_depth"] = no_depth
 
+        # ── Determine direction ─────────────────────────────────
         if len(enriched_legs) == 2:
-            leg_a, leg_b = enriched_legs
-            a_yes = leg_a.get("yes_ask")
-            b_yes = leg_b.get("yes_ask")
-
-            if a_yes is None or b_yes is None:
-                return _text(
-                    {
-                        "error": "No executable price — empty orderbook for "
-                        + (leg_a["market_id"] if a_yes is None else leg_b["market_id"])
-                    }
-                )
-
-            # Buy YES on cheaper exchange, buy NO on expensive exchange
-            if a_yes <= b_yes:
-                leg_a["action"], leg_a["side"] = "buy", "yes"
-                leg_a["price_cents"] = a_yes
-                leg_a["depth"] = leg_a["yes_depth"]
-                leg_b["action"], leg_b["side"] = "buy", "no"
-                if not leg_b.get("no_ask"):
-                    return _text(
-                        {
-                            "error": f"No executable NO price for {leg_b['market_id']} "
-                            "— NO orderbook is empty"
-                        }
-                    )
-                leg_b["price_cents"] = leg_b["no_ask"]
-                leg_b["depth"] = leg_b.get("no_depth", 0)
-            else:
-                leg_b["action"], leg_b["side"] = "buy", "yes"
-                leg_b["price_cents"] = b_yes
-                leg_b["depth"] = leg_b["yes_depth"]
-                leg_a["action"], leg_a["side"] = "buy", "no"
-                if not leg_a.get("no_ask"):
-                    return _text(
-                        {
-                            "error": f"No executable NO price for {leg_a['market_id']} "
-                            "— NO orderbook is empty"
-                        }
-                    )
-                leg_a["price_cents"] = leg_a["no_ask"]
-                leg_a["depth"] = leg_a.get("no_depth", 0)
-
-            # Validate prices
-            for leg in enriched_legs:
-                if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
-                    return _text(
-                        {
-                            "error": f"No executable price for {leg['market_id']} "
-                            f"({leg['side']} side) — orderbook may be empty"
-                        }
-                    )
+            direction_error = _determine_direction_2leg(enriched_legs)
         else:
-            # Bracket arb: N legs, must be same exchange (mutually exclusive event)
-            leg_exchanges = {leg["exchange"] for leg in enriched_legs}
-            if len(leg_exchanges) != 1:
-                return _text(
-                    {
-                        "error": "Multi-leg arbs with mixed exchanges are not supported. "
-                        "Use 2-leg cross-platform arbs or N-leg bracket arbs on one exchange."
-                    }
-                )
-
-            # Check both directions: buy all YES vs buy all NO
-            yes_prices = [leg.get("yes_ask") for leg in enriched_legs]
-            no_prices = [leg.get("no_ask") for leg in enriched_legs]
-
-            if any(p is None for p in yes_prices):
-                missing = [
-                    leg["market_id"]
-                    for leg, p in zip(enriched_legs, yes_prices, strict=True)
-                    if p is None
-                ]
-                return _text({"error": f"Empty YES orderbook for: {', '.join(missing)}"})
-
-            yes_cost = sum(yes_prices)  # type: ignore[arg-type]
-            buy_yes_edge = 100 - yes_cost  # positive = underpriced bracket
-
-            # NO side may have empty books — only consider if all legs have prices
-            if all(p is not None for p in no_prices):
-                no_cost = sum(no_prices)  # type: ignore[arg-type]
-                buy_no_edge = 100 - no_cost  # positive = overpriced bracket
-            else:
-                no_cost = None
-                buy_no_edge = -999  # can't use NO direction
-
-            if buy_yes_edge > 0 and buy_yes_edge >= buy_no_edge:
-                # Underpriced: buy all YES (sum < 100c, guaranteed $1 payout)
-                for leg in enriched_legs:
-                    leg["action"], leg["side"] = "buy", "yes"
-                    leg["price_cents"] = leg["yes_ask"]
-                    leg["depth"] = leg["yes_depth"]
-            elif buy_no_edge > 0:
-                # Overpriced: buy all NO (YES sum > 100c → NO sum < 100c)
-                for leg in enriched_legs:
-                    leg["action"], leg["side"] = "buy", "no"
-                    leg["price_cents"] = leg["no_ask"]
-                    leg["depth"] = leg["no_depth"]
-            else:
-                return _text(
-                    {
-                        "error": f"No bracket arb edge at executable prices: "
-                        f"YES sum {yes_cost}c"
-                        + (f", NO sum {no_cost}c" if no_cost is not None else "")
-                        + " (need sum < 100c on one side)"
-                    }
-                )
-
-            # Validate all selected prices
-            for leg in enriched_legs:
-                if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
-                    return _text(
-                        {
-                            "error": f"No executable price for {leg['market_id']} "
-                            f"({leg['side']} side) — orderbook may be empty"
-                        }
-                    )
+            direction_error = _determine_direction_bracket(enriched_legs)
+        if direction_error:
+            return _text({"error": direction_error})
 
         # ── Compute balanced quantities ─────────────────────────
         cost_per_pair_cents = sum(leg["price_cents"] for leg in enriched_legs)
@@ -576,7 +675,7 @@ def create_db_tools(
                 }
             )
 
-        # Check depth — can we fill this many contracts?
+        # Check depth
         for leg in enriched_legs:
             if leg.get("depth", 0) < 5:
                 return _text(
@@ -587,11 +686,10 @@ def create_db_tools(
                 )
 
         # ── Compute fees (leg-in: harder side maker, easier side taker) ──
-        # Determine harder leg (less depth = less liquid = placed first as maker)
         sorted_legs = sorted(enriched_legs, key=lambda lg: lg.get("depth", 0))
-        sorted_legs[0]["is_maker"] = True  # harder leg: maker
+        sorted_legs[0]["is_maker"] = True
         for leg in sorted_legs[1:]:
-            leg["is_maker"] = False  # easier legs: taker
+            leg["is_maker"] = False
 
         fee_legs = [
             {
@@ -603,7 +701,6 @@ def create_db_tools(
         ]
         edge_result = compute_arb_edge(fee_legs, contracts)
 
-        # ── Validate edge ───────────────────────────────────────
         if edge_result["net_edge_pct"] < cfg.min_edge_pct:
             return _text(
                 {
@@ -613,91 +710,22 @@ def create_db_tools(
                 }
             )
 
-        # ── Validate position limits (fee-inclusive) ─────────────
-        for leg in enriched_legs:
-            cost = leg["price_cents"] * contracts / 100.0
-            fee = leg_fee(leg["exchange"], contracts, leg["price_cents"], maker=leg["is_maker"])
-            cost_with_fee = cost + fee
-            if leg["exchange"] == "kalshi" and cost_with_fee > cfg.kalshi_max_position_usd:
-                return _text(
-                    {
-                        "error": f"Kalshi leg ${cost_with_fee:.2f} (incl ${fee:.4f} fee) "
-                        f"exceeds limit ${cfg.kalshi_max_position_usd:.2f}"
-                    }
-                )
-            if leg["exchange"] == "polymarket" and cost_with_fee > cfg.polymarket_max_position_usd:
-                return _text(
-                    {
-                        "error": f"Polymarket leg ${cost_with_fee:.2f} (incl ${fee:.4f} fee) "
-                        f"exceeds limit ${cfg.polymarket_max_position_usd:.2f}"
-                    }
-                )
+        # ── Validate position limits ─────────────────────────────
+        limit_error = _validate_position_limits(enriched_legs, contracts, cfg)
+        if limit_error:
+            return _text({"error": limit_error})
 
-        # ── Store recommendation ────────────────────────────────
-        db_legs = []
-        for leg in enriched_legs:
-            ob_snapshot = {
-                "yes_ask": leg.get("yes_ask"),
-                "no_ask": leg.get("no_ask"),
-                "yes_depth": leg.get("yes_depth"),
-                "no_depth": leg.get("no_depth"),
-            }
-            db_legs.append(
-                {
-                    "exchange": leg["exchange"],
-                    "market_id": leg["market_id"],
-                    "market_title": leg["market_title"],
-                    "action": leg["action"],
-                    "side": leg["side"],
-                    "quantity": contracts,
-                    "price_cents": leg["price_cents"],
-                    "is_maker": leg["is_maker"],
-                    "orderbook_snapshot_json": json.dumps(ob_snapshot),
-                }
-            )
-
-        group_id, expires_at = db.log_recommendation_group(
+        # ── Store and respond ────────────────────────────────────
+        return _build_recommendation_response(
+            enriched_legs=enriched_legs,
+            contracts=contracts,
+            cost_per_pair_usd=cost_per_pair_usd,
+            edge_result=edge_result,
+            args=args,
+            db=db,
             session_id=session_id,
-            thesis=args.get("thesis"),
-            estimated_edge_pct=edge_result["net_edge_pct"],
-            equivalence_notes=args.get("equivalence_notes"),
-            signal_id=args.get("signal_id"),
-            legs=db_legs,
-            ttl_minutes=recommendation_ttl_minutes,
-            total_exposure_usd=total_exposure,
-            computed_edge_pct=edge_result["net_edge_pct"],
-            computed_fees_usd=edge_result["total_fees_usd"],
-        )
-
-        return _text(
-            {
-                "group_id": group_id,
-                "status": "pending",
-                "expires_at": expires_at,
-                "computed": {
-                    "contracts_per_leg": contracts,
-                    "cost_per_pair_usd": round(cost_per_pair_usd, 4),
-                    "total_cost_usd": round(contracts * cost_per_pair_usd, 2),
-                    "gross_edge_usd": edge_result["gross_edge_usd"],
-                    "total_fees_usd": edge_result["total_fees_usd"],
-                    "net_edge_usd": edge_result["net_edge_usd"],
-                    "net_edge_pct": edge_result["net_edge_pct"],
-                    "fee_breakdown": edge_result["fee_breakdown"],
-                },
-                "legs": [
-                    {
-                        "exchange": leg["exchange"],
-                        "market_id": leg["market_id"],
-                        "market_title": leg["market_title"],
-                        "action": leg["action"],
-                        "side": leg["side"],
-                        "quantity": contracts,
-                        "price_cents": leg["price_cents"],
-                        "is_maker": leg["is_maker"],
-                    }
-                    for leg in enriched_legs
-                ],
-            }
+            recommendation_ttl_minutes=recommendation_ttl_minutes,
+            total_exposure=total_exposure,
         )
 
     return [recommend_trade]

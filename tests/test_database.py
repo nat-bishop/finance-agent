@@ -6,12 +6,15 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from helpers import get_row, raw_select
+
+from finance_agent.models import Event, Session, Signal, Trade
 
 # ── Schema / Init ────────────────────────────────────────────────
 
 
 def test_db_creates_all_tables(db):
-    rows = db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    rows = raw_select(db, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     names = {r["name"] for r in rows}
     expected = {
         "market_snapshots",
@@ -29,50 +32,13 @@ def test_db_creates_all_tables(db):
 
 
 def test_db_wal_mode(db):
-    rows = db.query("SELECT * FROM pragma_journal_mode")
+    rows = raw_select(db, "SELECT * FROM pragma_journal_mode")
     assert rows[0][next(iter(rows[0].keys()))] == "wal"
 
 
 def test_db_foreign_keys_enabled(db):
-    rows = db.query("SELECT * FROM pragma_foreign_keys")
+    rows = raw_select(db, "SELECT * FROM pragma_foreign_keys")
     assert rows[0][next(iter(rows[0].keys()))] == 1
-
-
-# ── query() ──────────────────────────────────────────────────────
-
-
-def test_query_select_returns_dicts(db, session_id):
-    rows = db.query("SELECT id, started_at FROM sessions WHERE id = ?", (session_id,))
-    assert len(rows) == 1
-    assert rows[0]["id"] == session_id
-    assert rows[0]["started_at"] is not None
-
-
-def test_query_with_cte(db, session_id):
-    rows = db.query(
-        "WITH s AS (SELECT id FROM sessions) SELECT id FROM s WHERE id = ?",
-        (session_id,),
-    )
-    assert len(rows) == 1
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "INSERT INTO sessions (id) VALUES ('x')",
-        "DELETE FROM sessions WHERE id = 'x'",
-        "UPDATE sessions SET summary = 'x'",
-        "DROP TABLE sessions",
-    ],
-)
-def test_query_rejects_writes(db, sql):
-    with pytest.raises(ValueError, match="Only SELECT"):
-        db.query(sql)
-
-
-def test_query_empty_result(db):
-    rows = db.query("SELECT id FROM sessions WHERE id = 'nonexistent'")
-    assert rows == []
 
 
 # ── Sessions ─────────────────────────────────────────────────────
@@ -86,8 +52,8 @@ def test_create_session_returns_8_char_id(db):
 
 def test_create_session_stores_started_at(db):
     sid = db.create_session()
-    rows = db.query("SELECT started_at FROM sessions WHERE id = ?", (sid,))
-    assert rows[0]["started_at"] is not None
+    row = get_row(db, Session, sid)
+    assert row["started_at"] is not None
 
 
 def test_end_session_sets_fields(db, session_id):
@@ -98,12 +64,7 @@ def test_end_session_sets_fields(db, session_id):
         recommendations_made=3,
         pnl_usd=12.50,
     )
-    rows = db.query(
-        "SELECT ended_at, summary, trades_placed, recommendations_made, pnl_usd "
-        "FROM sessions WHERE id = ?",
-        (session_id,),
-    )
-    r = rows[0]
+    r = get_row(db, Session, session_id)
     assert r["ended_at"] is not None
     assert r["summary"] == "Test summary"
     assert r["trades_placed"] == 5
@@ -141,8 +102,8 @@ def test_log_trade_stores_all_fields(db, session_id):
         result_json='{"ok": true}',
         exchange="polymarket",
     )
-    rows = db.query("SELECT * FROM trades WHERE ticker = 'TICKER-X'")
-    r = rows[0]
+    trades = db.get_trades()
+    r = next(t for t in trades if t["ticker"] == "TICKER-X")
     assert r["exchange"] == "polymarket"
     assert r["price_cents"] == 45
     assert r["order_id"] == "ORD-1"
@@ -152,10 +113,8 @@ def test_log_trade_stores_all_fields(db, session_id):
 @pytest.mark.parametrize("exchange", ["kalshi", "polymarket"])
 def test_log_trade_exchange(db, session_id, exchange):
     db.log_trade(session_id, "T-1", "buy", "yes", 1, exchange=exchange)
-    rows = db.query(
-        "SELECT exchange FROM trades WHERE ticker = 'T-1' AND exchange = ?", (exchange,)
-    )
-    assert rows[0]["exchange"] == exchange
+    trades = db.get_trades(exchange=exchange)
+    assert trades[0]["exchange"] == exchange
 
 
 def test_get_trades_with_filter(db, session_id):
@@ -169,9 +128,9 @@ def test_get_trades_with_filter(db, session_id):
 def test_update_trade_status(db, session_id):
     tid = db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
     db.update_trade_status(tid, "filled", result_json='{"filled": true}')
-    rows = db.query("SELECT status, result_json FROM trades WHERE id = ?", (tid,))
-    assert rows[0]["status"] == "filled"
-    assert json.loads(rows[0]["result_json"])["filled"] is True
+    row = get_row(db, Trade, tid)
+    assert row["status"] == "filled"
+    assert json.loads(row["result_json"])["filled"] is True
 
 
 def test_update_trade_status_preserves_result_json(db, session_id):
@@ -179,8 +138,8 @@ def test_update_trade_status_preserves_result_json(db, session_id):
         session_id, "T-1", "buy", "yes", 10, status="placed", result_json='{"orig": true}'
     )
     db.update_trade_status(tid, "filled")  # no result_json
-    rows = db.query("SELECT result_json FROM trades WHERE id = ?", (tid,))
-    assert json.loads(rows[0]["result_json"])["orig"] is True
+    row = get_row(db, Trade, tid)
+    assert json.loads(row["result_json"])["orig"] is True
 
 
 # ── Recommendation Groups ────────────────────────────────────────
@@ -412,12 +371,9 @@ def test_insert_market_snapshots_ignores_extra_keys(db, sample_market_snapshot):
 def test_upsert_event_insert(db, sample_event):
     ev = sample_event()
     db.upsert_event(**ev)
-    rows = db.query(
-        "SELECT title FROM events WHERE event_ticker = ? AND exchange = ?",
-        (ev["event_ticker"], ev["exchange"]),
-    )
-    assert len(rows) == 1
-    assert rows[0]["title"] == "Test Event"
+    row = get_row(db, Event, (ev["event_ticker"], ev["exchange"]))
+    assert row is not None
+    assert row["title"] == "Test Event"
 
 
 def test_upsert_event_update(db, sample_event):
@@ -425,19 +381,17 @@ def test_upsert_event_update(db, sample_event):
     db.upsert_event(**ev)
     ev["title"] = "Updated Title"
     db.upsert_event(**ev)
-    rows = db.query(
-        "SELECT title FROM events WHERE event_ticker = ? AND exchange = ?",
-        (ev["event_ticker"], ev["exchange"]),
-    )
-    assert len(rows) == 1
-    assert rows[0]["title"] == "Updated Title"
+    row = get_row(db, Event, (ev["event_ticker"], ev["exchange"]))
+    assert row is not None
+    assert row["title"] == "Updated Title"
 
 
 def test_upsert_event_composite_pk(db, sample_event):
     db.upsert_event(**sample_event(event_ticker="EVT-1", exchange="kalshi"))
     db.upsert_event(**sample_event(event_ticker="EVT-1", exchange="polymarket"))
-    rows = db.query("SELECT COUNT(*) as cnt FROM events WHERE event_ticker = 'EVT-1'")
-    assert rows[0]["cnt"] == 2
+    events = db.get_all_events()
+    count = sum(1 for e in events if e["event_ticker"] == "EVT-1")
+    assert count == 2
 
 
 # ── Signals ──────────────────────────────────────────────────────
@@ -451,8 +405,8 @@ def test_insert_signals_dict_details(db, sample_signal):
     sig = sample_signal(details_json={"spread": 10, "title": "Test"})
     count = db.insert_signals([sig])
     assert count == 1
-    rows = db.query("SELECT details_json FROM signals WHERE ticker = ?", (sig["ticker"],))
-    parsed = json.loads(rows[0]["details_json"])
+    signals = db.get_signals()
+    parsed = json.loads(signals[0]["details_json"])
     assert parsed["spread"] == 10
 
 
@@ -465,8 +419,9 @@ def test_insert_signals_string_details(db):
         "details_json": '{"already": "serialized"}',
     }
     db.insert_signals([sig])
-    rows = db.query("SELECT details_json FROM signals WHERE ticker = 'T-1'")
-    assert json.loads(rows[0]["details_json"])["already"] == "serialized"
+    signals = db.get_signals()
+    matching = [s for s in signals if s["ticker"] == "T-1"]
+    assert json.loads(matching[0]["details_json"])["already"] == "serialized"
 
 
 def test_expire_old_signals(db, sample_signal):
@@ -475,15 +430,16 @@ def test_expire_old_signals(db, sample_signal):
     # Instead, insert a signal with an old generated_at by manipulating the data.
     old_time = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
     with db._session_factory() as session:
-        from finance_agent.models import Signal
+        from sqlalchemy import select
 
-        sig = session.query(Signal).filter(Signal.ticker == "TICKER-A").first()
+        sig = session.scalars(select(Signal).where(Signal.ticker == "TICKER-A")).first()
         sig.generated_at = old_time
         session.commit()
     count = db.expire_old_signals(max_age_hours=48)
     assert count == 1
-    rows = db.query("SELECT status FROM signals WHERE ticker = 'TICKER-A'")
-    assert rows[0]["status"] == "expired"
+    signals = db.get_signals(status="expired")
+    matching = [s for s in signals if s["ticker"] == "TICKER-A"]
+    assert matching[0]["status"] == "expired"
 
 
 def test_get_signals_with_filter(db, sample_signal):
