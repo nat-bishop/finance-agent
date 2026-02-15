@@ -11,18 +11,13 @@ from claude_agent_sdk import HookMatcher
 from .database import AgentDatabase
 
 
-def _extract_kalshi_price(tool_input: dict[str, Any]) -> int:
-    """Extract the effective price from yes_price or no_price."""
-    return max(tool_input.get("yes_price", 0) or 0, tool_input.get("no_price", 0) or 0)
-
-
 def create_audit_hooks(
     db: AgentDatabase,
     session_id: str,
 ) -> dict[str, list[HookMatcher]]:
     """Return hooks dict for trade validation, auto-approve, audit, and session lifecycle."""
     session_start = time.time()
-    trade_count = {"placed": 0, "cancelled": 0}
+    trade_count = {"placed": 0, "amended": 0, "cancelled": 0}
 
     # -- 1. Auto-approve reads --
 
@@ -33,7 +28,7 @@ def create_audit_hooks(
     ) -> dict:
         return {"permissionDecision": "allow"}
 
-    # -- 2. Trade validation (Kalshi place_order) --
+    # -- 2. Trade validation (unified place_order) --
 
     async def validate_and_ask_trade(
         input_data: dict[str, Any],
@@ -41,55 +36,69 @@ def create_audit_hooks(
         context: Any,
     ) -> dict:
         ti = input_data.get("tool_input", {})
-        count = ti.get("count", 0)
-        price = _extract_kalshi_price(ti)
-        cost = (count * price) / 100
+        exchange = ti.get("exchange", "?")
+        orders = ti.get("orders", [])
+
+        lines = []
+        total_cost = 0.0
+        for o in orders:
+            price = o.get("price_cents", 0)
+            qty = o.get("quantity", 0)
+            cost = (qty * price) / 100
+            total_cost += cost
+            lines.append(
+                f"  {o.get('action', '?').upper()} {qty}x "
+                f"{o.get('side', '?').upper()} on {o.get('market_id', '?')} "
+                f"@ {price}c = ${cost:.2f}"
+            )
+
+        summary = "\n".join(lines) if lines else "  (no orders)"
+        label = (
+            f"{exchange.upper()} ORDER"
+            if len(orders) == 1
+            else f"{exchange.upper()} BATCH ({len(orders)} orders)"
+        )
 
         return {
             "permissionDecision": "ask",
-            "systemMessage": (
-                f"TRADE REQUEST: {ti.get('action', '?').upper()} {count}x "
-                f"{ti.get('side', '?').upper()} on {ti.get('ticker', '?')} | "
-                f"Type: {ti.get('order_type', 'limit')} | Price: {price}c | Cost: ${cost:.2f}"
-            ),
+            "systemMessage": (f"{label} | Total: ${total_cost:.2f}\n{summary}"),
         }
 
-    # -- 2b. Trade validation (Polymarket place_order) --
+    # -- 3. Amend order --
 
-    async def validate_and_ask_pm_trade(
+    async def validate_and_ask_amend(
         input_data: dict[str, Any],
         tool_use_id: str | None,
         context: Any,
     ) -> dict:
         ti = input_data.get("tool_input", {})
-        price = float(ti.get("price", "0"))
-        quantity = ti.get("quantity", 0)
-        cost = quantity * price
-
+        order_id = ti.get("order_id", "?")
+        parts = [f"AMEND ORDER: {order_id}"]
+        if ti.get("price_cents"):
+            parts.append(f"New price: {ti['price_cents']}c")
+        if ti.get("quantity"):
+            parts.append(f"New qty: {ti['quantity']}")
         return {
             "permissionDecision": "ask",
-            "systemMessage": (
-                f"POLYMARKET TRADE: {ti.get('intent', '?')} {quantity}x "
-                f"on {ti.get('slug', '?')} | "
-                f"Type: {ti.get('order_type', 'LIMIT')} | "
-                f"Price: ${price:.2f} | Cost: ${cost:.2f}"
-            ),
+            "systemMessage": " | ".join(parts),
         }
 
-    # -- 3. Cancel order --
+    # -- 4. Cancel order --
 
     async def ask_cancel(
         input_data: dict[str, Any],
         tool_use_id: str | None,
         context: Any,
     ) -> dict:
-        order_id = input_data.get("tool_input", {}).get("order_id", "?")
+        ti = input_data.get("tool_input", {})
+        exchange = ti.get("exchange", "?")
+        ids = ti.get("order_ids", [])
         return {
             "permissionDecision": "ask",
-            "systemMessage": f"CANCEL REQUEST: Order {order_id}",
+            "systemMessage": f"CANCEL {exchange.upper()}: {len(ids)} order(s) — {', '.join(ids[:5])}",
         }
 
-    # -- 4. Trade audit (PostToolUse) --
+    # -- 5. Trade audit (PostToolUse) --
 
     async def audit_trade_result(
         input_data: dict[str, Any],
@@ -112,50 +121,42 @@ def create_audit_hooks(
             result = {}
 
         if "place_order" in tool_name:
-            trade_count["placed"] += 1
-            is_polymarket = "polymarket" in tool_name
-            exchange = "polymarket" if is_polymarket else "kalshi"
+            exchange = tool_input.get("exchange", "kalshi")
+            orders = tool_input.get("orders", [])
+            for o in orders:
+                trade_count["placed"] += 1
+                # Extract order_id from result
+                order_id = None
+                if isinstance(result, dict):
+                    order = result.get("order", result)
+                    order_id = order.get("order_id") or order.get("id")
 
-            # Extract order_id from result
-            order_id = None
-            if isinstance(result, dict):
-                order = result.get("order", result)
-                order_id = order.get("order_id") or order.get("id")
+                action = o.get("action", "")
+                side = o.get("side", "")
 
-            # Normalize fields across platforms
-            if is_polymarket:
-                ticker = tool_input.get("slug", "")
-                action = tool_input.get("intent", "")
-                side = ""
-                count = tool_input.get("quantity", 0)
-                price_cents = int(float(tool_input.get("price", "0")) * 100)
-            else:
-                ticker = tool_input.get("ticker", "")
-                action = tool_input.get("action", "")
-                side = tool_input.get("side", "")
-                count = tool_input.get("count", 0)
-                price_cents = _extract_kalshi_price(tool_input)
+                db.log_trade(
+                    session_id=session_id,
+                    exchange=exchange,
+                    ticker=o.get("market_id", ""),
+                    action=action,
+                    side=side,
+                    count=o.get("quantity", 0),
+                    price_cents=o.get("price_cents"),
+                    order_type=o.get("type", "limit"),
+                    order_id=order_id,
+                    status="placed",
+                    result_json=json.dumps(result, default=str),
+                )
 
-            db.log_trade(
-                session_id=session_id,
-                exchange=exchange,
-                ticker=ticker,
-                action=action,
-                side=side,
-                count=count,
-                price_cents=price_cents,
-                order_type=tool_input.get("order_type", "limit"),
-                order_id=order_id,
-                status="placed",
-                result_json=json.dumps(result, default=str),
-            )
+        elif "amend_order" in tool_name:
+            trade_count["amended"] += 1
 
         elif "cancel_order" in tool_name:
             trade_count["cancelled"] += 1
 
         return {}
 
-    # -- 5. Session end (Stop) --
+    # -- 6. Session end (Stop) --
 
     async def session_end(
         input_data: dict[str, Any],
@@ -168,7 +169,8 @@ def create_audit_hooks(
             summary=(
                 f"Duration: {duration:.0f}s | "
                 f"Orders placed: {trade_count['placed']} | "
-                f"Orders cancelled: {trade_count['cancelled']}"
+                f"Amended: {trade_count['amended']} | "
+                f"Cancelled: {trade_count['cancelled']}"
             ),
             trades_placed=trade_count["placed"],
         )
@@ -178,31 +180,29 @@ def create_audit_hooks(
         "PreToolUse": [
             HookMatcher(
                 matcher=(
-                    "mcp__kalshi__search_markets|mcp__kalshi__get_"
-                    "|mcp__polymarket__search_markets|mcp__polymarket__get_"
-                    "|mcp__db__db_query|mcp__db__db_get_session_state"
-                    "|Read|Glob|Grep"
+                    "mcp__markets__search_markets|mcp__markets__get_|mcp__db__|Read|Glob|Grep"
                 ),
                 hooks=[auto_approve_reads],
             ),
             HookMatcher(
-                matcher="mcp__kalshi__place_order",
+                matcher="mcp__markets__place_order",
                 hooks=[validate_and_ask_trade],
             ),
             HookMatcher(
-                matcher="mcp__polymarket__place_order",
-                hooks=[validate_and_ask_pm_trade],
+                matcher="mcp__markets__amend_order",
+                hooks=[validate_and_ask_amend],
             ),
             HookMatcher(
-                matcher="mcp__kalshi__cancel_order|mcp__polymarket__cancel_order",
+                matcher="mcp__markets__cancel_order",
                 hooks=[ask_cancel],
             ),
         ],
         "PostToolUse": [
             HookMatcher(
                 matcher=(
-                    "mcp__kalshi__place_order|mcp__kalshi__cancel_order"
-                    "|mcp__polymarket__place_order|mcp__polymarket__cancel_order"
+                    "mcp__markets__place_order"
+                    "|mcp__markets__amend_order"
+                    "|mcp__markets__cancel_order"
                 ),
                 hooks=[audit_trade_result],
             ),

@@ -194,24 +194,22 @@ def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
 
 
 def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    """Collect event structures with nested markets."""
+    """Collect event structures with nested markets via paginated GET /events."""
     print("Collecting events...")
 
-    event_tickers = db.query(
-        """SELECT DISTINCT event_ticker FROM market_snapshots
-           WHERE event_ticker IS NOT NULL
-           AND source = 'collector'
-           ORDER BY captured_at DESC
-           LIMIT 500"""
-    )
-
+    cursor = None
     total = 0
-    for row in event_tickers:
-        et = row["event_ticker"]
-        if not et:
-            continue
-        try:
-            event = client.get_event(et)
+
+    while True:
+        resp = client.get_events(status="open", with_nested_markets=True, limit=200, cursor=cursor)
+        events = resp.get("events", [])
+        if not events:
+            break
+
+        for event in events:
+            et = event.get("event_ticker")
+            if not et:
+                continue
             nested = event.get("markets", [])
             markets_summary = [
                 {
@@ -225,6 +223,7 @@ def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
             ]
             db.upsert_event(
                 event_ticker=et,
+                exchange="kalshi",
                 series_ticker=event.get("series_ticker"),
                 title=event.get("title"),
                 category=event.get("category"),
@@ -232,8 +231,10 @@ def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
                 markets_json=json.dumps(markets_summary, default=str),
             )
             total += 1
-        except Exception as e:
-            print(f"  Warning: failed to fetch event {et}: {e}")
+
+        cursor = resp.get("cursor")
+        if not cursor:
+            break
 
     print(f"  -> {total} events")
     return total
@@ -264,6 +265,49 @@ def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -
     return total
 
 
+def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) -> int:
+    """Collect event structures from Polymarket US."""
+    print("Collecting Polymarket events...")
+    total = 0
+    offset = 0
+
+    while True:
+        resp = client.list_events(active=True, limit=100, offset=offset)
+        events = resp if isinstance(resp, list) else resp.get("events", resp.get("data", []))
+        if not events:
+            break
+
+        for event in events:
+            slug = event.get("slug") or event.get("id", "")
+            if not slug:
+                continue
+            markets = event.get("markets", [])
+            markets_summary = [
+                {
+                    "slug": m.get("slug"),
+                    "title": m.get("title") or m.get("question"),
+                    "yes_price": m.get("yes_price") or m.get("lastTradePrice"),
+                    "active": m.get("active"),
+                }
+                for m in markets
+            ]
+            db.upsert_event(
+                event_ticker=slug,
+                exchange="polymarket",
+                title=event.get("title"),
+                category=event.get("category"),
+                mutually_exclusive=event.get("mutuallyExclusive")
+                or event.get("mutually_exclusive"),
+                markets_json=json.dumps(markets_summary, default=str),
+            )
+            total += 1
+
+        offset += len(events)
+
+    print(f"  -> {total} Polymarket events")
+    return total
+
+
 def run_collector() -> None:
     """Main entry point for the collector."""
     _, trading_config = load_configs()
@@ -285,14 +329,16 @@ def run_collector() -> None:
         event_count = collect_events(client, db)
 
         pm_count = 0
+        pm_event_count = 0
         if trading_config.polymarket_enabled and trading_config.polymarket_key_id:
             pm_client = PolymarketAPIClient(trading_config, rate_limiter=limiter)
             pm_count = collect_polymarket_markets(pm_client, db)
+            pm_event_count = collect_polymarket_events(pm_client, db)
 
         elapsed = time.time() - start
         print(f"\nCollection complete in {elapsed:.1f}s")
         print(f"  Open: {open_count} | Settled: {settled_count} | Events: {event_count}")
-        print(f"  Polymarket: {pm_count}")
+        print(f"  Polymarket: {pm_count} markets, {pm_event_count} events")
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:

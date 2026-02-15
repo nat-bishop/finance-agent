@@ -1,4 +1,4 @@
-"""MCP tool factories for Kalshi API access and database."""
+"""Unified MCP tool factories for market access and database."""
 
 from __future__ import annotations
 
@@ -12,90 +12,159 @@ from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
 from .polymarket_client import PolymarketAPIClient
 
+# Map agent action+side to Polymarket intent
+_PM_INTENT_MAP = {
+    ("buy", "yes"): "ORDER_INTENT_BUY_LONG",
+    ("sell", "yes"): "ORDER_INTENT_SELL_LONG",
+    ("buy", "no"): "ORDER_INTENT_BUY_SHORT",
+    ("sell", "no"): "ORDER_INTENT_SELL_SHORT",
+}
 
-def _text(data: Any) -> list[dict]:
+# Map Polymarket intent back to action+side for audit
+_PM_INTENT_REVERSE = {v: k for k, v in _PM_INTENT_MAP.items()}
+
+
+def _text(data: Any) -> dict:
     """Wrap data as MCP text content."""
     return {"content": [{"type": "text", "text": json.dumps(data, default=str)}]}
 
 
-def create_kalshi_tools(
-    client: KalshiAPIClient,
-    trading_config: TradingConfig,
+def _cents_to_usd(cents: int) -> str:
+    """Convert price in cents (1-99) to USD string for Polymarket."""
+    return f"{cents / 100:.2f}"
+
+
+def _require_exchange(args: dict, polymarket: PolymarketAPIClient | None) -> str:
+    """Validate and return exchange param. Raises ValueError if invalid."""
+    exchange = args.get("exchange", "").lower()
+    if exchange not in ("kalshi", "polymarket"):
+        raise ValueError("exchange must be 'kalshi' or 'polymarket'")
+    if exchange == "polymarket" and polymarket is None:
+        raise ValueError("Polymarket is not enabled in this configuration")
+    return exchange
+
+
+def create_market_tools(
+    kalshi: KalshiAPIClient,
+    polymarket: PolymarketAPIClient | None,
+    config: TradingConfig,
 ) -> list:
-    """Create MCP tool definitions bound to a Kalshi client via closure."""
+    """Unified market tools. Exchange param routes to correct client."""
 
     @tool(
         "search_markets",
-        "Search Kalshi markets by keyword, status, series, or event ticker. "
-        "Returns matching markets with tickers, titles, prices, and volumes.",
+        "Search markets by keyword, status, or event. Omit exchange to search both platforms.",
         {
-            "query": {"type": "string", "description": "Search keyword or ticker pattern"},
-            "status": {
+            "exchange": {
                 "type": "string",
-                "description": "Filter by status: open, closed, settled",
+                "description": "'kalshi' or 'polymarket'. Omit to search both.",
                 "optional": True,
             },
-            "event_ticker": {
+            "query": {
                 "type": "string",
-                "description": "Filter by event ticker",
+                "description": "Search keyword",
+                "optional": True,
+            },
+            "status": {
+                "type": "string",
+                "description": "Filter: open, closed, settled",
+                "optional": True,
+            },
+            "event_id": {
+                "type": "string",
+                "description": "Filter by event ticker/slug",
                 "optional": True,
             },
             "limit": {
                 "type": "integer",
-                "description": "Max results (default 50)",
+                "description": "Max results per exchange (default 50)",
                 "optional": True,
             },
         },
     )
     async def search_markets(args: dict) -> dict:
-        return _text(
-            client.search_markets(
-                query=args.get("query"),
-                status=args.get("status"),
-                event_ticker=args.get("event_ticker"),
-                limit=args.get("limit", 50),
+        exchange = args.get("exchange", "").lower()
+        query = args.get("query")
+        status = args.get("status")
+        limit = args.get("limit", 50)
+        results: dict[str, Any] = {}
+
+        if exchange in ("kalshi", ""):
+            results["kalshi"] = kalshi.search_markets(
+                query=query,
+                status=status,
+                event_ticker=args.get("event_id"),
+                limit=limit,
             )
-        )
+        if exchange in ("polymarket", "") and polymarket:
+            results["polymarket"] = polymarket.search_markets(
+                query=query,
+                status=status,
+                limit=limit,
+            )
+        return _text(results)
 
     @tool(
-        "get_market_details",
-        "Get full details for a single Kalshi market: rules, current prices, "
-        "volume, open interest, settlement source, and close time.",
-        {"ticker": {"type": "string", "description": "Market ticker (e.g. FED-25MAR-T4.50)"}},
+        "get_market",
+        "Get full details for a single market: rules, prices, volume, settlement source.",
+        {
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "market_id": {
+                "type": "string",
+                "description": "Market ticker (Kalshi) or slug (Polymarket)",
+            },
+        },
     )
-    async def get_market_details(args: dict) -> dict:
-        return _text(client.get_market(args["ticker"]))
+    async def get_market(args: dict) -> dict:
+        exchange = _require_exchange(args, polymarket)
+        mid = args["market_id"]
+        if exchange == "kalshi":
+            return _text(kalshi.get_market(mid))
+        return _text(polymarket.get_market(mid))
 
     @tool(
         "get_orderbook",
-        "Get the current orderbook for a market: bid/ask levels, depth, spread, and mid price.",
+        "Get the current orderbook: bid/ask levels, spread, depth.",
         {
-            "ticker": {"type": "string", "description": "Market ticker"},
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "market_id": {"type": "string", "description": "Market ticker or slug"},
             "depth": {
                 "type": "integer",
-                "description": "Number of price levels (default 10)",
+                "description": "Price levels (default 10)",
                 "optional": True,
             },
         },
     )
     async def get_orderbook(args: dict) -> dict:
-        return _text(client.get_orderbook(args["ticker"], depth=args.get("depth", 10)))
+        exchange = _require_exchange(args, polymarket)
+        mid = args["market_id"]
+        if exchange == "kalshi":
+            return _text(kalshi.get_orderbook(mid, depth=args.get("depth", 10)))
+        if args.get("depth", 10) <= 1:
+            return _text(polymarket.get_bbo(mid))
+        return _text(polymarket.get_orderbook(mid))
 
     @tool(
         "get_event",
-        "Get an event and all its nested markets. Events group related markets "
-        "(e.g. all Fed rate brackets for a given meeting).",
-        {"event_ticker": {"type": "string", "description": "Event ticker"}},
+        "Get an event and all its nested markets.",
+        {
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "event_id": {"type": "string", "description": "Event ticker or slug"},
+        },
     )
     async def get_event(args: dict) -> dict:
-        return _text(client.get_event(args["event_ticker"]))
+        exchange = _require_exchange(args, polymarket)
+        eid = args["event_id"]
+        if exchange == "kalshi":
+            return _text(kalshi.get_event(eid))
+        return _text(polymarket.get_event(eid))
 
     @tool(
         "get_price_history",
-        "Get OHLC candlestick price history for a market. Useful for time-series "
-        "analysis and volatility estimation.",
+        "Get OHLC candlestick price history. Kalshi only — "
+        "use for investigating signals and checking 24-48h trends.",
         {
-            "ticker": {"type": "string", "description": "Market ticker"},
+            "market_id": {"type": "string", "description": "Kalshi market ticker"},
             "start_ts": {
                 "type": "integer",
                 "description": "Start timestamp (Unix seconds)",
@@ -106,7 +175,7 @@ def create_kalshi_tools(
                 "description": "End timestamp (Unix seconds)",
                 "optional": True,
             },
-            "period_interval": {
+            "interval": {
                 "type": "integer",
                 "description": "Candle interval in minutes (default 60)",
                 "optional": True,
@@ -115,300 +184,284 @@ def create_kalshi_tools(
     )
     async def get_price_history(args: dict) -> dict:
         return _text(
-            client.get_candlesticks(
-                args["ticker"],
+            kalshi.get_candlesticks(
+                args["market_id"],
                 start_ts=args.get("start_ts"),
                 end_ts=args.get("end_ts"),
-                period_interval=args.get("period_interval", 60),
+                period_interval=args.get("interval", 60),
             )
         )
-
-    @tool(
-        "get_recent_trades",
-        "Get recent trade executions for a market: price, size, time, taker side.",
-        {
-            "ticker": {"type": "string", "description": "Market ticker"},
-            "limit": {
-                "type": "integer",
-                "description": "Max trades to return (default 50)",
-                "optional": True,
-            },
-        },
-    )
-    async def get_recent_trades(args: dict) -> dict:
-        return _text(client.get_trades(args.get("ticker"), limit=args.get("limit", 50)))
-
-    @tool(
-        "get_portfolio",
-        "Get portfolio overview: cash balance, open positions with P&L, "
-        "recent fills, and settlements.",
-        {
-            "include_fills": {
-                "type": "boolean",
-                "description": "Include recent fills (default false)",
-                "optional": True,
-            },
-            "include_settlements": {
-                "type": "boolean",
-                "description": "Include settlements (default false)",
-                "optional": True,
-            },
-        },
-    )
-    async def get_portfolio(args: dict) -> dict:
-        data: dict[str, Any] = {}
-        data["balance"] = client.get_balance()
-        data["positions"] = client.get_positions()
-        if args.get("include_fills"):
-            data["fills"] = client.get_fills()
-        if args.get("include_settlements"):
-            data["settlements"] = client.get_settlements()
-        return _text(data)
-
-    @tool(
-        "get_open_orders",
-        "List all resting (open) orders, optionally filtered by market ticker.",
-        {
-            "ticker": {
-                "type": "string",
-                "description": "Filter by market ticker",
-                "optional": True,
-            },
-        },
-    )
-    async def get_open_orders(args: dict) -> dict:
-        return _text(client.get_orders(ticker=args.get("ticker"), status="resting"))
-
-    @tool(
-        "place_order",
-        "Place a limit or market order on a Kalshi market. Requires confirmation. "
-        f"Max {trading_config.max_order_count} contracts per order. "
-        f"Max ${trading_config.max_position_usd} per position.",
-        {
-            "ticker": {"type": "string", "description": "Market ticker"},
-            "action": {"type": "string", "description": "'buy' or 'sell'"},
-            "side": {"type": "string", "description": "'yes' or 'no'"},
-            "count": {"type": "integer", "description": "Number of contracts"},
-            "order_type": {
-                "type": "string",
-                "description": "'limit' or 'market' (default 'limit')",
-                "optional": True,
-            },
-            "yes_price": {
-                "type": "integer",
-                "description": "Limit price in cents for yes side (1-99)",
-                "optional": True,
-            },
-            "no_price": {
-                "type": "integer",
-                "description": "Limit price in cents for no side (1-99)",
-                "optional": True,
-            },
-        },
-    )
-    async def place_order(args: dict) -> dict:
-        return _text(
-            client.create_order(
-                ticker=args["ticker"],
-                action=args["action"],
-                side=args["side"],
-                count=args["count"],
-                order_type=args.get("order_type", "limit"),
-                yes_price=args.get("yes_price"),
-                no_price=args.get("no_price"),
-            )
-        )
-
-    @tool(
-        "cancel_order",
-        "Cancel a resting order by order ID.",
-        {"order_id": {"type": "string", "description": "Order ID to cancel"}},
-    )
-    async def cancel_order(args: dict) -> dict:
-        return _text(client.cancel_order(args["order_id"]))
-
-    return [
-        search_markets,
-        get_market_details,
-        get_orderbook,
-        get_event,
-        get_price_history,
-        get_recent_trades,
-        get_portfolio,
-        get_open_orders,
-        place_order,
-        cancel_order,
-    ]
-
-
-def create_polymarket_tools(
-    client: PolymarketAPIClient,
-    trading_config: TradingConfig,
-) -> list:
-    """Create MCP tool definitions bound to a Polymarket client via closure."""
-
-    @tool(
-        "search_markets",
-        "Search Polymarket US markets by keyword or category. "
-        "Returns matching markets with slugs, titles, prices, and volumes.",
-        {
-            "query": {"type": "string", "description": "Search keyword"},
-            "limit": {
-                "type": "integer",
-                "description": "Max results (default 50)",
-                "optional": True,
-            },
-        },
-    )
-    async def search_markets(args: dict) -> dict:
-        return _text(client.search_markets(query=args.get("query"), limit=args.get("limit", 50)))
-
-    @tool(
-        "get_market_details",
-        "Get full details for a single Polymarket US market by slug: rules, "
-        "current prices, volume, and resolution criteria.",
-        {"slug": {"type": "string", "description": "Market slug (e.g. btc-100k-2025)"}},
-    )
-    async def get_market_details(args: dict) -> dict:
-        return _text(client.get_market(args["slug"]))
-
-    @tool(
-        "get_orderbook",
-        "Get the current orderbook for a Polymarket market: bids, offers, depth.",
-        {"slug": {"type": "string", "description": "Market slug"}},
-    )
-    async def get_orderbook(args: dict) -> dict:
-        return _text(client.get_orderbook(args["slug"]))
-
-    @tool(
-        "get_event",
-        "Get a Polymarket event and all its nested markets by event slug.",
-        {"slug": {"type": "string", "description": "Event slug"}},
-    )
-    async def get_event(args: dict) -> dict:
-        return _text(client.get_event(args["slug"]))
 
     @tool(
         "get_trades",
-        "Get recent trade data for a Polymarket market.",
+        "Get recent trade executions. Check before placing limit orders — "
+        "recent trades at your target price indicate quick fills.",
         {
-            "slug": {"type": "string", "description": "Market slug"},
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "market_id": {"type": "string", "description": "Market ticker or slug"},
             "limit": {
                 "type": "integer",
-                "description": "Max trades to return (default 50)",
+                "description": "Max trades (default 50)",
                 "optional": True,
             },
         },
     )
     async def get_trades(args: dict) -> dict:
-        return _text(client.get_trades(args["slug"], limit=args.get("limit", 50)))
+        exchange = _require_exchange(args, polymarket)
+        mid = args["market_id"]
+        limit = args.get("limit", 50)
+        if exchange == "kalshi":
+            return _text(kalshi.get_trades(mid, limit=limit))
+        return _text(polymarket.get_trades(mid, limit=limit))
 
     @tool(
         "get_portfolio",
-        "Get Polymarket portfolio: cash balance and open positions.",
-        {},
-    )
-    async def get_portfolio(args: dict) -> dict:
-        data: dict[str, Any] = {}
-        data["balance"] = client.get_balance()
-        data["positions"] = client.get_positions()
-        return _text(data)
-
-    @tool(
-        "place_order",
-        "Place an order on Polymarket US. Requires user approval. "
-        "Prices in USD decimals (e.g. '0.55'). "
-        "Intents: ORDER_INTENT_BUY_LONG, ORDER_INTENT_SELL_LONG, "
-        "ORDER_INTENT_BUY_SHORT, ORDER_INTENT_SELL_SHORT. "
-        f"Max ${trading_config.polymarket_max_position_usd} per position.",
+        "Get portfolio: balances, positions, optional fills/settlements. "
+        "Omit exchange to get both platforms combined.",
         {
-            "slug": {"type": "string", "description": "Market slug"},
-            "intent": {
+            "exchange": {
                 "type": "string",
-                "description": "Order intent: ORDER_INTENT_BUY_LONG, SELL_LONG, BUY_SHORT, SELL_SHORT",
-            },
-            "price": {
-                "type": "string",
-                "description": "Limit price in USD (e.g. '0.55')",
-            },
-            "quantity": {"type": "integer", "description": "Number of contracts"},
-            "order_type": {
-                "type": "string",
-                "description": "'ORDER_TYPE_LIMIT' or 'ORDER_TYPE_MARKET' (default LIMIT)",
+                "description": "'kalshi' or 'polymarket'. Omit for both.",
                 "optional": True,
             },
-            "tif": {
-                "type": "string",
-                "description": "Time-in-force: GTC, GTD, IOC, FOK (default GTC)",
+            "include_fills": {
+                "type": "boolean",
+                "description": "Include recent fills (Kalshi only, default false)",
+                "optional": True,
+            },
+            "include_settlements": {
+                "type": "boolean",
+                "description": "Include settlements (Kalshi only, default false)",
                 "optional": True,
             },
         },
     )
+    async def get_portfolio(args: dict) -> dict:
+        exchange = args.get("exchange", "").lower()
+        data: dict[str, Any] = {}
+
+        if exchange in ("kalshi", ""):
+            kalshi_data: dict[str, Any] = {
+                "balance": kalshi.get_balance(),
+                "positions": kalshi.get_positions(),
+            }
+            if args.get("include_fills"):
+                kalshi_data["fills"] = kalshi.get_fills()
+            if args.get("include_settlements"):
+                kalshi_data["settlements"] = kalshi.get_settlements()
+            data["kalshi"] = kalshi_data
+
+        if exchange in ("polymarket", "") and polymarket:
+            data["polymarket"] = {
+                "balance": polymarket.get_balance(),
+                "positions": polymarket.get_positions(),
+            }
+        return _text(data)
+
+    @tool(
+        "get_orders",
+        "List resting orders. Check after placing to verify status. "
+        "Omit exchange for all platforms.",
+        {
+            "exchange": {
+                "type": "string",
+                "description": "'kalshi' or 'polymarket'. Omit for all.",
+                "optional": True,
+            },
+            "market_id": {
+                "type": "string",
+                "description": "Filter by market ticker/slug",
+                "optional": True,
+            },
+            "status": {
+                "type": "string",
+                "description": "Order status filter (default 'resting')",
+                "optional": True,
+            },
+        },
+    )
+    async def get_orders(args: dict) -> dict:
+        exchange = args.get("exchange", "").lower()
+        status = args.get("status", "resting")
+        data: dict[str, Any] = {}
+
+        if exchange in ("kalshi", ""):
+            data["kalshi"] = kalshi.get_orders(ticker=args.get("market_id"), status=status)
+        if exchange in ("polymarket", "") and polymarket:
+            data["polymarket"] = polymarket.get_orders(
+                market_slug=args.get("market_id"), status=status
+            )
+        return _text(data)
+
+    @tool(
+        "place_order",
+        "Place order(s) on an exchange. Pass multiple orders for batch execution. "
+        "All prices in cents (1-99), action is 'buy'/'sell', side is 'yes'/'no'. "
+        f"Kalshi max ${config.kalshi_max_position_usd}/position, "
+        f"Polymarket max ${config.polymarket_max_position_usd}/position.",
+        {
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "orders": {
+                "type": "array",
+                "description": (
+                    "Array of orders. Each: {market_id, action, side, quantity, "
+                    "price_cents, type?}. type defaults to 'limit'."
+                ),
+            },
+        },
+    )
     async def place_order(args: dict) -> dict:
+        exchange = _require_exchange(args, polymarket)
+        orders = args.get("orders", [])
+        if not orders:
+            raise ValueError("orders array cannot be empty")
+
+        if exchange == "kalshi":
+            if len(orders) == 1:
+                o = orders[0]
+                return _text(
+                    kalshi.create_order(
+                        ticker=o["market_id"],
+                        action=o["action"],
+                        side=o["side"],
+                        count=o["quantity"],
+                        order_type=o.get("type", "limit"),
+                        yes_price=o["price_cents"] if o["side"] == "yes" else None,
+                        no_price=o["price_cents"] if o["side"] == "no" else None,
+                    )
+                )
+            # Batch create for multiple orders
+            batch = []
+            for o in orders:
+                batch.append(
+                    {
+                        "ticker": o["market_id"],
+                        "action": o["action"],
+                        "side": o["side"],
+                        "count": o["quantity"],
+                        "type": o.get("type", "limit"),
+                        **(
+                            {"yes_price": o["price_cents"]}
+                            if o["side"] == "yes"
+                            else {"no_price": o["price_cents"]}
+                        ),
+                    }
+                )
+            return _text(kalshi.batch_create_orders(batch))
+
+        # Polymarket
+        if len(orders) > 1:
+            raise ValueError("Polymarket does not support batch orders — submit one at a time")
+        o = orders[0]
+        intent_key = (o["action"].lower(), o["side"].lower())
+        intent = _PM_INTENT_MAP.get(intent_key)
+        if not intent:
+            raise ValueError(
+                f"Invalid action+side: {o['action']}+{o['side']}. Use buy/sell + yes/no."
+            )
         return _text(
-            client.create_order(
-                slug=args["slug"],
-                intent=args["intent"],
-                price=args["price"],
-                quantity=args["quantity"],
-                order_type=args.get("order_type", "ORDER_TYPE_LIMIT"),
-                tif=args.get("tif", "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
+            polymarket.create_order(
+                slug=o["market_id"],
+                intent=intent,
+                price=_cents_to_usd(o["price_cents"]),
+                quantity=o["quantity"],
+                order_type=o.get("type", "ORDER_TYPE_LIMIT"),
+            )
+        )
+
+    @tool(
+        "amend_order",
+        "Amend a resting order's price or quantity. Kalshi only — preserves FIFO queue position.",
+        {
+            "order_id": {"type": "string", "description": "Order ID to amend"},
+            "price_cents": {
+                "type": "integer",
+                "description": "New price in cents",
+                "optional": True,
+            },
+            "quantity": {
+                "type": "integer",
+                "description": "New quantity",
+                "optional": True,
+            },
+        },
+    )
+    async def amend_order(args: dict) -> dict:
+        return _text(
+            kalshi.amend_order(
+                args["order_id"],
+                price=args.get("price_cents"),
+                count=args.get("quantity"),
             )
         )
 
     @tool(
         "cancel_order",
-        "Cancel an open order on Polymarket US by order ID.",
+        "Cancel order(s). Pass multiple IDs for batch cancel.",
         {
-            "order_id": {"type": "string", "description": "Order ID to cancel"},
-            "slug": {
-                "type": "string",
-                "description": "Market slug for the order",
-                "optional": True,
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
+            "order_ids": {
+                "type": "array",
+                "description": "Array of order ID strings to cancel",
             },
         },
     )
     async def cancel_order(args: dict) -> dict:
-        return _text(client.cancel_order(args["order_id"], slug=args.get("slug", "")))
+        exchange = _require_exchange(args, polymarket)
+        ids = args.get("order_ids", [])
+        if not ids:
+            raise ValueError("order_ids cannot be empty")
+
+        if exchange == "kalshi":
+            if len(ids) == 1:
+                return _text(kalshi.cancel_order(ids[0]))
+            return _text(kalshi.batch_cancel_orders(ids))
+
+        # Polymarket: cancel one at a time
+        results = []
+        for oid in ids:
+            results.append(polymarket.cancel_order(oid))
+        return _text(results)
 
     return [
         search_markets,
-        get_market_details,
+        get_market,
         get_orderbook,
         get_event,
+        get_price_history,
         get_trades,
         get_portfolio,
+        get_orders,
         place_order,
+        amend_order,
         cancel_order,
     ]
 
 
 def create_db_tools(db: AgentDatabase) -> list:
-    """Create MCP tool definitions for database access."""
+    """Database tools for agent persistence."""
 
     @tool(
         "db_query",
-        "Execute a read-only SQL SELECT query against the agent database. "
+        "Execute a read-only SQL SELECT against the agent database. "
         "Tables: market_snapshots, events, signals, trades, predictions, "
-        "portfolio_snapshots, sessions, watchlist. Returns list of row dicts.",
+        "portfolio_snapshots, sessions, watchlist.",
         {
-            "sql": {
-                "type": "string",
-                "description": "SQL SELECT query to execute",
-            },
+            "sql": {"type": "string", "description": "SQL SELECT query"},
         },
     )
     async def db_query(args: dict) -> dict:
-        rows = db.query(args["sql"])
-        return _text(rows)
+        return _text(db.query(args["sql"]))
 
     @tool(
         "db_log_prediction",
-        "Log a probability prediction for a market. Used for calibration tracking.",
+        "Record a probability prediction for calibration tracking.",
         {
-            "market_ticker": {
+            "market_ticker": {"type": "string", "description": "Market ticker or slug"},
+            "exchange": {
                 "type": "string",
-                "description": "Kalshi market ticker",
+                "description": "'kalshi' or 'polymarket'",
+                "optional": True,
             },
             "prediction": {
                 "type": "number",
@@ -442,37 +495,11 @@ def create_db_tools(db: AgentDatabase) -> list:
         return _text({"prediction_id": pred_id, "status": "logged"})
 
     @tool(
-        "db_resolve_predictions",
-        "Resolve predictions by checking settled markets. "
-        "Pass a list of {prediction_id, outcome} pairs.",
-        {
-            "resolutions": {
-                "type": "array",
-                "description": "List of {prediction_id: int, outcome: int (1=yes, 0=no)}",
-            },
-        },
-    )
-    async def db_resolve_predictions(args: dict) -> dict:
-        resolved = 0
-        for r in args.get("resolutions", []):
-            db.resolve_prediction(r["prediction_id"], r["outcome"])
-            resolved += 1
-        return _text({"resolved": resolved})
-
-    @tool(
-        "db_get_session_state",
-        "Get session state for startup: last session summary, pending signals, "
-        "unresolved predictions, watchlist, portfolio delta, recent trades.",
-        {},
-    )
-    async def db_get_session_state(args: dict) -> dict:
-        return _text(db.get_session_state())
-
-    @tool(
         "db_add_watchlist",
         "Add a market to the watchlist for tracking across sessions.",
         {
-            "ticker": {"type": "string", "description": "Market ticker to watch"},
+            "market_id": {"type": "string", "description": "Market ticker or slug"},
+            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
             "reason": {
                 "type": "string",
                 "description": "Why you're watching this market",
@@ -487,26 +514,36 @@ def create_db_tools(db: AgentDatabase) -> list:
     )
     async def db_add_watchlist(args: dict) -> dict:
         db.add_to_watchlist(
-            ticker=args["ticker"],
+            ticker=args["market_id"],
+            exchange=args.get("exchange", "kalshi"),
             reason=args.get("reason"),
             alert_condition=args.get("alert_condition"),
         )
-        return _text({"status": "added", "ticker": args["ticker"]})
+        return _text({"status": "added", "market_id": args["market_id"]})
 
     @tool(
         "db_remove_watchlist",
         "Remove a market from the watchlist.",
-        {"ticker": {"type": "string", "description": "Market ticker to remove"}},
+        {
+            "market_id": {"type": "string", "description": "Market ticker or slug"},
+            "exchange": {
+                "type": "string",
+                "description": "'kalshi' or 'polymarket'. Omit to remove from all.",
+                "optional": True,
+            },
+        },
     )
     async def db_remove_watchlist(args: dict) -> dict:
-        db.remove_from_watchlist(args["ticker"])
-        return _text({"status": "removed", "ticker": args["ticker"]})
+        exchange = args.get("exchange")
+        if exchange:
+            db.remove_from_watchlist(args["market_id"], exchange=exchange)
+        else:
+            db.remove_from_watchlist(args["market_id"])
+        return _text({"status": "removed", "market_id": args["market_id"]})
 
     return [
         db_query,
         db_log_prediction,
-        db_resolve_predictions,
-        db_get_session_state,
         db_add_watchlist,
         db_remove_watchlist,
     ]

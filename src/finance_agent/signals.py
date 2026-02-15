@@ -6,9 +6,12 @@ Reads from SQLite (market_snapshots, events), writes to signals table.
 
 Scans:
 - Arbitrage: bracket price sums != ~100%
-- Spread: wide spreads with volume
+- Wide spread: wide spreads with volume (limit order at mid captures half-spread)
 - Cross-platform mismatch: same market, different prices on Kalshi vs Polymarket
 - Structural arb: Kalshi brackets vs Polymarket individual markets
+- Theta decay: near-expiry markets with uncertain prices
+- Momentum: consistent directional price movement
+- Calibration: meta-signal from prediction accuracy (10+ resolved required)
 """
 
 from __future__ import annotations
@@ -90,8 +93,12 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     return signals
 
 
-def _generate_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find markets with wide spreads and decent volume -- market-making opportunities."""
+def _generate_wide_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Find markets with wide spreads and decent volume.
+
+    Strategy: place limit order at mid to capture half-spread as edge.
+    Not market-making — single directional limit order.
+    """
     signals = []
 
     markets = db.query(
@@ -119,7 +126,7 @@ def _generate_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
 
         signals.append(
             {
-                "scan_type": "spread",
+                "scan_type": "wide_spread",
                 "ticker": m["ticker"],
                 "signal_strength": min(1.0, liq_score),
                 "estimated_edge_pct": spread / 2,
@@ -269,11 +276,194 @@ def _generate_structural_arb_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     return signals
 
 
+def _generate_theta_decay_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Find near-expiry markets with uncertain prices.
+
+    Markets with <3 days to expiration and mid_price between 20-80 cents
+    are converging rapidly. Signal strength = proximity to expiry * distance from 50%.
+    """
+    signals = []
+
+    markets = db.query(
+        """SELECT ticker, exchange, title, mid_price_cents, days_to_expiration,
+                  yes_bid, yes_ask, volume
+           FROM market_snapshots
+           WHERE status = 'open'
+             AND days_to_expiration IS NOT NULL
+             AND days_to_expiration < 3
+             AND mid_price_cents BETWEEN 20 AND 80
+           GROUP BY ticker HAVING captured_at = MAX(captured_at)
+           ORDER BY days_to_expiration ASC
+           LIMIT 30"""
+    )
+
+    for m in markets:
+        dte = m["days_to_expiration"]
+        mid = m["mid_price_cents"]
+        dist_from_50 = abs(mid - 50) / 50  # 0 at 50, 1 at 0/100
+
+        # Higher signal when closer to expiry AND price is away from 50
+        strength = min(1.0, (1 - dte / 3) * dist_from_50 * 2)
+        if strength < 0.2:
+            continue
+
+        signals.append(
+            {
+                "scan_type": "theta_decay",
+                "ticker": m["ticker"],
+                "exchange": m["exchange"],
+                "signal_strength": round(strength, 3),
+                "estimated_edge_pct": round(dist_from_50 * 10, 2),
+                "details_json": {
+                    "title": m["title"],
+                    "mid_price_cents": mid,
+                    "days_to_expiration": round(dte, 2),
+                    "dist_from_50": round(dist_from_50, 3),
+                    "yes_bid": m["yes_bid"],
+                    "yes_ask": m["yes_ask"],
+                    "volume": m["volume"],
+                },
+            }
+        )
+
+    return signals
+
+
+def _generate_momentum_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Find markets with consistent directional price movement.
+
+    Markets with 3+ snapshots in 48h showing >5 cent consistent direction.
+    Useful for confirming/rejecting cross-platform mismatches.
+    """
+    signals = []
+
+    # Get markets with multiple recent snapshots
+    candidates = db.query(
+        """SELECT ticker, exchange, title,
+                  GROUP_CONCAT(mid_price_cents) as prices,
+                  COUNT(*) as snap_count,
+                  MIN(mid_price_cents) as min_price,
+                  MAX(mid_price_cents) as max_price
+           FROM market_snapshots
+           WHERE status = 'open'
+             AND mid_price_cents IS NOT NULL
+             AND captured_at > datetime('now', '-48 hours')
+           GROUP BY ticker
+           HAVING COUNT(*) >= 3
+           ORDER BY (MAX(mid_price_cents) - MIN(mid_price_cents)) DESC
+           LIMIT 30"""
+    )
+
+    for m in candidates:
+        prices_str = m["prices"]
+        if not prices_str:
+            continue
+        prices = [int(p) for p in prices_str.split(",") if p.strip()]
+        if len(prices) < 3:
+            continue
+
+        move = prices[-1] - prices[0]
+        abs_move = abs(move)
+
+        if abs_move < 5:
+            continue
+
+        # Check consistency: are most moves in the same direction?
+        same_dir = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i - 1]) * move > 0)
+        consistency = same_dir / (len(prices) - 1)
+
+        if consistency < 0.6:
+            continue
+
+        strength = min(1.0, abs_move / 20 * consistency)
+
+        signals.append(
+            {
+                "scan_type": "momentum",
+                "ticker": m["ticker"],
+                "exchange": m["exchange"],
+                "signal_strength": round(strength, 3),
+                "estimated_edge_pct": round(abs_move / 2, 2),
+                "details_json": {
+                    "title": m["title"],
+                    "direction": "up" if move > 0 else "down",
+                    "move_cents": move,
+                    "snapshots": len(prices),
+                    "consistency": round(consistency, 2),
+                    "first_price": prices[0],
+                    "last_price": prices[-1],
+                },
+            }
+        )
+
+    return signals
+
+
+def _generate_calibration_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Meta-signal from prediction accuracy.
+
+    Only runs when 10+ predictions have been resolved. Reports Brier score
+    and per-bucket calibration so the agent can adjust its confidence.
+    """
+    resolved = db.query(
+        """SELECT prediction, outcome
+           FROM predictions
+           WHERE outcome IS NOT NULL"""
+    )
+
+    if len(resolved) < 10:
+        return []
+
+    # Brier score
+    brier = sum((r["prediction"] - r["outcome"]) ** 2 for r in resolved) / len(resolved)
+
+    # Bucket calibration (0-0.2, 0.2-0.4, 0.4-0.6, 0.6-0.8, 0.8-1.0)
+    buckets: dict[str, dict] = {}
+    for label, lo, hi in [
+        ("0-20%", 0.0, 0.2),
+        ("20-40%", 0.2, 0.4),
+        ("40-60%", 0.4, 0.6),
+        ("60-80%", 0.6, 0.8),
+        ("80-100%", 0.8, 1.01),
+    ]:
+        in_bucket = [r for r in resolved if lo <= r["prediction"] < hi]
+        if in_bucket:
+            avg_pred = sum(r["prediction"] for r in in_bucket) / len(in_bucket)
+            avg_outcome = sum(r["outcome"] for r in in_bucket) / len(in_bucket)
+            buckets[label] = {
+                "count": len(in_bucket),
+                "avg_prediction": round(avg_pred, 3),
+                "avg_outcome": round(avg_outcome, 3),
+                "calibration_error": round(abs(avg_pred - avg_outcome), 3),
+            }
+
+    # Signal strength: inverse of Brier score (lower = better calibrated)
+    strength = max(0.1, 1.0 - brier * 4)
+
+    return [
+        {
+            "scan_type": "calibration",
+            "ticker": "META_CALIBRATION",
+            "exchange": "meta",
+            "signal_strength": round(strength, 3),
+            "estimated_edge_pct": round((1 - brier) * 100, 1),
+            "details_json": {
+                "brier_score": round(brier, 4),
+                "total_predictions": len(resolved),
+                "buckets": buckets,
+            },
+        }
+    ]
+
+
 _SCANS: list[tuple[str, Any]] = [
     ("arbitrage", _generate_arbitrage_signals),
-    ("spread", _generate_spread_signals),
+    ("wide_spread", _generate_wide_spread_signals),
     ("cross_platform_mismatch", _generate_cross_platform_mismatch_signals),
     ("structural_arb", _generate_structural_arb_signals),
+    ("theta_decay", _generate_theta_decay_signals),
+    ("momentum", _generate_momentum_signals),
+    ("calibration", _generate_calibration_signals),
 ]
 
 

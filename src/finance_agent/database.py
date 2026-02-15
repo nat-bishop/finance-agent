@@ -43,13 +43,15 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 
 -- Event structure (for cross-market analysis)
 CREATE TABLE IF NOT EXISTS events (
-    event_ticker TEXT PRIMARY KEY,
+    event_ticker TEXT NOT NULL,
+    exchange TEXT NOT NULL DEFAULT 'kalshi',
     series_ticker TEXT,
     title TEXT,
     category TEXT,
     mutually_exclusive INTEGER,
     last_updated TEXT,
-    markets_json TEXT
+    markets_json TEXT,
+    PRIMARY KEY (event_ticker, exchange)
 );
 
 -- Pre-computed signals (populated by signal generator)
@@ -68,11 +70,11 @@ CREATE TABLE IF NOT EXISTS signals (
     session_id TEXT
 );
 
--- Agent's trades
+-- Agent's trades (lean schema)
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
-    exchange TEXT NOT NULL DEFAULT 'kalshi',
+    exchange TEXT NOT NULL,
     timestamp TEXT NOT NULL,
     ticker TEXT NOT NULL,
     action TEXT NOT NULL,
@@ -82,10 +84,6 @@ CREATE TABLE IF NOT EXISTS trades (
     order_type TEXT,
     order_id TEXT,
     status TEXT,
-    thesis TEXT,
-    strategy TEXT,
-    edge_pct REAL,
-    kelly_fraction REAL,
     result_json TEXT
 );
 
@@ -140,16 +138,24 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_series
     ON market_snapshots(series_ticker);
 CREATE INDEX IF NOT EXISTS idx_snapshots_category
     ON market_snapshots(category);
+CREATE INDEX IF NOT EXISTS idx_snapshots_exchange
+    ON market_snapshots(exchange);
+CREATE INDEX IF NOT EXISTS idx_snapshots_exchange_status
+    ON market_snapshots(exchange, status);
 CREATE INDEX IF NOT EXISTS idx_signals_pending
     ON signals(status) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_signals_type
     ON signals(scan_type);
+CREATE INDEX IF NOT EXISTS idx_signals_exchange
+    ON signals(exchange);
 CREATE INDEX IF NOT EXISTS idx_trades_ticker
     ON trades(ticker);
+CREATE INDEX IF NOT EXISTS idx_trades_session
+    ON trades(session_id);
+CREATE INDEX IF NOT EXISTS idx_trades_status
+    ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_predictions_unresolved
     ON predictions(outcome) WHERE outcome IS NULL;
-CREATE INDEX IF NOT EXISTS idx_snapshots_exchange
-    ON market_snapshots(exchange);
 """
 
 
@@ -185,6 +191,7 @@ class AgentDatabase:
             ("trades", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
             ("signals", "exchange", "TEXT DEFAULT 'kalshi'"),
             ("watchlist", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
+            ("events", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -246,7 +253,7 @@ class AgentDatabase:
             (now, summary, trades_placed, pnl_usd, session_id),
         )
 
-    # ── Trades ───────────────────────────────────────────────────
+    # ── Trades (lean schema) ─────────────────────────────────────
 
     def log_trade(
         self,
@@ -259,10 +266,6 @@ class AgentDatabase:
         order_type: str | None = None,
         order_id: str | None = None,
         status: str | None = None,
-        thesis: str | None = None,
-        strategy: str | None = None,
-        edge_pct: float | None = None,
-        kelly_fraction: float | None = None,
         result_json: str | None = None,
         exchange: str = "kalshi",
     ) -> int:
@@ -271,9 +274,8 @@ class AgentDatabase:
         cursor = self.execute(
             """INSERT INTO trades
                (session_id, exchange, timestamp, ticker, action, side, count, price_cents,
-                order_type, order_id, status, thesis, strategy, edge_pct,
-                kelly_fraction, result_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                order_type, order_id, status, result_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 exchange,
@@ -286,10 +288,6 @@ class AgentDatabase:
                 order_type,
                 order_id,
                 status,
-                thesis,
-                strategy,
-                edge_pct,
-                kelly_fraction,
                 result_json,
             ),
         )
@@ -323,6 +321,47 @@ class AgentDatabase:
             "UPDATE predictions SET outcome = ?, resolved_at = ? WHERE id = ?",
             (outcome, now, prediction_id),
         )
+
+    def auto_resolve_predictions(self) -> list[dict[str, Any]]:
+        """Auto-resolve unresolved predictions by matching against settled market_snapshots.
+
+        Returns list of newly resolved predictions for startup context.
+        """
+        unresolved = self.query(
+            """SELECT p.id, p.market_ticker, p.prediction
+               FROM predictions p
+               WHERE p.outcome IS NULL"""
+        )
+        if not unresolved:
+            return []
+
+        resolved = []
+        now = datetime.now(UTC).isoformat()
+        for pred in unresolved:
+            ticker = pred["market_ticker"]
+            settled = self.query(
+                """SELECT settlement_value
+                   FROM market_snapshots
+                   WHERE ticker = ? AND status = 'settled' AND settlement_value IS NOT NULL
+                   ORDER BY captured_at DESC LIMIT 1""",
+                (ticker,),
+            )
+            if settled:
+                outcome = settled[0]["settlement_value"]
+                self.execute(
+                    "UPDATE predictions SET outcome = ?, resolved_at = ? WHERE id = ?",
+                    (outcome, now, pred["id"]),
+                )
+                resolved.append(
+                    {
+                        "prediction_id": pred["id"],
+                        "market_ticker": ticker,
+                        "prediction": pred["prediction"],
+                        "outcome": outcome,
+                        "correct": (pred["prediction"] >= 0.5) == (outcome == 1),
+                    }
+                )
+        return resolved
 
     # ── Portfolio snapshots ──────────────────────────────────────
 
@@ -387,6 +426,7 @@ class AgentDatabase:
     def upsert_event(
         self,
         event_ticker: str,
+        exchange: str = "kalshi",
         series_ticker: str | None = None,
         title: str | None = None,
         category: str | None = None,
@@ -396,10 +436,10 @@ class AgentDatabase:
         now = datetime.now(UTC).isoformat()
         self.execute(
             """INSERT INTO events
-               (event_ticker, series_ticker, title, category, mutually_exclusive,
+               (event_ticker, exchange, series_ticker, title, category, mutually_exclusive,
                 last_updated, markets_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(event_ticker) DO UPDATE SET
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(event_ticker, exchange) DO UPDATE SET
                  series_ticker = excluded.series_ticker,
                  title = excluded.title,
                  category = excluded.category,
@@ -408,6 +448,7 @@ class AgentDatabase:
                  markets_json = excluded.markets_json""",
             (
                 event_ticker,
+                exchange,
                 series_ticker,
                 title,
                 category,
@@ -480,8 +521,13 @@ class AgentDatabase:
             (ticker, exchange, now, reason, alert_condition),
         )
 
-    def remove_from_watchlist(self, ticker: str) -> None:
-        self.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
+    def remove_from_watchlist(self, ticker: str, exchange: str | None = None) -> None:
+        if exchange:
+            self.execute(
+                "DELETE FROM watchlist WHERE ticker = ? AND exchange = ?", (ticker, exchange)
+            )
+        else:
+            self.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
 
     # ── Session state (for startup) ──────────────────────────────
 
@@ -495,9 +541,9 @@ class AgentDatabase:
         )
         last_session = last_sessions[0] if last_sessions else None
 
-        # Pending signals (top 10 by strength)
+        # Pending signals (top 10 by strength, include exchange)
         pending_signals = self.query(
-            """SELECT scan_type, ticker, event_ticker, signal_strength,
+            """SELECT scan_type, exchange, ticker, event_ticker, signal_strength,
                       estimated_edge_pct, details_json
                FROM signals WHERE status = 'pending'
                ORDER BY signal_strength DESC LIMIT 10"""
@@ -510,8 +556,8 @@ class AgentDatabase:
                ORDER BY created_at DESC LIMIT 20"""
         )
 
-        # Watchlist
-        watchlist = self.query("SELECT ticker, reason, alert_condition FROM watchlist")
+        # Watchlist (include exchange)
+        watchlist = self.query("SELECT ticker, exchange, reason, alert_condition FROM watchlist")
 
         # Portfolio delta (last two snapshots)
         snapshots = self.query(
@@ -532,10 +578,18 @@ class AgentDatabase:
                 "latest_balance": snapshots[0]["balance_usd"],
             }
 
-        # Recent trades
+        # Recent trades (include exchange)
         recent_trades = self.query(
-            """SELECT ticker, action, side, count, price_cents, status, thesis
+            """SELECT exchange, ticker, action, side, count, price_cents, status
                FROM trades ORDER BY timestamp DESC LIMIT 5"""
+        )
+
+        # Unreconciled trades (placed but not confirmed from recent sessions)
+        unreconciled = self.query(
+            """SELECT exchange, ticker, action, side, count, price_cents, order_id
+               FROM trades
+               WHERE status = 'placed'
+               ORDER BY timestamp DESC LIMIT 10"""
         )
 
         return {
@@ -545,6 +599,7 @@ class AgentDatabase:
             "watchlist": watchlist,
             "portfolio_delta": portfolio_delta,
             "recent_trades": recent_trades,
+            "unreconciled_trades": unreconciled,
         }
 
     # ── Backup ───────────────────────────────────────────────────

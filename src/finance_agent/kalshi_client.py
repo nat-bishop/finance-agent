@@ -55,13 +55,15 @@ class KalshiAPIClient(BaseAPIClient):
         kwargs: dict[str, Any] = {
             "limit": limit,
             **_optional(
-                tickers=query,
                 status=status,
                 series_ticker=series_ticker,
                 event_ticker=event_ticker,
                 cursor=cursor,
             ),
         }
+        # query is a keyword search — NOT the tickers param (which filters by exact ticker)
+        if query:
+            kwargs["query"] = query
         return self._to_dict(self._client.get_markets(**kwargs))
 
     def get_market(self, ticker: str) -> dict[str, Any]:
@@ -194,3 +196,50 @@ class KalshiAPIClient(BaseAPIClient):
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         self._rate_write()
         return self._to_dict(self._client.cancel_order(order_id))
+
+    # -- Batch operations --
+
+    def batch_create_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
+        """Batch create up to 20 orders. Each dict follows CreateOrderRequest fields."""
+        self._rate_write()
+        reqs = [CreateOrderRequest(**o) for o in orders]
+        return self._to_dict(self._client.batch_create_orders(reqs))
+
+    def batch_cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
+        self._rate_write()
+        return self._to_dict(self._client.batch_cancel_orders(order_ids))
+
+    def amend_order(
+        self,
+        order_id: str,
+        *,
+        price: int | None = None,
+        count: int | None = None,
+    ) -> dict[str, Any]:
+        self._rate_write()
+        kwargs = _optional(price=price, count=count)
+        return self._to_dict(self._client.amend_order(order_id, **kwargs))
+
+    # -- Exchange status --
+
+    def get_exchange_status(self) -> dict[str, Any]:
+        self._rate_read()
+        return self._to_dict(self._client.get_exchange_status())
+
+    # -- Events (paginated) --
+
+    def get_events(
+        self,
+        *,
+        status: str | None = None,
+        with_nested_markets: bool = True,
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        self._rate_read()
+        kwargs: dict[str, Any] = {
+            "limit": limit,
+            "with_nested_markets": with_nested_markets,
+            **_optional(status=status, cursor=cursor),
+        }
+        return self._to_dict(self._client.get_events(**kwargs))

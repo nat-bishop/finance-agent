@@ -35,7 +35,7 @@ class TradingConfig(BaseSettings):
     kalshi_private_key_path: str = "/workspace/keys/private_key.pem"
     kalshi_env: Literal["demo", "prod"] = "demo"
 
-    max_position_usd: float = 50.0
+    kalshi_max_position_usd: float = 50.0
     max_portfolio_usd: float = 500.0
     max_order_count: int = 100
     min_edge_pct: float = 5.0
@@ -54,7 +54,7 @@ class TradingConfig(BaseSettings):
     polymarket_enabled: bool = False
 
     # Polymarket limits & fees
-    polymarket_fee_rate: float = 0.001  # 0.10% taker, 0% maker
+    polymarket_fee_rate: float = 0.0  # 0% maker, 0% taker on Polymarket US
     polymarket_max_position_usd: float = 50.0
 
     @property
@@ -153,7 +153,7 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
     """Load system.md and substitute {{VARIABLE}} placeholders from config."""
     raw = load_prompt("system")
     variables = {
-        "MAX_POSITION_USD": trading_config.max_position_usd,
+        "KALSHI_MAX_POSITION_USD": trading_config.kalshi_max_position_usd,
         "MAX_PORTFOLIO_USD": trading_config.max_portfolio_usd,
         "MAX_ORDER_COUNT": trading_config.max_order_count,
         "MIN_EDGE_PCT": trading_config.min_edge_pct,

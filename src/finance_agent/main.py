@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -20,26 +21,25 @@ from .hooks import create_audit_hooks
 from .kalshi_client import KalshiAPIClient
 from .permissions import create_permission_handler
 from .polymarket_client import PolymarketAPIClient
-from .tools import create_db_tools, create_kalshi_tools, create_polymarket_tools
+from .tools import create_db_tools, create_market_tools
 
-# Tools that are always allowed regardless of platform configuration
-_STATIC_TOOLS = [
-    # Kalshi MCP tools
-    "mcp__kalshi__search_markets",
-    "mcp__kalshi__get_market_details",
-    "mcp__kalshi__get_orderbook",
-    "mcp__kalshi__get_event",
-    "mcp__kalshi__get_price_history",
-    "mcp__kalshi__get_recent_trades",
-    "mcp__kalshi__get_portfolio",
-    "mcp__kalshi__get_open_orders",
-    "mcp__kalshi__place_order",
-    "mcp__kalshi__cancel_order",
+# Tools allowed regardless of platform configuration
+_ALLOWED_TOOLS = [
+    # Unified market MCP tools
+    "mcp__markets__search_markets",
+    "mcp__markets__get_market",
+    "mcp__markets__get_orderbook",
+    "mcp__markets__get_event",
+    "mcp__markets__get_price_history",
+    "mcp__markets__get_trades",
+    "mcp__markets__get_portfolio",
+    "mcp__markets__get_orders",
+    "mcp__markets__place_order",
+    "mcp__markets__amend_order",
+    "mcp__markets__cancel_order",
     # Database MCP tools
     "mcp__db__db_query",
     "mcp__db__db_log_prediction",
-    "mcp__db__db_resolve_predictions",
-    "mcp__db__db_get_session_state",
     "mcp__db__db_add_watchlist",
     "mcp__db__db_remove_watchlist",
     # Filesystem + interaction
@@ -52,17 +52,6 @@ _STATIC_TOOLS = [
     "AskUserQuestion",
 ]
 
-_POLYMARKET_TOOLS = [
-    "mcp__polymarket__search_markets",
-    "mcp__polymarket__get_market_details",
-    "mcp__polymarket__get_orderbook",
-    "mcp__polymarket__get_event",
-    "mcp__polymarket__get_trades",
-    "mcp__polymarket__get_portfolio",
-    "mcp__polymarket__place_order",
-    "mcp__polymarket__cancel_order",
-]
-
 
 def build_options(
     agent_config: AgentConfig,
@@ -70,12 +59,9 @@ def build_options(
     mcp_servers: dict,
     db: AgentDatabase,
     session_id: str,
-    polymarket_enabled: bool = False,
     workspace: str = "/workspace",
 ) -> ClaudeAgentOptions:
     """Assemble ClaudeAgentOptions from configs."""
-    allowed = [*_STATIC_TOOLS, *(_POLYMARKET_TOOLS if polymarket_enabled else [])]
-
     return ClaudeAgentOptions(
         system_prompt={
             "type": "preset",
@@ -85,7 +71,7 @@ def build_options(
         model=agent_config.model,
         cwd=workspace,
         mcp_servers=mcp_servers,
-        allowed_tools=allowed,
+        allowed_tools=_ALLOWED_TOOLS,
         can_use_tool=create_permission_handler(
             workspace_path=workspace,
             permissions=agent_config.permissions,
@@ -113,17 +99,30 @@ async def run_repl() -> None:
 
     session_id = db.create_session(profile=agent_config.profile)
 
+    # Auto-resolve predictions against settled markets
+    resolved = db.auto_resolve_predictions()
+
+    # Build startup context (injected into BEGIN_SESSION, no tool call needed)
+    startup_state = db.get_session_state()
+    if resolved:
+        startup_state["newly_resolved_predictions"] = resolved
+
     # Clear session scratch file
     session_log = Path("/workspace/data/session.log")
     session_log.parent.mkdir(parents=True, exist_ok=True)
     session_log.write_text("", encoding="utf-8")
 
-    # Build MCP servers
+    # Build MCP servers — unified "markets" server
+    polymarket_enabled = trading_config.polymarket_enabled and bool(
+        trading_config.polymarket_key_id
+    )
+    pm_client = PolymarketAPIClient(trading_config) if polymarket_enabled else None
+
     mcp_servers: dict = {
-        "kalshi": create_sdk_mcp_server(
-            name="kalshi",
+        "markets": create_sdk_mcp_server(
+            name="markets",
             version="1.0.0",
-            tools=create_kalshi_tools(kalshi, trading_config),
+            tools=create_market_tools(kalshi, pm_client, trading_config),
         ),
         "db": create_sdk_mcp_server(
             name="db",
@@ -132,20 +131,7 @@ async def run_repl() -> None:
         ),
     }
 
-    polymarket_enabled = trading_config.polymarket_enabled and bool(
-        trading_config.polymarket_key_id
-    )
-    if polymarket_enabled:
-        pm_client = PolymarketAPIClient(trading_config)
-        mcp_servers["polymarket"] = create_sdk_mcp_server(
-            name="polymarket",
-            version="1.0.0",
-            tools=create_polymarket_tools(pm_client, trading_config),
-        )
-
-    options = build_options(
-        agent_config, trading_config, mcp_servers, db, session_id, polymarket_enabled
-    )
+    options = build_options(agent_config, trading_config, mcp_servers, db, session_id)
 
     # Startup banner
     print("Cross-Platform Prediction Market Arbitrage Agent")
@@ -154,7 +140,7 @@ async def run_repl() -> None:
     if polymarket_enabled:
         print("Polymarket: enabled")
         print(f"Max position: ${trading_config.polymarket_max_position_usd} (Polymarket)")
-    print(f"Max position: ${trading_config.max_position_usd} (Kalshi)")
+    print(f"Max position: ${trading_config.kalshi_max_position_usd} (Kalshi)")
     print(f"Max portfolio: ${trading_config.max_portfolio_usd}")
     print(f"Session: {session_id}")
     print("Type 'quit' or 'exit' to stop.\n")
@@ -174,8 +160,9 @@ async def run_repl() -> None:
                         print(f"  [error: {msg.result}]")
             print()
 
-        # Send BEGIN_SESSION to trigger startup protocol
-        await client.query("BEGIN_SESSION")
+        # Send BEGIN_SESSION with injected startup context
+        startup_msg = f"BEGIN_SESSION\n\n{json.dumps(startup_state, indent=2)}"
+        await client.query(startup_msg)
         await handle_response()
 
         while True:

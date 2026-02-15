@@ -11,27 +11,18 @@ from .config import PermissionConfig, TradingConfig
 
 # Tools that are always auto-approved (reads + DB + filesystem)
 _READ_TOOLS = {
-    # Kalshi reads
-    "mcp__kalshi__search_markets",
-    "mcp__kalshi__get_market_details",
-    "mcp__kalshi__get_orderbook",
-    "mcp__kalshi__get_event",
-    "mcp__kalshi__get_price_history",
-    "mcp__kalshi__get_recent_trades",
-    "mcp__kalshi__get_portfolio",
-    "mcp__kalshi__get_open_orders",
-    # Polymarket reads
-    "mcp__polymarket__search_markets",
-    "mcp__polymarket__get_market_details",
-    "mcp__polymarket__get_orderbook",
-    "mcp__polymarket__get_event",
-    "mcp__polymarket__get_trades",
-    "mcp__polymarket__get_portfolio",
+    # Unified market reads
+    "mcp__markets__search_markets",
+    "mcp__markets__get_market",
+    "mcp__markets__get_orderbook",
+    "mcp__markets__get_event",
+    "mcp__markets__get_price_history",
+    "mcp__markets__get_trades",
+    "mcp__markets__get_portfolio",
+    "mcp__markets__get_orders",
     # Database
     "mcp__db__db_query",
-    "mcp__db__db_get_session_state",
     "mcp__db__db_log_prediction",
-    "mcp__db__db_resolve_predictions",
     "mcp__db__db_add_watchlist",
     "mcp__db__db_remove_watchlist",
     # Filesystem reads
@@ -101,70 +92,73 @@ def create_permission_handler(
                 updated_input={"questions": input_data.get("questions", []), "answers": answers}
             )
 
-        # -- place_order: enforce trading limits (both platforms) --
-        if tool_name == "mcp__kalshi__place_order":
-            count = input_data.get("count", 0)
-            yes_price = input_data.get("yes_price", 0) or 0
-            no_price = input_data.get("no_price", 0) or 0
-            price = max(yes_price, no_price)
-            cost_usd = (count * price) / 100
+        # -- place_order: enforce trading limits (unified) --
+        if tool_name == "mcp__markets__place_order":
+            exchange = input_data.get("exchange", "kalshi")
+            orders = input_data.get("orders", [])
 
-            if count > trading_config.max_order_count:
-                return _deny(
-                    f"Order count {count} exceeds max {trading_config.max_order_count} contracts"
-                )
-            if cost_usd > trading_config.max_position_usd:
-                return _deny(
-                    f"Position cost ${cost_usd:.2f} exceeds max "
-                    f"${trading_config.max_position_usd:.2f}"
-                )
+            # Per-exchange position limit
+            if exchange == "kalshi":
+                max_pos = trading_config.kalshi_max_position_usd
+            else:
+                max_pos = trading_config.polymarket_max_position_usd
 
-            ticker = input_data.get("ticker", "?")
-            action = input_data.get("action", "?")
-            side = input_data.get("side", "?")
-            order_type = input_data.get("order_type", "limit")
+            total_cost = 0.0
+            for o in orders:
+                price = o.get("price_cents", 0)
+                qty = o.get("quantity", 0)
+                cost = (qty * price) / 100
+                total_cost += cost
 
+                if qty > trading_config.max_order_count:
+                    return _deny(
+                        f"Order qty {qty} exceeds max {trading_config.max_order_count} contracts"
+                    )
+
+            if total_cost > max_pos:
+                return _deny(f"Total cost ${total_cost:.2f} exceeds {exchange} max ${max_pos:.2f}")
+
+            # Format approval prompt
             print(f"\n{'=' * 50}")
-            print(f"  TRADE: {action.upper()} {count}x {side.upper()} on {ticker}")
-            print(f"  Type: {order_type}  |  Price: {price}c  |  Cost: ${cost_usd:.2f}")
+            for o in orders:
+                price = o.get("price_cents", 0)
+                qty = o.get("quantity", 0)
+                cost = (qty * price) / 100
+                print(
+                    f"  {exchange.upper()}: {o.get('action', '?').upper()} "
+                    f"{qty}x {o.get('side', '?').upper()} on {o.get('market_id', '?')}"
+                )
+                print(
+                    f"  Type: {o.get('type', 'limit')}  |  Price: {price}c  |  Cost: ${cost:.2f}"
+                )
             print(f"{'=' * 50}")
 
             if _ask_user("Approve this trade? (y/n): "):
                 return _allow(input_data)
             return _deny("User rejected trade")
 
-        if tool_name == "mcp__polymarket__place_order":
-            price = float(input_data.get("price", "0"))
-            quantity = input_data.get("quantity", 0)
-            cost_usd = quantity * price
-
-            if cost_usd > trading_config.polymarket_max_position_usd:
-                return _deny(
-                    f"Position cost ${cost_usd:.2f} exceeds Polymarket max "
-                    f"${trading_config.polymarket_max_position_usd:.2f}"
-                )
-
-            slug = input_data.get("slug", "?")
-            intent = input_data.get("intent", "?")
-            order_type = input_data.get("order_type", "LIMIT")
-
-            print(f"\n{'=' * 50}")
-            print(f"  POLYMARKET: {intent} {quantity}x on {slug}")
-            print(f"  Type: {order_type}  |  Price: ${price:.2f}  |  Cost: ${cost_usd:.2f}")
-            print(f"{'=' * 50}")
-
-            if _ask_user("Approve this trade? (y/n): "):
-                return _allow(input_data)
-            return _deny("User rejected Polymarket trade")
-
-        # -- cancel_order: approval (both platforms) --
-        if tool_name in ("mcp__kalshi__cancel_order", "mcp__polymarket__cancel_order"):
-            exchange = "Polymarket" if "polymarket" in tool_name else "Kalshi"
+        # -- amend_order: approval --
+        if tool_name == "mcp__markets__amend_order":
             order_id = input_data.get("order_id", "?")
-            print(f"\n{exchange} cancel order: {order_id}")
+            print(f"\nAmend order: {order_id}")
+            if input_data.get("price_cents"):
+                print(f"  New price: {input_data['price_cents']}c")
+            if input_data.get("quantity"):
+                print(f"  New qty: {input_data['quantity']}")
+            if _ask_user("Approve amendment? (y/n): "):
+                return _allow(input_data)
+            return _deny("User rejected amendment")
+
+        # -- cancel_order: approval --
+        if tool_name == "mcp__markets__cancel_order":
+            exchange = input_data.get("exchange", "?")
+            ids = input_data.get("order_ids", [])
+            print(f"\n{exchange.upper()} cancel: {len(ids)} order(s)")
+            for oid in ids[:5]:
+                print(f"  {oid}")
             if _ask_user("Approve cancellation? (y/n): "):
                 return _allow(input_data)
-            return _deny(f"User rejected {exchange} cancellation")
+            return _deny("User rejected cancellation")
 
         # -- Bash: restrict to workspace writable directories --
         if tool_name == "Bash":

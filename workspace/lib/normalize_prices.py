@@ -4,7 +4,7 @@ import argparse
 import json
 
 
-def compare(kalshi_cents, poly_usd, kalshi_fee=0.03, poly_fee=0.001):
+def compare(kalshi_cents, poly_usd, kalshi_fee=0.03, poly_fee=0.0):
     k = kalshi_cents / 100.0
     p = poly_usd
     gross = abs(k - p)
@@ -26,7 +26,7 @@ if __name__ == "__main__":
     ap.add_argument("--kalshi-price", type=int, required=True, help="Kalshi price in cents")
     ap.add_argument("--polymarket-price", type=float, required=True, help="Polymarket USD price")
     ap.add_argument("--kalshi-fee", type=float, default=0.03)
-    ap.add_argument("--polymarket-fee", type=float, default=0.001)
+    ap.add_argument("--polymarket-fee", type=float, default=0.0)
     a = ap.parse_args()
     print(
         json.dumps(

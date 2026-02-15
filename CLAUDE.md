@@ -38,7 +38,7 @@ This is a cross-platform prediction market arbitrage agent for Kalshi and Polyma
 
 **Programmatic layer** (no LLM, runs separately):
 - `collector.py` — snapshots market data from both Kalshi and Polymarket US to SQLite
-- `signals.py` — runs quantitative scans (arbitrage, spread, cross-platform mismatch, structural arb) and writes signals to SQLite
+- `signals.py` — runs 7 quantitative scans (arbitrage, wide_spread, cross-platform mismatch, structural arb, theta_decay, momentum, calibration) and writes signals to SQLite
 - Run via: `make collect && make signals` (or `make scan`)
 
 **Agent layer** (Claude REPL, runs on demand):
@@ -53,25 +53,28 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 
 ### Module roles
 
-- **main.py** — Assembles `ClaudeAgentOptions`, initializes DB, creates session, sends `BEGIN_SESSION` to trigger startup protocol, runs the REPL loop. Conditionally creates Polymarket MCP server.
-- **config.py** — Pydantic settings with TOML profile support (`config.toml` has `[demo]`/`[prod]` sections). Env vars override TOML values. Includes Polymarket config fields. Also loads and templates `prompts/system.md`.
-- **tools.py** — Factory that creates MCP tool definitions via `@tool` decorator. `create_kalshi_tools()`, `create_polymarket_tools()`, and `create_db_tools()`.
-- **kalshi_client.py** — Thin wrapper around `kalshi-python` SDK with rate limiting. Auth is RSA-PSS signing.
-- **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing.
-- **permissions.py** — `can_use_tool` callback. Auto-approves reads and DB tools; validates trading limits on both platforms' `place_order`; shows formatted trade approval prompt.
-- **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads (both platforms), trade validation with `permissionDecision: ask/deny`, PostToolUse audit to SQLite `trades` table, session end.
-- **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Schema includes `exchange` column on market_snapshots, signals, trades, watchlist.
-- **collector.py** — Standalone data collector for both Kalshi and Polymarket. No LLM.
-- **signals.py** — Standalone signal generator: arbitrage, spread, cross-platform mismatch, structural arb. No LLM.
+- **main.py** — Assembles `ClaudeAgentOptions`, initializes DB, creates session, auto-resolves predictions, injects startup context into `BEGIN_SESSION`, runs the REPL loop.
+- **config.py** — Pydantic settings with TOML profile support (`config.toml` has `[demo]`/`[prod]` sections). Env vars override TOML values. `kalshi_max_position_usd`, `polymarket_max_position_usd`, `polymarket_fee_rate = 0.0`. Also loads and templates `prompts/system.md`.
+- **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket, config)` → 11 tools, `create_db_tools(db)` → 4 tools. Exchange is a parameter, not a namespace.
+- **kalshi_client.py** — Thin wrapper around `kalshi-python` SDK with rate limiting. Auth is RSA-PSS signing. Includes batch_create/cancel, amend_order, get_events (paginated).
+- **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders.
+- **permissions.py** — `can_use_tool` callback. Auto-approves reads and DB tools; unified `mcp__markets__place_order` handler validates per-exchange limits on the `orders[]` array; shows formatted trade approval prompt.
+- **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, unified trade/amend/cancel validation with `permissionDecision: ask`, PostToolUse audit to SQLite `trades` table, session end.
+- **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Events table has composite PK `(event_ticker, exchange)`. Lean trades table (no unused columns). `auto_resolve_predictions()` matches against settled market_snapshots. `get_session_state()` includes exchange on signals, unreconciled trades.
+- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection.
+- **signals.py** — Standalone signal generator: 7 scan types (arbitrage, wide_spread, cross_platform_mismatch, structural_arb, theta_decay, momentum, calibration). No LLM.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
-- **prompts/system.md** — System prompt template with `{{VARIABLE}}` placeholders substituted from config.
+- **api_base.py** — Base class for API clients with shared rate limiting and serialization.
+- **prompts/system.md** — System prompt template with unified tool docs, per-signal investigation protocols, order management, signal priority framework.
 
 ### Key patterns
 
-- **Factory + closure** for tools and permissions: `create_kalshi_tools(client, config)` returns a list of `@tool`-decorated functions closed over the client.
-- **MCP tool naming**: `mcp__kalshi__{tool_name}`, `mcp__polymarket__{tool_name}`, `mcp__db__{tool_name}`.
+- **Factory + closure** for tools and permissions: `create_market_tools(kalshi, polymarket, config)` returns a list of `@tool`-decorated functions closed over both clients.
+- **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 15 tools total.
+- **Unified conventions**: Exchange is a param, prices in cents, action+side for both platforms. Tool layer handles Polymarket USD/intent conversion.
 - **Config priority**: env vars > TOML profile > Pydantic defaults. Profile selected by `AGENT_PROFILE` env var.
-- **Hook ordering**: auto-approve reads → trade validation → audit → session end.
+- **Hook ordering**: auto-approve reads → trade/amend/cancel validation → audit → session end.
+- **Startup context injection**: `main.py` calls `db.get_session_state()` and injects result into `BEGIN_SESSION` message. Agent starts with full context — no tool call needed.
 
 ### Workspace reference scripts
 

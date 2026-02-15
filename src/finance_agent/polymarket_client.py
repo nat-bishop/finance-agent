@@ -79,8 +79,7 @@ class PolymarketAPIClient(BaseAPIClient):
         limit: int = 50,
     ) -> dict[str, Any]:
         self._rate_read()
-        # Trades accessible via market detail endpoint
-        return self._to_dict(self._client.markets.retrieve_by_slug(slug))
+        return self._to_dict(self._client.markets.trades(slug, {"limit": limit}))
 
     # -- Portfolio (read) --
 
@@ -91,6 +90,20 @@ class PolymarketAPIClient(BaseAPIClient):
     def get_positions(self) -> dict[str, Any]:
         self._rate_read()
         return self._to_dict(self._client.portfolio.positions())
+
+    def get_orders(
+        self,
+        *,
+        market_slug: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        self._rate_read()
+        params: dict[str, Any] = {}
+        if market_slug:
+            params["marketSlug"] = market_slug
+        if status:
+            params["status"] = status
+        return self._to_dict(self._client.orders.list(params))  # type: ignore[arg-type]
 
     # -- Orders (write) --
 
