@@ -297,50 +297,81 @@ def create_db_tools(
 
     @tool(
         "recommend_trade",
-        "Record a trade recommendation with one or more legs for review and execution.",
+        "Record an arbitrage recommendation (2+ legs across exchanges) for review.",
         {
-            "thesis": {
-                "type": "string",
-                "description": "1-3 sentences explaining reasoning and opportunity",
-            },
-            "estimated_edge_pct": {
-                "type": "number",
-                "description": "Fee-adjusted edge percentage",
-            },
-            "equivalence_notes": {
-                "type": "string",
-                "description": "How you verified markets settle identically (for arbs)",
-                "optional": True,
-            },
-            "signal_id": {
-                "type": "integer",
-                "description": "Signal ID that prompted this",
-                "optional": True,
-            },
-            "legs": {
-                "type": "array",
-                "description": "Trade legs (1 for directional, 2+ for arbs)",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "exchange": {
-                            "type": "string",
-                            "description": "'kalshi' or 'polymarket'",
-                        },
-                        "market_id": {
-                            "type": "string",
-                            "description": "Market ticker (Kalshi) or slug (Polymarket)",
-                        },
-                        "market_title": {
-                            "type": "string",
-                            "description": "Human-readable market title",
-                        },
-                        "action": {"type": "string", "description": "'buy' or 'sell'"},
-                        "side": {"type": "string", "description": "'yes' or 'no'"},
-                        "quantity": {"type": "integer", "description": "Number of contracts"},
-                        "price_cents": {
-                            "type": "integer",
-                            "description": "Limit price in cents (1-99)",
+            "type": "object",
+            "required": ["thesis", "estimated_edge_pct", "equivalence_notes", "legs"],
+            "properties": {
+                "thesis": {
+                    "type": "string",
+                    "description": "1-3 sentences explaining the arbitrage opportunity",
+                    "minLength": 10,
+                },
+                "estimated_edge_pct": {
+                    "type": "number",
+                    "description": "Fee-adjusted edge percentage",
+                    "minimum": 0,
+                    "maximum": 100,
+                },
+                "equivalence_notes": {
+                    "type": "string",
+                    "description": (
+                        "How you verified the markets settle identically: "
+                        "resolution source, timing, boundary conditions"
+                    ),
+                    "minLength": 10,
+                },
+                "signal_id": {
+                    "type": "integer",
+                    "description": "Signal ID that prompted this investigation, if any",
+                    "minimum": 1,
+                },
+                "legs": {
+                    "type": "array",
+                    "description": "Arbitrage legs (2+ required)",
+                    "minItems": 2,
+                    "maxItems": 6,
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "exchange",
+                            "market_id",
+                            "market_title",
+                            "action",
+                            "side",
+                            "quantity",
+                            "price_cents",
+                        ],
+                        "properties": {
+                            "exchange": {
+                                "type": "string",
+                                "enum": ["kalshi", "polymarket"],
+                            },
+                            "market_id": {
+                                "type": "string",
+                                "minLength": 1,
+                            },
+                            "market_title": {
+                                "type": "string",
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["buy", "sell"],
+                            },
+                            "side": {
+                                "type": "string",
+                                "enum": ["yes", "no"],
+                            },
+                            "quantity": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 500,
+                            },
+                            "price_cents": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 99,
+                            },
                         },
                     },
                 },
@@ -349,6 +380,14 @@ def create_db_tools(
     )
     async def recommend_trade(args: dict) -> dict:
         legs = args.get("legs", [])
+
+        # Warn-only validation (don't reject — let agent self-correct)
+        warnings = []
+        if len(legs) < 2:
+            warnings.append("Arbitrage should have 2+ legs")
+        if not args.get("equivalence_notes"):
+            warnings.append("Missing equivalence_notes — explain settlement verification")
+
         group_id, expires_at = db.log_recommendation_group(
             session_id=session_id,
             thesis=args.get("thesis"),
@@ -358,6 +397,13 @@ def create_db_tools(
             legs=legs,
             ttl_minutes=recommendation_ttl_minutes,
         )
-        return _text({"group_id": group_id, "leg_count": len(legs), "expires_at": expires_at})
+        result: dict[str, Any] = {
+            "group_id": group_id,
+            "leg_count": len(legs),
+            "expires_at": expires_at,
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return _text(result)
 
     return [recommend_trade]

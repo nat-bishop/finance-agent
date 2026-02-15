@@ -35,13 +35,13 @@ uv run python -m finance_agent.main
 
 ## Architecture
 
-This is a cross-platform prediction market analyst for Kalshi and Polymarket US, built on `claude-agent-sdk`. The agent runs as an interactive REPL inside a Docker container with a sandboxed `/workspace` filesystem. It produces structured trade recommendations — it does not execute trades directly.
+This is a cross-platform arbitrage system for Kalshi and Polymarket US, built on `claude-agent-sdk`. The agent runs as an interactive REPL inside a Docker container with a sandboxed `/workspace` filesystem. It finds price discrepancies between platforms for identically-settling markets and produces structured arbitrage recommendations — it does not execute trades directly.
 
 ### Two-layer design
 
 **Programmatic layer** (no LLM, runs separately):
 - `collector.py` — snapshots market data from both Kalshi and Polymarket US to SQLite, generates `/workspace/data/active_markets.md` (category-grouped market listings for agent discovery)
-- `signals.py` — runs 4 quantitative scans (arbitrage, wide_spread, theta_decay, momentum) and writes signals to SQLite
+- `signals.py` — runs 2 quantitative scans (arbitrage, cross-platform candidate) and writes signals to SQLite
 - Run via: `make collect && make signals` (or `make scan`)
 
 **Agent layer** (Claude REPL, runs on demand):
@@ -64,11 +64,11 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, pending_signals, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
-- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates `active_markets.md` market listings.
-- **signals.py** — Standalone signal generator: 4 scan types (arbitrage, wide_spread, theta_decay, momentum). No LLM. Cross-platform matching is handled by the agent via semantic analysis.
+- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates enriched `active_markets.md` market listings (price, spread, volume, OI, DTE).
+- **signals.py** — Standalone signal generator: 2 scan types (arbitrage, cross_platform_candidate). No LLM. Arbitrage detects bracket mispricing; cross-platform candidate matches titles across exchanges and flags price gaps for agent verification.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
-- **prompts/system.md** — System prompt template with data sources, market discovery workflow, arithmetic signal protocols, recommendation protocol, risk rules.
+- **prompts/system.md** — System prompt template with arb-only mission, settlement equivalence verification protocol, arbitrage structures, information hierarchy, market discovery workflow, recommendation protocol, risk rules.
 
 ### Key patterns
 

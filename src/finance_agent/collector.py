@@ -305,10 +305,23 @@ def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) ->
     return total
 
 
+def _fmt_volume(n: int | float | None) -> str:
+    """Format volume for compact display: 1234 → '1.2K', 1234567 → '1.2M'."""
+    if not n:
+        return "0"
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
 def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
     """Write category-grouped market summary for agent semantic discovery."""
     markets = db.query("""
-        SELECT exchange, ticker, title, mid_price_cents, category
+        SELECT exchange, ticker, title, mid_price_cents, category,
+               spread_cents, volume_24h, open_interest, days_to_expiration
         FROM market_snapshots
         WHERE status = 'open' AND mid_price_cents IS NOT NULL
         GROUP BY exchange, ticker
@@ -333,9 +346,18 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
             ms = by_cat[cat].get(exch, [])
             if ms:
                 lines.append(f"\n### {exch.title()} ({len(ms)} markets)")
-                lines.extend(
-                    f"- {m['title']} — {m['mid_price_cents']}c [{m['ticker']}]" for m in ms
-                )
+                for m in ms:
+                    spr = m["spread_cents"]
+                    spr_s = f"spr:{spr}c" if spr is not None else "spr:?"
+                    vol_s = f"vol24h:{_fmt_volume(m['volume_24h'])}"
+                    oi_s = f"oi:{_fmt_volume(m['open_interest'])}"
+                    dte = m["days_to_expiration"]
+                    dte_s = f"dte:{int(dte)}d" if dte is not None else "dte:?"
+                    lines.append(
+                        f"- {m['title']} — {m['mid_price_cents']}c"
+                        f" | {spr_s} {vol_s} {oi_s} {dte_s}"
+                        f" [{m['ticker']}]"
+                    )
         lines.append("")
 
     out = Path(output_path)

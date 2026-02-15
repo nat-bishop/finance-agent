@@ -6,15 +6,15 @@ Reads from SQLite (market_snapshots, events), writes to signals table.
 
 Scans:
 - Arbitrage: bracket price sums != ~100%
-- Wide spread: wide spreads with volume (limit order at mid captures half-spread)
-- Theta decay: near-expiry markets with uncertain prices
-- Momentum: consistent directional price movement
+- Cross-platform candidate: title-matched pairs with price gaps across exchanges
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
+from difflib import SequenceMatcher
 from typing import Any
 
 from .config import load_configs
@@ -101,185 +101,110 @@ def _generate_arbitrage_signals(db: AgentDatabase) -> list[dict[str, Any]]:
     return signals
 
 
-def _generate_wide_spread_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find markets with wide spreads and decent volume.
+def _norm_title(t: str) -> str:
+    """Normalize market title for fuzzy matching."""
+    t = t.lower().strip()
+    t = re.sub(r'[?!.,;:\'"()]', "", t)
+    t = re.sub(r"\b(will|the|be|a|an|to|in|on|by|of)\b", "", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-    Strategy: place limit order at mid to capture half-spread as edge.
-    Not market-making — single directional limit order.
+
+def _generate_cross_platform_signals(db: AgentDatabase) -> list[dict[str, Any]]:
+    """Find cross-platform pairs with similar titles and price gaps.
+
+    Matches Kalshi and Polymarket markets by normalized title similarity,
+    then filters by price gap and volume. These are CANDIDATES only — the
+    agent must verify settlement equivalence before recommending.
     """
-    signals = []
+    signals: list[dict[str, Any]] = []
 
-    markets = db.query(
-        """SELECT ticker, title, yes_bid, yes_ask, spread_cents, volume,
-                  volume_24h, open_interest, mid_price_cents
+    kalshi_markets = db.query(
+        """SELECT ticker, title, mid_price_cents, volume_24h, volume
            FROM market_snapshots
-           WHERE spread_cents IS NOT NULL
-             AND spread_cents > 5
-             AND volume > 0
-             AND status = 'open'
-           GROUP BY ticker
-           HAVING captured_at = MAX(captured_at)
-           ORDER BY spread_cents DESC
-           LIMIT 50"""
-    )
-
-    for m in markets:
-        spread = m["spread_cents"]
-        volume_24h = m["volume_24h"] or 0
-
-        # Liquidity score: combination of volume and spread
-        liq_score = min(1.0, (volume_24h / 100) * (spread / 20))
-        if liq_score < 0.1:
-            continue
-
-        signals.append(
-            _signal(
-                "wide_spread",
-                m["ticker"],
-                liq_score,
-                spread / 2,
-                {
-                    "title": m["title"],
-                    "spread_cents": spread,
-                    "yes_bid": m["yes_bid"],
-                    "yes_ask": m["yes_ask"],
-                    "mid_price": m["mid_price_cents"],
-                    "volume": m["volume"] or 0,
-                    "volume_24h": volume_24h,
-                    "open_interest": m["open_interest"],
-                    "liquidity_score": round(liq_score, 3),
-                },
-            )
-        )
-
-    return signals
-
-
-def _generate_theta_decay_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find near-expiry markets with uncertain prices.
-
-    Markets with <3 days to expiration and mid_price between 20-80 cents
-    are converging rapidly. Signal strength = proximity to expiry * distance from 50%.
-    """
-    signals = []
-
-    markets = db.query(
-        """SELECT ticker, exchange, title, mid_price_cents, days_to_expiration,
-                  yes_bid, yes_ask, volume
-           FROM market_snapshots
-           WHERE status = 'open'
-             AND days_to_expiration IS NOT NULL
-             AND days_to_expiration < 3
-             AND mid_price_cents BETWEEN 20 AND 80
-           GROUP BY ticker HAVING captured_at = MAX(captured_at)
-           ORDER BY days_to_expiration ASC
-           LIMIT 30"""
-    )
-
-    for m in markets:
-        dte = m["days_to_expiration"]
-        mid = m["mid_price_cents"]
-        dist_from_50 = abs(mid - 50) / 50  # 0 at 50, 1 at 0/100
-
-        strength = (1 - dte / 3) * dist_from_50 * 2
-        if strength < 0.2:
-            continue
-
-        signals.append(
-            _signal(
-                "theta_decay",
-                m["ticker"],
-                strength,
-                dist_from_50 * 10,
-                {
-                    "title": m["title"],
-                    "mid_price_cents": mid,
-                    "days_to_expiration": round(dte, 2),
-                    "dist_from_50": round(dist_from_50, 3),
-                    "yes_bid": m["yes_bid"],
-                    "yes_ask": m["yes_ask"],
-                    "volume": m["volume"],
-                },
-                exchange=m["exchange"],
-            )
-        )
-
-    return signals
-
-
-def _generate_momentum_signals(db: AgentDatabase) -> list[dict[str, Any]]:
-    """Find markets with consistent directional price movement.
-
-    Markets with 3+ snapshots in 48h showing >5 cent consistent direction.
-    Useful for confirming/rejecting cross-platform mismatches.
-    """
-    signals = []
-
-    # Get markets with multiple recent snapshots
-    candidates = db.query(
-        """SELECT ticker, exchange, title,
-                  GROUP_CONCAT(mid_price_cents) as prices,
-                  COUNT(*) as snap_count,
-                  MIN(mid_price_cents) as min_price,
-                  MAX(mid_price_cents) as max_price
-           FROM market_snapshots
-           WHERE status = 'open'
+           WHERE exchange = 'kalshi' AND status = 'open'
              AND mid_price_cents IS NOT NULL
-             AND captured_at > datetime('now', '-48 hours')
            GROUP BY ticker
-           HAVING COUNT(*) >= 3
-           ORDER BY (MAX(mid_price_cents) - MIN(mid_price_cents)) DESC
-           LIMIT 30"""
+           HAVING captured_at = MAX(captured_at)"""
     )
 
-    for m in candidates:
-        prices_str = m["prices"]
-        if not prices_str:
-            continue
-        prices = [int(p) for p in prices_str.split(",") if p.strip()]
-        if len(prices) < 3:
+    poly_markets = db.query(
+        """SELECT ticker, title, mid_price_cents, volume_24h, volume
+           FROM market_snapshots
+           WHERE exchange = 'polymarket' AND status = 'open'
+             AND mid_price_cents IS NOT NULL
+           GROUP BY ticker
+           HAVING captured_at = MAX(captured_at)"""
+    )
+
+    if not kalshi_markets or not poly_markets:
+        return signals
+
+    # Pre-normalize polymarket titles
+    poly_normed = [(m, _norm_title(m["title"] or "")) for m in poly_markets]
+
+    for km in kalshi_markets:
+        kn = _norm_title(km["title"] or "")
+        if not kn:
             continue
 
-        move = prices[-1] - prices[0]
-        abs_move = abs(move)
+        best_score = 0.0
+        best_pm: dict[str, Any] | None = None
+        for pm, pn in poly_normed:
+            score = SequenceMatcher(None, kn, pn).ratio()
+            if score > best_score:
+                best_score, best_pm = score, pm
 
-        if abs_move < 5:
+        if best_score < 0.7 or best_pm is None:
             continue
 
-        # Check consistency: are most moves in the same direction?
-        same_dir = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i - 1]) * move > 0)
-        consistency = same_dir / (len(prices) - 1)
+        k_mid = km["mid_price_cents"]
+        p_mid = best_pm["mid_price_cents"]
+        gap = abs(k_mid - p_mid)
 
-        if consistency < 0.6:
+        if gap < 3:
             continue
+
+        # At least one market should have some volume
+        k_vol = km["volume_24h"] or km["volume"] or 0
+        p_vol = best_pm["volume_24h"] or best_pm["volume"] or 0
+        if k_vol == 0 and p_vol == 0:
+            continue
+
+        # Strength: weighted combination of similarity, gap, and liquidity
+        liq_score = min(1.0, (k_vol + p_vol) / 200)
+        strength = best_score * (gap / 20) * (0.5 + 0.5 * liq_score)
+
+        direction = "buy_kalshi" if k_mid < p_mid else "buy_polymarket"
 
         signals.append(
             _signal(
-                "momentum",
-                m["ticker"],
-                abs_move / 20 * consistency,
-                abs_move / 2,
+                "cross_platform_candidate",
+                km["ticker"],
+                strength,
+                gap,  # Gross gap, not fee-adjusted
                 {
-                    "title": m["title"],
-                    "direction": "up" if move > 0 else "down",
-                    "move_cents": move,
-                    "snapshots": len(prices),
-                    "consistency": round(consistency, 2),
-                    "first_price": prices[0],
-                    "last_price": prices[-1],
+                    "kalshi_ticker": km["ticker"],
+                    "kalshi_title": km["title"],
+                    "kalshi_mid": k_mid,
+                    "polymarket_slug": best_pm["ticker"],
+                    "polymarket_title": best_pm["title"],
+                    "polymarket_mid": p_mid,
+                    "price_gap_cents": gap,
+                    "title_similarity": round(best_score, 3),
+                    "needs_verification": best_score < 0.9,
+                    "direction": direction,
                 },
-                exchange=m["exchange"],
             )
         )
 
-    return signals
+    # Return top 20 by estimated edge (gap)
+    signals.sort(key=lambda s: s["estimated_edge_pct"], reverse=True)
+    return signals[:20]
 
 
 _SCANS: list[tuple[str, Any]] = [
     ("arbitrage", _generate_arbitrage_signals),
-    ("wide_spread", _generate_wide_spread_signals),
-    ("theta_decay", _generate_theta_decay_signals),
-    ("momentum", _generate_momentum_signals),
+    ("cross_platform_candidate", _generate_cross_platform_signals),
 ]
 
 

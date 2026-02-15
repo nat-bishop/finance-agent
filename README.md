@@ -1,14 +1,14 @@
 # Finance Agent
 
-Cross-platform prediction market analyst for [Kalshi](https://kalshi.com) and [Polymarket US](https://polymarket.us), built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
+Cross-platform arbitrage system for [Kalshi](https://kalshi.com) and [Polymarket US](https://polymarket.us), built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
 
-Finds price discrepancies between platforms, verifies market equivalence, and produces structured trade recommendations. Includes a terminal UI for reviewing recommendations, executing trades, and monitoring positions.
+Finds markets that resolve to the same outcome across platforms, verifies identical settlement criteria, and produces structured arbitrage recommendations. Includes a terminal UI for reviewing recommendations, executing trades, and monitoring positions.
 
 ## Architecture
 
 **Three-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates `active_markets.md` (category-grouped listings), `signals.py` runs 4 quantitative scans to surface opportunities: arbitrage, wide spreads, theta decay, and momentum.
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates enriched `active_markets.md` (category-grouped listings with price, spread, volume, OI, DTE), `signals.py` runs 2 quantitative scans: bracket arbitrage and cross-platform candidate matching.
 
 2. **Agent layer** (Claude) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade` with a `legs` array. All state persists in SQLite for continuity across sessions.
 
@@ -60,7 +60,7 @@ Or locally: `make scan && uv run python -m finance_agent.main`
 
 ```bash
 make collect    # snapshot markets + events from both platforms to SQLite, generate active_markets.md
-make signals    # run 4 quantitative scans on collected data
+make signals    # run 2 quantitative scans on collected data
 make scan       # both in sequence
 make backup     # backup the database
 make startup    # print startup context JSON (debug)
@@ -73,11 +73,9 @@ The collector and signal generator are standalone scripts with no LLM dependency
 | Signal | Description |
 |--------|-------------|
 | `arbitrage` | Bracket YES prices not summing to ~100% (single-platform) |
-| `wide_spread` | Wide bid-ask with volume — limit order at mid captures half-spread |
-| `theta_decay` | Near-expiry (<3 days) markets with uncertain prices (20-80c) |
-| `momentum` | Consistent directional movement (3+ snapshots, >5c move) |
+| `cross_platform_candidate` | Title-matched pairs across Kalshi/Polymarket with price gaps — agent must verify settlement equivalence |
 
-Cross-platform matching is handled by the agent via semantic analysis of `active_markets.md`.
+The cross-platform candidate signal uses fuzzy title matching (SequenceMatcher, threshold 0.7) to surface pairs with ≥3c price gaps. These are attention flags only — the agent verifies settlement equivalence before recommending.
 
 ## Agent Tools
 
@@ -100,7 +98,7 @@ Cross-platform matching is handled by the agent via semantic analysis of `active
 
 | Tool | Notes |
 |------|-------|
-| `recommend_trade` | Record a trade recommendation with `thesis`, `estimated_edge_pct`, optional `equivalence_notes`, and a `legs` array. Each leg specifies exchange, market_id, action, side, quantity, price_cents. |
+| `recommend_trade` | Record an arbitrage recommendation with `thesis`, `estimated_edge_pct`, required `equivalence_notes` (settlement verification), and a `legs` array (2+ required). Each leg specifies exchange, market_id, action, side, quantity, price_cents. Schema enforces enums and numeric bounds. |
 
 **Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`.
 
@@ -110,7 +108,7 @@ Cross-platform matching is handled by the agent via semantic analysis of `active
 Agent recommends → TUI review → Execute or Reject
 ```
 
-1. **Agent calls `recommend_trade`** — creates a recommendation group with legs in SQLite. Group-level fields: thesis, estimated edge, equivalence notes. Per-leg fields: exchange, market, action, side, quantity, price. Recommendations expire after `recommendation_ttl_minutes` (default 60).
+1. **Agent calls `recommend_trade`** — creates a recommendation group with 2+ legs in SQLite. Group-level fields: thesis, estimated edge, equivalence notes (required — settlement verification). Per-leg fields: exchange, market, action, side, quantity, price. Schema enforces enums (`kalshi`/`polymarket`, `buy`/`sell`, `yes`/`no`) and numeric bounds. Recommendations expire after `recommendation_ttl_minutes` (default 60).
 
 2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Shows edge, thesis, expiry countdown, and per-leg details.
 
@@ -124,9 +122,9 @@ Agent recommends → TUI review → Execute or Reject
 Discovery → Investigation → Verification → Sizing → Recommendation
 ```
 
-1. **Discovery** — Agent reads `active_markets.md`, finds cross-platform connections by category; also reviews pre-computed arithmetic signals
-2. **Investigation** — Agent follows per-signal protocol (semantic matching, arbitrage, etc.)
-3. **Verification** — Settlement equivalence, executable orderbook prices
+1. **Discovery** — Agent reads enriched `active_markets.md`, pre-filters by spread/volume/DTE, finds cross-platform connections by category; also reviews pre-computed signals (arbitrage + cross-platform candidates)
+2. **Investigation** — Agent follows arb-specific protocol: match markets, verify settlement equivalence (5-point checklist), check orderbooks
+3. **Verification** — Settlement equivalence verification (resolution source, timing, boundary conditions, conditional resolution, rounding), executable orderbook prices
 4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, orderbook depth for position size
 5. **Recommendation** — Agent calls `recommend_trade` with all legs in one call, stored in DB for review
 
@@ -172,7 +170,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (sing
   analysis/               # Agent-written analysis (writable)
   data/
     agent.db              # SQLite database
-    active_markets.md     # Category-grouped market listings (generated by collector)
+    active_markets.md     # Enriched market listings: price, spread, vol, OI, DTE (generated by collector)
     watchlist.md          # Markets to monitor across sessions
     session.log           # Session scratch notes
   backups/                # DB backups (auto, max 7)
@@ -190,7 +188,7 @@ src/finance_agent/
   polymarket_client.py # Polymarket US SDK wrapper, intent maps
   hooks.py             # Recommendation counting, session lifecycle
   collector.py         # Market data collector (both platforms, market listings)
-  signals.py           # Signal generator (4 scan types)
+  signals.py           # Signal generator (arbitrage + cross-platform candidate)
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations
