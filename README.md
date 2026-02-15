@@ -69,7 +69,7 @@ The collector and signal generator are standalone scripts with no LLM dependency
 
 ## Agent Tools
 
-15 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
+12 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
 
 ### Market Tools (11)
 
@@ -87,14 +87,11 @@ The collector and signal generator are standalone scripts with no LLM dependency
 | `amend_order` | `order_id`, `price_cents?`, `quantity?` | Kalshi only, preserves FIFO |
 | `cancel_order` | `exchange`, `order_ids[]` | Batch cancel supported |
 
-### Database Tools (4)
+### Database Tools (1)
 
 | Tool | Notes |
 |------|-------|
-| `db_query` | Read-only SQL SELECT |
-| `db_log_prediction` | Record probability prediction for calibration |
-| `db_add_watchlist` | Track market across sessions |
-| `db_remove_watchlist` | Remove from watchlist |
+| `log_prediction` | Record probability prediction for calibration (market_ticker, prediction, context) |
 
 **Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`. The tool layer handles all conversion (Polymarket USD decimals, intents).
 
@@ -131,7 +128,7 @@ Environment variables override TOML values.
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. 8 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema managed by Alembic (auto-migrated on startup). 8 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
@@ -142,7 +139,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. 8 tables:
 | `predictions` | agent | signals, startup | prediction, outcome, market_ticker |
 | `portfolio_snapshots` | startup | agent | balance_usd, positions_json |
 | `sessions` | main | agent | started_at, summary, trades_placed |
-| `watchlist` | agent | agent | (ticker, exchange) PK, alert_condition |
+| `watchlist` | legacy | — | (ticker, exchange) PK — migrated to `/workspace/data/watchlist.md` |
 
 ## Workspace
 
@@ -155,6 +152,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. 8 tables:
   analysis/               # Agent-written analysis (writable)
   data/
     agent.db              # SQLite database
+    watchlist.md          # Markets to monitor across sessions
     session.log           # Session scratch notes
   backups/                # DB backups (auto, max 7)
 ```
@@ -165,16 +163,16 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. 8 tables:
 src/finance_agent/
   main.py              # REPL entry point, session lifecycle, startup context injection
   config.py            # Pydantic settings, TOML profile loading
-  database.py          # SQLite (WAL mode), schema, auto-resolve predictions
+  database.py          # SQLite (WAL mode), Alembic migrations, auto-resolve predictions
   tools.py             # Unified MCP tool factories (market + DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
   polymarket_client.py # Polymarket US SDK wrapper
-  permissions.py       # Permission handler, unified trade limits
   hooks.py             # Audit hooks, trade validation, session lifecycle
   collector.py         # Market data collector (both platforms, paginated events)
   signals.py           # Signal generator (7 scan types)
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
+  migrations/          # Alembic schema migrations
   prompts/system.md    # System prompt template
 ```
 

@@ -16,6 +16,8 @@ dependencies = [
     "numpy>=2.4",
     "scipy>=1.17",
     "polymarket-us>=0.1.0",
+    "alembic>=1.16",
+    "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]

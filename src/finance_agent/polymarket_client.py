@@ -79,7 +79,7 @@ class PolymarketAPIClient(BaseAPIClient):
         limit: int = 50,
     ) -> dict[str, Any]:
         self._rate_read()
-        return self._to_dict(self._client.markets.trades(slug, {"limit": limit}))
+        return self._to_dict(self._client.markets.trades(slug, {"limit": limit}))  # type: ignore[attr-defined]
 
     # -- Portfolio (read) --
 

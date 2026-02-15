@@ -4,15 +4,33 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, cast
 
 from claude_agent_sdk import HookMatcher
+from claude_agent_sdk.types import HookContext, HookEvent, HookInput, HookJSONOutput
 
+from .config import TradingConfig
 from .database import AgentDatabase
 
 
-def _ask(message: str) -> dict:
-    return {"permissionDecision": "ask", "systemMessage": message}
+def _allow() -> HookJSONOutput:
+    return cast(
+        HookJSONOutput,
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+            }
+        },
+    )
+
+
+def _ask(message: str) -> HookJSONOutput:
+    return cast(HookJSONOutput, {"permissionDecision": "ask", "systemMessage": message})
+
+
+def _deny(message: str) -> HookJSONOutput:
+    return cast(HookJSONOutput, {"permissionDecision": "deny", "systemMessage": message})
 
 
 def _parse_result(tool_response: Any) -> dict:
@@ -27,17 +45,33 @@ def _parse_result(tool_response: Any) -> dict:
 def create_audit_hooks(
     db: AgentDatabase,
     session_id: str,
-) -> dict[str, list[HookMatcher]]:
+    trading_config: TradingConfig,
+) -> dict[HookEvent, list[HookMatcher]]:
     session_start = time.time()
     trade_count = {"placed": 0, "amended": 0, "cancelled": 0}
 
-    async def auto_approve_reads(input_data: dict, *_: Any) -> dict:
-        return {"permissionDecision": "allow"}
+    async def auto_approve(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        """Auto-approve all tools except AskUserQuestion (handled by canUseTool)."""
+        data = cast(dict[str, Any], input_data)
+        if data.get("tool_name") == "AskUserQuestion":
+            return cast(HookJSONOutput, {})  # No decision — falls through to canUseTool
+        return _allow()
 
-    async def validate_trade(input_data: dict, *_: Any) -> dict:
-        ti = input_data.get("tool_input", {})
-        exchange = ti.get("exchange", "?")
+    async def validate_trade(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        data = cast(dict[str, Any], input_data)
+        ti = data.get("tool_input", {})
+        exchange = ti.get("exchange", "kalshi")
         orders = ti.get("orders", [])
+
+        max_pos = (
+            trading_config.kalshi_max_position_usd
+            if exchange == "kalshi"
+            else trading_config.polymarket_max_position_usd
+        )
 
         lines = []
         total_cost = 0.0
@@ -45,11 +79,20 @@ def create_audit_hooks(
             price, qty = o.get("price_cents", 0), o.get("quantity", 0)
             cost = (qty * price) / 100
             total_cost += cost
+
+            if qty > trading_config.max_order_count:
+                return _deny(
+                    f"Order qty {qty} exceeds max {trading_config.max_order_count} contracts"
+                )
+
             lines.append(
                 f"  {o.get('action', '?').upper()} {qty}x "
                 f"{o.get('side', '?').upper()} on {o.get('market_id', '?')} "
                 f"@ {price}c = ${cost:.2f}"
             )
+
+        if total_cost > max_pos:
+            return _deny(f"Total cost ${total_cost:.2f} exceeds {exchange} max ${max_pos:.2f}")
 
         label = (
             f"{exchange.upper()} ORDER"
@@ -59,8 +102,11 @@ def create_audit_hooks(
         summary = "\n".join(lines) or "  (no orders)"
         return _ask(f"{label} | Total: ${total_cost:.2f}\n{summary}")
 
-    async def validate_amend(input_data: dict, *_: Any) -> dict:
-        ti = input_data.get("tool_input", {})
+    async def validate_amend(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        data = cast(dict[str, Any], input_data)
+        ti = data.get("tool_input", {})
         parts = [f"AMEND ORDER: {ti.get('order_id', '?')}"]
         if ti.get("price_cents"):
             parts.append(f"New price: {ti['price_cents']}c")
@@ -68,16 +114,22 @@ def create_audit_hooks(
             parts.append(f"New qty: {ti['quantity']}")
         return _ask(" | ".join(parts))
 
-    async def validate_cancel(input_data: dict, *_: Any) -> dict:
-        ti = input_data.get("tool_input", {})
+    async def validate_cancel(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        data = cast(dict[str, Any], input_data)
+        ti = data.get("tool_input", {})
         exchange = ti.get("exchange", "?")
         ids = ti.get("order_ids", [])
         return _ask(f"CANCEL {exchange.upper()}: {len(ids)} order(s) — {', '.join(ids[:5])}")
 
-    async def audit_trade_result(input_data: dict, *_: Any) -> dict:
-        tool_name = input_data.get("tool_name", "")
-        tool_input = input_data.get("tool_input", {})
-        result = _parse_result(input_data.get("tool_response", ""))
+    async def audit_trade_result(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        data = cast(dict[str, Any], input_data)
+        tool_name = data.get("tool_name", "")
+        tool_input = data.get("tool_input", {})
+        result = _parse_result(data.get("tool_response", ""))
 
         if "place_order" in tool_name:
             exchange = tool_input.get("exchange", "kalshi")
@@ -105,9 +157,11 @@ def create_audit_hooks(
         elif "cancel_order" in tool_name:
             trade_count["cancelled"] += 1
 
-        return {}
+        return cast(HookJSONOutput, {})
 
-    async def session_end(input_data: dict, *_: Any) -> dict:
+    async def session_end(
+        input_data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
         duration = time.time() - session_start
         db.end_session(
             session_id=session_id,
@@ -119,17 +173,22 @@ def create_audit_hooks(
             ),
             trades_placed=trade_count["placed"],
         )
-        return {}
+        return cast(
+            HookJSONOutput,
+            {
+                "systemMessage": (
+                    "Update /workspace/data/watchlist.md with any markets "
+                    "to track next session before stopping."
+                )
+            },
+        )
 
     return {
         "PreToolUse": [
-            HookMatcher(
-                matcher="mcp__markets__search_markets|mcp__markets__get_|mcp__db__|Read|Glob|Grep",
-                hooks=[auto_approve_reads],
-            ),
             HookMatcher(matcher="mcp__markets__place_order", hooks=[validate_trade]),
             HookMatcher(matcher="mcp__markets__amend_order", hooks=[validate_amend]),
             HookMatcher(matcher="mcp__markets__cancel_order", hooks=[validate_cancel]),
+            HookMatcher(hooks=[auto_approve]),  # catch-all, no matcher
         ],
         "PostToolUse": [
             HookMatcher(

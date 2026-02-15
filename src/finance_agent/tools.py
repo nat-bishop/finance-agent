@@ -104,10 +104,6 @@ def create_market_tools(
             )
         return _text(results)
 
-    def _dispatch(args: dict, k_fn, pm_fn):
-        exchange = _require_exchange(args, polymarket)
-        return _text(k_fn() if exchange == "kalshi" else pm_fn())
-
     @tool(
         "get_market",
         "Get full details for a single market: rules, prices, volume, settlement source.",
@@ -120,8 +116,12 @@ def create_market_tools(
         },
     )
     async def get_market(args: dict) -> dict:
+        exchange = _require_exchange(args, polymarket)
         mid = args["market_id"]
-        return _dispatch(args, lambda: kalshi.get_market(mid), lambda: polymarket.get_market(mid))
+        if exchange == "kalshi":
+            return _text(kalshi.get_market(mid))
+        assert polymarket is not None
+        return _text(polymarket.get_market(mid))
 
     @tool(
         "get_orderbook",
@@ -141,6 +141,7 @@ def create_market_tools(
         mid = args["market_id"]
         if exchange == "kalshi":
             return _text(kalshi.get_orderbook(mid, depth=args.get("depth", 10)))
+        assert polymarket is not None
         if args.get("depth", 10) <= 1:
             return _text(polymarket.get_bbo(mid))
         return _text(polymarket.get_orderbook(mid))
@@ -154,8 +155,12 @@ def create_market_tools(
         },
     )
     async def get_event(args: dict) -> dict:
+        exchange = _require_exchange(args, polymarket)
         eid = args["event_id"]
-        return _dispatch(args, lambda: kalshi.get_event(eid), lambda: polymarket.get_event(eid))
+        if exchange == "kalshi":
+            return _text(kalshi.get_event(eid))
+        assert polymarket is not None
+        return _text(polymarket.get_event(eid))
 
     @tool(
         "get_price_history",
@@ -205,12 +210,12 @@ def create_market_tools(
         },
     )
     async def get_trades(args: dict) -> dict:
+        exchange = _require_exchange(args, polymarket)
         mid, limit = args["market_id"], args.get("limit", 50)
-        return _dispatch(
-            args,
-            lambda: kalshi.get_trades(mid, limit=limit),
-            lambda: polymarket.get_trades(mid, limit=limit),
-        )
+        if exchange == "kalshi":
+            return _text(kalshi.get_trades(mid, limit=limit))
+        assert polymarket is not None
+        return _text(polymarket.get_trades(mid, limit=limit))
 
     @tool(
         "get_portfolio",
@@ -348,6 +353,7 @@ def create_market_tools(
             return _text(kalshi.batch_create_orders(batch))
 
         # Polymarket
+        assert polymarket is not None
         if len(orders) > 1:
             raise ValueError("Polymarket does not support batch orders — submit one at a time")
         o = orders[0]
@@ -415,6 +421,7 @@ def create_market_tools(
                 return _text(kalshi.cancel_order(ids[0]))
             return _text(kalshi.batch_cancel_orders(ids))
 
+        assert polymarket is not None
         return _text([polymarket.cancel_order(oid) for oid in ids])
 
     return [
@@ -436,108 +443,27 @@ def create_db_tools(db: AgentDatabase) -> list:
     """Database tools for agent persistence."""
 
     @tool(
-        "db_query",
-        "Execute a read-only SQL SELECT against the agent database. "
-        "Tables: market_snapshots, events, signals, trades, predictions, "
-        "portfolio_snapshots, sessions, watchlist.",
-        {
-            "sql": {"type": "string", "description": "SQL SELECT query"},
-        },
-    )
-    async def db_query(args: dict) -> dict:
-        return _text(db.query(args["sql"]))
-
-    @tool(
-        "db_log_prediction",
+        "log_prediction",
         "Record a probability prediction for calibration tracking.",
         {
             "market_ticker": {"type": "string", "description": "Market ticker or slug"},
-            "exchange": {
-                "type": "string",
-                "description": "'kalshi' or 'polymarket'",
-                "optional": True,
-            },
             "prediction": {
                 "type": "number",
                 "description": "Predicted probability (0.0 to 1.0)",
             },
-            "market_price_cents": {
-                "type": "integer",
-                "description": "Current market price in cents",
-                "optional": True,
-            },
-            "methodology": {
+            "context": {
                 "type": "string",
-                "description": "How you arrived at this prediction",
-                "optional": True,
-            },
-            "notes": {
-                "type": "string",
-                "description": "Additional context",
+                "description": "Exchange, current price, methodology, notes (freeform)",
                 "optional": True,
             },
         },
     )
-    async def db_log_prediction(args: dict) -> dict:
+    async def log_prediction(args: dict) -> dict:
         pred_id = db.log_prediction(
             market_ticker=args["market_ticker"],
             prediction=args["prediction"],
-            market_price_cents=args.get("market_price_cents"),
-            methodology=args.get("methodology"),
-            notes=args.get("notes"),
+            notes=args.get("context"),
         )
         return _text({"prediction_id": pred_id, "status": "logged"})
 
-    @tool(
-        "db_add_watchlist",
-        "Add a market to the watchlist for tracking across sessions.",
-        {
-            "market_id": {"type": "string", "description": "Market ticker or slug"},
-            "exchange": {"type": "string", "description": "'kalshi' or 'polymarket'"},
-            "reason": {
-                "type": "string",
-                "description": "Why you're watching this market",
-                "optional": True,
-            },
-            "alert_condition": {
-                "type": "string",
-                "description": "Condition to alert on (e.g. 'price_below_30')",
-                "optional": True,
-            },
-        },
-    )
-    async def db_add_watchlist(args: dict) -> dict:
-        db.add_to_watchlist(
-            ticker=args["market_id"],
-            exchange=args.get("exchange", "kalshi"),
-            reason=args.get("reason"),
-            alert_condition=args.get("alert_condition"),
-        )
-        return _text({"status": "added", "market_id": args["market_id"]})
-
-    @tool(
-        "db_remove_watchlist",
-        "Remove a market from the watchlist.",
-        {
-            "market_id": {"type": "string", "description": "Market ticker or slug"},
-            "exchange": {
-                "type": "string",
-                "description": "'kalshi' or 'polymarket'. Omit to remove from all.",
-                "optional": True,
-            },
-        },
-    )
-    async def db_remove_watchlist(args: dict) -> dict:
-        exchange = args.get("exchange")
-        if exchange:
-            db.remove_from_watchlist(args["market_id"], exchange=exchange)
-        else:
-            db.remove_from_watchlist(args["market_id"])
-        return _text({"status": "removed", "market_id": args["market_id"]})
-
-    return [
-        db_query,
-        db_log_prediction,
-        db_add_watchlist,
-        db_remove_watchlist,
-    ]
+    return [log_prediction]

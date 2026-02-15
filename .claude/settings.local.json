@@ -13,7 +13,22 @@
       "Bash(uv run ruff format:*)",
       "Bash(uv run ruff check:*)",
       "Bash(uv run pre-commit:*)",
-      "WebFetch(domain:docs.polymarket.us)"
+      "WebFetch(domain:docs.polymarket.us)",
+      "Bash(ls:*)",
+      "WebFetch(domain:trading-api.readme.io)",
+      "WebFetch(domain:gamma-api.polymarket.com)",
+      "WebFetch(domain:clob-api.polymarket.com)",
+      "Bash(uv run python -m mypy:*)",
+      "WebFetch(domain:medium.com)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nPivot to cross-platform arbitrage agent \\(Kalshi + Polymarket US\\)\n\nAdd Polymarket US as a second exchange: polymarket_client.py wraps the\npolymarket-us SDK, create_polymarket_tools\\(\\) factory mirrors the Kalshi\npattern, and all runtime wiring \\(main, hooks, permissions\\) conditionally\nregisters the Polymarket MCP server when enabled.\n\nDatabase schema gains an `exchange` column on market_snapshots, signals,\ntrades, and watchlist with migration for existing DBs. Collector and\nsignal generator extended with Polymarket collection and two new\ncross-platform signal types \\(mismatch + structural arb\\). Four\nsingle-platform signal types removed \\(mean reversion, theta, calibration,\ntime-series\\) along with the numpy dependency.\n\nSystem prompt rewritten for arb-focused workflow. Six active skills\narchived; replaced by three CLI reference scripts in workspace/lib/\n\\(normalize_prices, kelly_size, match_markets\\).\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nUnify tools, fix bugs, add signals, rewrite docs\n\nConsolidate 24 exchange-specific MCP tools into 15 unified tools across\n2 servers \\(markets + db\\). Exchange is now a parameter, not a namespace.\nTool layer normalizes Polymarket USD/intents transparently.\n\nKey changes:\n- tools.py: create_market_tools\\(\\) \\(11\\) + create_db_tools\\(\\) \\(4\\)\n- main.py: inject startup context into BEGIN_SESSION \\(no tool call needed\\)\n- database.py: composite PK on events, lean trades, auto_resolve_predictions\\(\\)\n- collector.py: paginated GET /events, Polymarket event collection\n- signals.py: 3 new scans \\(theta_decay, momentum, calibration\\), rename spread\n- kalshi_client.py: fix search query bug, add batch/amend/get_events\n- polymarket_client.py: fix get_trades, add get_orders\n- config.py: rename max_position_usd, fix polymarket_fee_rate to 0.0\n- prompts/system.md: unified tool docs, per-signal investigation protocols\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(python -c \"import claude_agent_sdk; import inspect; print\\(inspect.getfile\\(claude_agent_sdk\\)\\)\")",
+      "Bash(uv run python:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nReduce duplication across codebase with helper extractions\n\nExtract shared patterns to cut ~145 lines:\n- tools.py: _dispatch\\(\\) for exchange routing\n- hooks.py: _ask\\(\\) and _parse_result\\(\\) helpers, simplified signatures\n- permissions.py: _approve_or_reject\\(\\) for user approval flow\n- main.py: dynamic MCP tool name generation from tool objects\n- database.py: _now\\(\\) helper, simplified portfolio delta logic\n- signals.py: _signal\\(\\) factory for consistent signal dict construction\n- collector.py: _as_list\\(\\) and _to_cents\\(\\) helpers\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(python:*)",
+      "Bash(uv run:*)"
     ]
   }
 }

@@ -6,7 +6,6 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
 from pydantic_settings import BaseSettings
 
 _TOML_CANDIDATES = [
@@ -76,16 +75,6 @@ class TradingConfig(BaseSettings):
         return f"{self.kalshi_base_url}/trade-api/v2"
 
 
-class PermissionConfig(BaseSettings):
-    """Filesystem permission boundaries for the agent."""
-
-    model_config = {"extra": "ignore"}
-
-    readonly_patterns: list[str] = Field(default=[])
-    writable_patterns: list[str] = Field(default=["analysis/", "data/", "lib/"])
-    deny_patterns: list[str] = Field(default=[".env"])
-
-
 class AgentConfig(BaseSettings):
     """SDK-level agent configuration."""
 
@@ -95,9 +84,7 @@ class AgentConfig(BaseSettings):
     profile: str = "demo"
     model: str = "claude-sonnet-4-5-20250929"
     max_budget_usd: float = 1.0
-    permission_mode: str = "default"
-
-    permissions: PermissionConfig = Field(default_factory=PermissionConfig)
+    permission_mode: str = "acceptEdits"
 
 
 def load_configs() -> tuple[AgentConfig, TradingConfig]:
@@ -115,7 +102,7 @@ def load_configs() -> tuple[AgentConfig, TradingConfig]:
     profile_defaults = _load_profile(agent_pre.profile)
 
     # Split TOML keys into agent-level vs trading-level
-    agent_keys = set(AgentConfig.model_fields) - {"permissions"}
+    agent_keys = set(AgentConfig.model_fields)
     trading_toml = {
         k: v
         for k, v in profile_defaults.items()

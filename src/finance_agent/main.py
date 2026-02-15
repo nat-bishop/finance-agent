@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -14,35 +15,113 @@ from claude_agent_sdk import (
     TextBlock,
     create_sdk_mcp_server,
 )
+from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
-from .config import AgentConfig, TradingConfig, build_system_prompt, load_configs
+from .config import build_system_prompt, load_configs
 from .database import AgentDatabase
 from .hooks import create_audit_hooks
 from .kalshi_client import KalshiAPIClient
-from .permissions import create_permission_handler
 from .polymarket_client import PolymarketAPIClient
 from .tools import create_db_tools, create_market_tools
 
-_BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "AskUserQuestion"]
+# ── canUseTool — handles AskUserQuestion + trade safety net ──────
+
+_TRADE_TOOLS = {
+    "mcp__markets__place_order",
+    "mcp__markets__amend_order",
+    "mcp__markets__cancel_order",
+}
 
 
-def _mcp_tool_names(server_key: str, tools: list) -> list[str]:
-    return [f"mcp__{server_key}__{t.name}" for t in tools]
+def _parse_response(response: str, options: list[dict]) -> str:
+    try:
+        idx = int(response) - 1
+        if 0 <= idx < len(options):
+            return options[idx]["label"]
+    except ValueError:
+        pass
+    return response
+
+
+async def _can_use_tool(
+    tool_name: str, input_data: dict[str, Any], context: Any
+) -> PermissionResultAllow | PermissionResultDeny:
+    if tool_name == "AskUserQuestion":
+        answers: dict[str, str] = {}
+        for q in input_data.get("questions", []):
+            print(f"\n{q.get('header', '')}: {q['question']}")
+            for i, opt in enumerate(q.get("options", [])):
+                print(f"  {i + 1}. {opt['label']} -- {opt.get('description', '')}")
+            print("  (Enter number, or type your own answer)")
+            try:
+                response = input("Your choice: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                response = ""
+            answers[q["question"]] = _parse_response(response, q.get("options", []))
+        return PermissionResultAllow(
+            updated_input={"questions": input_data.get("questions", []), "answers": answers}
+        )
+
+    if tool_name in _TRADE_TOOLS:
+        # Safety net: if hooks didn't resolve, prompt explicitly
+        print(f"\n{tool_name} requires approval.")
+        print(json.dumps(input_data, indent=2, default=str))
+        try:
+            response = input("Approve? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            response = "n"
+        if response != "y":
+            return PermissionResultDeny(message="User rejected trade")
+        return PermissionResultAllow(updated_input=input_data)
+
+    return PermissionResultAllow(updated_input=input_data)
+
+
+# ── Watchlist migration (DB → markdown file) ─────────────────────
+
+_WATCHLIST_PATH = Path("/workspace/data/watchlist.md")
+
+
+def _init_watchlist(db: AgentDatabase) -> None:
+    """One-time migration: write DB watchlist rows to markdown file."""
+    if _WATCHLIST_PATH.exists():
+        return
+    rows = db.query("SELECT ticker, exchange, reason, alert_condition FROM watchlist")
+    _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        _WATCHLIST_PATH.write_text(
+            "# Watchlist\n\n"
+            "Markets to monitor across sessions.\n\n"
+            "| Ticker | Exchange | Reason | Alert Condition |\n"
+            "|--------|----------|--------|-----------------|\n",
+            encoding="utf-8",
+        )
+        return
+    lines = [
+        "# Watchlist\n",
+        "\nMarkets to monitor across sessions.\n",
+        "\n| Ticker | Exchange | Reason | Alert Condition |",
+        "\n|--------|----------|--------|-----------------|",
+    ]
+    for r in rows:
+        reason = r.get("reason") or ""
+        alert = r.get("alert_condition") or ""
+        lines.append(f"\n| {r['ticker']} | {r['exchange']} | {reason} | {alert} |")
+    lines.append("\n")
+    _WATCHLIST_PATH.write_text("".join(lines), encoding="utf-8")
+
+
+# ── Build SDK options ─────────────────────────────────────────────
 
 
 def build_options(
-    agent_config: AgentConfig,
-    trading_config: TradingConfig,
+    agent_config,
+    trading_config,
     mcp_servers: dict,
-    mcp_tools: dict[str, list],
     db: AgentDatabase,
     session_id: str,
     workspace: str = "/workspace",
 ) -> ClaudeAgentOptions:
-    allowed = list(_BUILTIN_TOOLS)
-    for key, tools in mcp_tools.items():
-        allowed.extend(_mcp_tool_names(key, tools))
-
     return ClaudeAgentOptions(
         system_prompt={
             "type": "preset",
@@ -52,15 +131,10 @@ def build_options(
         model=agent_config.model,
         cwd=workspace,
         mcp_servers=mcp_servers,
-        allowed_tools=allowed,
-        can_use_tool=create_permission_handler(
-            workspace_path=workspace,
-            permissions=agent_config.permissions,
-            trading_config=trading_config,
-        ),
-        hooks=create_audit_hooks(db=db, session_id=session_id),
+        permission_mode="acceptEdits",
+        can_use_tool=_can_use_tool,
+        hooks=create_audit_hooks(db=db, session_id=session_id, trading_config=trading_config),
         max_budget_usd=agent_config.max_budget_usd,
-        permission_mode=agent_config.permission_mode,
         sandbox={"enabled": True, "autoAllowBashIfSandboxed": True},
     )
 
@@ -87,6 +161,10 @@ async def run_repl() -> None:
     startup_state = db.get_session_state()
     if resolved:
         startup_state["newly_resolved_predictions"] = resolved
+    startup_state["watchlist_file"] = str(_WATCHLIST_PATH)
+
+    # Migrate watchlist from DB to markdown file (one-time)
+    _init_watchlist(db)
 
     # Clear session scratch file
     session_log = Path("/workspace/data/session.log")
@@ -107,7 +185,7 @@ async def run_repl() -> None:
         for key, tools in mcp_tools.items()
     }
 
-    options = build_options(agent_config, trading_config, mcp_servers, mcp_tools, db, session_id)
+    options = build_options(agent_config, trading_config, mcp_servers, db, session_id)
 
     # Startup banner
     print("Cross-Platform Prediction Market Arbitrage Agent")

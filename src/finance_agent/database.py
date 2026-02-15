@@ -15,155 +15,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-_SCHEMA = """
--- Market data snapshots (populated by collector)
-CREATE TABLE IF NOT EXISTS market_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    captured_at TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'collector',
-    exchange TEXT NOT NULL DEFAULT 'kalshi',
-    ticker TEXT NOT NULL,
-    event_ticker TEXT,
-    series_ticker TEXT,
-    title TEXT,
-    category TEXT,
-    status TEXT,
-    yes_bid INTEGER,
-    yes_ask INTEGER,
-    no_bid INTEGER,
-    no_ask INTEGER,
-    last_price INTEGER,
-    volume INTEGER,
-    volume_24h INTEGER,
-    open_interest INTEGER,
-    spread_cents INTEGER,
-    mid_price_cents INTEGER,
-    implied_probability REAL,
-    days_to_expiration REAL,
-    close_time TEXT,
-    settlement_value INTEGER,
-    markets_in_event INTEGER,
-    raw_json TEXT
-);
-
--- Event structure (for cross-market analysis)
-CREATE TABLE IF NOT EXISTS events (
-    event_ticker TEXT NOT NULL,
-    exchange TEXT NOT NULL DEFAULT 'kalshi',
-    series_ticker TEXT,
-    title TEXT,
-    category TEXT,
-    mutually_exclusive INTEGER,
-    last_updated TEXT,
-    markets_json TEXT,
-    PRIMARY KEY (event_ticker, exchange)
-);
-
--- Pre-computed signals (populated by signal generator)
-CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    generated_at TEXT NOT NULL,
-    scan_type TEXT NOT NULL,
-    exchange TEXT DEFAULT 'kalshi',
-    ticker TEXT NOT NULL,
-    event_ticker TEXT,
-    signal_strength REAL,
-    estimated_edge_pct REAL,
-    details_json TEXT,
-    status TEXT DEFAULT 'pending',
-    acted_at TEXT,
-    session_id TEXT
-);
-
--- Agent's trades (lean schema)
-CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    exchange TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    ticker TEXT NOT NULL,
-    action TEXT NOT NULL,
-    side TEXT NOT NULL,
-    count INTEGER NOT NULL,
-    price_cents INTEGER,
-    order_type TEXT,
-    order_id TEXT,
-    status TEXT,
-    result_json TEXT
-);
-
--- Agent's probability predictions (for calibration)
-CREATE TABLE IF NOT EXISTS predictions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL,
-    market_ticker TEXT NOT NULL,
-    prediction REAL NOT NULL,
-    market_price_cents INTEGER,
-    methodology TEXT,
-    outcome INTEGER,
-    resolved_at TEXT,
-    notes TEXT
-);
-
--- Portfolio state over time
-CREATE TABLE IF NOT EXISTS portfolio_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    captured_at TEXT NOT NULL,
-    session_id TEXT,
-    balance_usd REAL,
-    positions_json TEXT,
-    open_orders_json TEXT
-);
-
--- Session lifecycle
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    started_at TEXT NOT NULL,
-    ended_at TEXT,
-    profile TEXT,
-    summary TEXT,
-    trades_placed INTEGER DEFAULT 0,
-    pnl_usd REAL
-);
-
--- Markets to track across sessions
-CREATE TABLE IF NOT EXISTS watchlist (
-    ticker TEXT NOT NULL,
-    exchange TEXT NOT NULL DEFAULT 'kalshi',
-    added_at TEXT NOT NULL,
-    reason TEXT,
-    alert_condition TEXT,
-    PRIMARY KEY (ticker, exchange)
-);
-
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_snapshots_ticker_time
-    ON market_snapshots(ticker, captured_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_series
-    ON market_snapshots(series_ticker);
-CREATE INDEX IF NOT EXISTS idx_snapshots_category
-    ON market_snapshots(category);
-CREATE INDEX IF NOT EXISTS idx_snapshots_exchange
-    ON market_snapshots(exchange);
-CREATE INDEX IF NOT EXISTS idx_snapshots_exchange_status
-    ON market_snapshots(exchange, status);
-CREATE INDEX IF NOT EXISTS idx_signals_pending
-    ON signals(status) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_signals_type
-    ON signals(scan_type);
-CREATE INDEX IF NOT EXISTS idx_signals_exchange
-    ON signals(exchange);
-CREATE INDEX IF NOT EXISTS idx_trades_ticker
-    ON trades(ticker);
-CREATE INDEX IF NOT EXISTS idx_trades_session
-    ON trades(session_id);
-CREATE INDEX IF NOT EXISTS idx_trades_status
-    ON trades(status);
-CREATE INDEX IF NOT EXISTS idx_predictions_unresolved
-    ON predictions(outcome) WHERE outcome IS NULL;
-"""
-
-
 class AgentDatabase:
     """SQLite database for the trading agent.
 
@@ -182,28 +33,31 @@ class AgentDatabase:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=30000")
-        self._init_schema()
-        self._migrate_schema()
+        self._run_migrations()
 
-    def _init_schema(self) -> None:
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+    def _run_migrations(self) -> None:
+        """Run Alembic migrations to bring schema up to date."""
+        from alembic import command
+        from alembic.config import Config
 
-    def _migrate_schema(self) -> None:
-        """Add columns that may not exist in older databases."""
-        migrations = [
-            ("market_snapshots", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
-            ("trades", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
-            ("signals", "exchange", "TEXT DEFAULT 'kalshi'"),
-            ("watchlist", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
-            ("events", "exchange", "TEXT NOT NULL DEFAULT 'kalshi'"),
-        ]
-        for table, column, col_type in migrations:
-            try:
-                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-                self._conn.commit()
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+        config = Config()
+        config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{self.db_path}")
+
+        # If tables exist but no alembic_version, stamp with initial revision
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+        )
+        has_alembic = cursor.fetchone() is not None
+        if not has_alembic:
+            cursor2 = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+            )
+            has_tables = cursor2.fetchone() is not None
+            if has_tables:
+                command.stamp(config, "0001")
+
+        command.upgrade(config, "head")
 
     def close(self) -> None:
         self._conn.close()
@@ -493,33 +347,39 @@ class AgentDatabase:
         )
         return cursor.rowcount
 
-    # ── Watchlist ────────────────────────────────────────────────
-
-    def add_to_watchlist(
-        self,
-        ticker: str,
-        reason: str | None = None,
-        alert_condition: str | None = None,
-        exchange: str = "kalshi",
-    ) -> None:
-        self.execute(
-            """INSERT INTO watchlist (ticker, exchange, added_at, reason, alert_condition)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(ticker, exchange) DO UPDATE SET
-                 reason = excluded.reason,
-                 alert_condition = excluded.alert_condition""",
-            (ticker, exchange, _now(), reason, alert_condition),
-        )
-
-    def remove_from_watchlist(self, ticker: str, exchange: str | None = None) -> None:
-        if exchange:
-            self.execute(
-                "DELETE FROM watchlist WHERE ticker = ? AND exchange = ?", (ticker, exchange)
-            )
-        else:
-            self.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
-
     # ── Session state (for startup) ──────────────────────────────
+
+    def _compute_calibration(self) -> dict[str, Any] | None:
+        """Compute calibration summary from resolved predictions."""
+        resolved = self.query(
+            "SELECT prediction, outcome FROM predictions WHERE outcome IS NOT NULL"
+        )
+        if not resolved:
+            return None
+        total = len(resolved)
+        correct = sum(1 for r in resolved if (r["prediction"] >= 0.5) == (r["outcome"] == 1))
+        brier = sum((r["prediction"] - r["outcome"]) ** 2 for r in resolved) / total
+        buckets: dict[str, dict[str, int]] = {}
+        for r in resolved:
+            b = min(int(r["prediction"] * 5), 4)
+            label = f"{b * 20}-{(b + 1) * 20}%"
+            buckets.setdefault(label, {"count": 0, "correct": 0})
+            buckets[label]["count"] += 1
+            if (r["prediction"] >= 0.5) == (r["outcome"] == 1):
+                buckets[label]["correct"] += 1
+        return {
+            "total": total,
+            "correct": correct,
+            "brier_score": round(brier, 4),
+            "buckets": [
+                {
+                    "range": k,
+                    "count": v["count"],
+                    "accuracy": round(v["correct"] / v["count"], 2) if v["count"] else 0,
+                }
+                for k, v in sorted(buckets.items())
+            ],
+        }
 
     def get_session_state(self) -> dict[str, Any]:
         last_sessions = self.query(
@@ -538,6 +398,12 @@ class AgentDatabase:
             prev = snapshots[1]["balance_usd"] or 0 if len(snapshots) >= 2 else latest
             portfolio_delta = {"balance_change": latest - prev, "latest_balance": latest}
 
+        signal_history = self.query(
+            """SELECT scan_type, COUNT(*) as count,
+                      ROUND(AVG(estimated_edge_pct), 2) as avg_edge
+               FROM signals GROUP BY scan_type ORDER BY count DESC"""
+        )
+
         return {
             "last_session": last_sessions[0] if last_sessions else None,
             "pending_signals": self.query(
@@ -551,9 +417,8 @@ class AgentDatabase:
                    FROM predictions WHERE outcome IS NULL
                    ORDER BY created_at DESC LIMIT 20"""
             ),
-            "watchlist": self.query(
-                "SELECT ticker, exchange, reason, alert_condition FROM watchlist"
-            ),
+            "calibration": self._compute_calibration(),
+            "signal_history": signal_history,
             "portfolio_delta": portfolio_delta,
             "recent_trades": self.query(
                 """SELECT exchange, ticker, action, side, count, price_cents, status
