@@ -404,16 +404,15 @@ async def _run_collector_async() -> None:
     pm_client = None
     try:
         # Build tasks
-        tasks = [collect_kalshi(kalshi, db, status="open")]
+        coros = [collect_kalshi(kalshi, db, status="open")]
 
         if trading_config.polymarket_enabled and credentials.polymarket_key_id:
             pm_client = PolymarketAPIClient(credentials, trading_config)
-            tasks.append(collect_polymarket(pm_client, db))
+            coros.append(collect_polymarket(pm_client, db))
 
-        # Run concurrently
-        results = await asyncio.gather(*tasks)
-        k_events, k_markets = results[0]
-        pm_events, pm_markets = results[1] if len(results) > 1 else (0, 0)
+        # Run concurrently, pad with (0,0) so unpacking always works
+        results = [*await asyncio.gather(*coros), (0, 0)]
+        (k_events, k_markets), (pm_events, pm_markets) = results[0], results[1]
 
         # Generate JSONL market data for agent programmatic discovery
         jsonl_path = str(Path(trading_config.db_path).parent / "markets.jsonl")

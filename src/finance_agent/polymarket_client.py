@@ -50,29 +50,24 @@ class PolymarketAPIClient(BaseAPIClient):
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        await self._rate_read()
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
             params["active"] = status == "open"
         if query:
             params["query"] = query
-        return self._to_dict(await self._client.markets.list(params))  # type: ignore[arg-type]
+        return await self._read(self._client.markets.list(params))  # type: ignore[arg-type]
 
     async def get_market(self, slug: str) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.markets.retrieve_by_slug(slug))
+        return await self._read(self._client.markets.retrieve_by_slug(slug))
 
     async def get_orderbook(self, slug: str) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.markets.book(slug))
+        return await self._read(self._client.markets.book(slug))
 
     async def get_bbo(self, slug: str) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.markets.bbo(slug))
+        return await self._read(self._client.markets.bbo(slug))
 
     async def get_event(self, slug: str) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.events.retrieve_by_slug(slug))
+        return await self._read(self._client.events.retrieve_by_slug(slug))
 
     async def list_events(
         self,
@@ -81,9 +76,8 @@ class PolymarketAPIClient(BaseAPIClient):
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(
-            await self._client.events.list({"active": active, "limit": limit, "offset": offset})
+        return await self._read(
+            self._client.events.list({"active": active, "limit": limit, "offset": offset})
         )
 
     async def get_trades(
@@ -92,18 +86,15 @@ class PolymarketAPIClient(BaseAPIClient):
         *,
         limit: int = 50,
     ) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.markets.trades(slug, {"limit": limit}))  # type: ignore[attr-defined]
+        return await self._read(self._client.markets.trades(slug, {"limit": limit}))  # type: ignore[attr-defined]
 
     # -- Portfolio (read) --
 
     async def get_balance(self) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.account.balances())
+        return await self._read(self._client.account.balances())
 
     async def get_positions(self) -> dict[str, Any]:
-        await self._rate_read()
-        return self._to_dict(await self._client.portfolio.positions())
+        return await self._read(self._client.portfolio.positions())
 
     async def get_orders(
         self,
@@ -111,13 +102,12 @@ class PolymarketAPIClient(BaseAPIClient):
         market_slug: str | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
-        await self._rate_read()
         params: dict[str, Any] = {}
         if market_slug:
             params["marketSlug"] = market_slug
         if status:
             params["status"] = status
-        return self._to_dict(await self._client.orders.list(params))  # type: ignore[arg-type]
+        return await self._read(self._client.orders.list(params))  # type: ignore[arg-type]
 
     # -- Orders (write) --
 
@@ -131,7 +121,6 @@ class PolymarketAPIClient(BaseAPIClient):
         quantity: int = 1,
         tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
     ) -> dict[str, Any]:
-        await self._rate_write()
         order_params: dict[str, Any] = {
             "marketSlug": slug,
             "intent": intent,
@@ -140,7 +129,7 @@ class PolymarketAPIClient(BaseAPIClient):
             "quantity": quantity,
             "tif": tif,
         }
-        return self._to_dict(await self._client.orders.create(order_params))  # type: ignore[arg-type]
+        return await self._write(self._client.orders.create(order_params))  # type: ignore[arg-type]
 
     async def cancel_order(self, order_id: str, slug: str = "") -> dict[str, Any]:
         await self._rate_write()

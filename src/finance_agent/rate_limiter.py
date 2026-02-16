@@ -38,18 +38,22 @@ class RateLimiter:
                 return None
             return (cost - self._tokens[bucket]) / self._max[bucket]
 
-    def acquire_read_sync(self, cost: float = 1.0) -> None:
-        while (wait := self._try_acquire("read", cost)) is not None:
+    def acquire_sync(self, bucket: Literal["read", "write"], cost: float = 1.0) -> None:
+        while (wait := self._try_acquire(bucket, cost)) is not None:
             time.sleep(wait)
+
+    def acquire_read_sync(self, cost: float = 1.0) -> None:
+        self.acquire_sync("read", cost)
 
     def acquire_write_sync(self, cost: float = 1.0) -> None:
-        while (wait := self._try_acquire("write", cost)) is not None:
-            time.sleep(wait)
+        self.acquire_sync("write", cost)
+
+    async def acquire(self, bucket: Literal["read", "write"], cost: float = 1.0) -> None:
+        while (wait := self._try_acquire(bucket, cost)) is not None:
+            await asyncio.sleep(wait)
 
     async def acquire_read(self, cost: float = 1.0) -> None:
-        while (wait := self._try_acquire("read", cost)) is not None:
-            await asyncio.sleep(wait)
+        await self.acquire("read", cost)
 
     async def acquire_write(self, cost: float = 1.0) -> None:
-        while (wait := self._try_acquire("write", cost)) is not None:
-            await asyncio.sleep(wait)
+        await self.acquire("write", cost)

@@ -123,11 +123,11 @@ class TUIServices:
             total_with_fee = cost_usd + fee
             total_cost += total_with_fee
 
-            if exchange == "kalshi":
-                max_usd = self._config.kalshi_max_position_usd
-            else:
-                max_usd = self._config.polymarket_max_position_usd
-
+            max_usd = (
+                self._config.kalshi_max_position_usd
+                if exchange == "kalshi"
+                else self._config.polymarket_max_position_usd
+            )
             if total_with_fee > max_usd:
                 return (
                     f"Order ${total_with_fee:.2f} (incl ${fee:.4f} fee) "

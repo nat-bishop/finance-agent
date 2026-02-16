@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from typing import Any
 
 from .rate_limiter import RateLimiter
@@ -27,3 +28,13 @@ class BaseAPIClient:
 
     async def _rate_write(self, cost: float = 1.0) -> None:
         await self._limiter.acquire_write(cost)
+
+    async def _read(self, coro: Awaitable[Any], cost: float = 1.0) -> Any:
+        """Rate-limit, await, and convert an SDK read call."""
+        await self._rate_read(cost)
+        return self._to_dict(await coro)
+
+    async def _write(self, coro: Awaitable[Any], cost: float = 1.0) -> Any:
+        """Rate-limit, await, and convert an SDK write call."""
+        await self._rate_write(cost)
+        return self._to_dict(await coro)
