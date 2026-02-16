@@ -65,7 +65,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi)` → 5 read-only tools, `create_db_tools(db, session_id, kalshi)` → 1 tool (`recommend_trade` with strategy + legs array). 6 tools total.
 - **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Dormant module. Thin wrapper around `polymarket-us` SDK. Preserved for future re-enablement but not imported by active code.
-- **fees.py** — Kalshi fee calculations: P(1-P) parabolic formula, `kalshi_fee()`, `leg_fee()`, `best_price_and_depth()`, `compute_arb_edge()`.
+- **fees.py** — Kalshi fee calculations: P(1-P) parabolic formula, `kalshi_fee()`, `best_price_and_depth()`, `compute_arb_edge()`.
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
 - **collector.py** — Standalone Kalshi data collector. Paginated event collection via `GET /events`. Generates `markets.jsonl` (one JSON object per market with denormalized event metadata). Also triggers incremental Kalshi daily history sync and upserts market metadata to `kalshi_market_meta`.

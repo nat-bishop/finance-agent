@@ -9,7 +9,7 @@ from typing import Any
 
 from ..config import Credentials, TradingConfig
 from ..database import AgentDatabase
-from ..fees import best_price_and_depth, compute_arb_edge, leg_fee
+from ..fees import best_price_and_depth, compute_arb_edge, kalshi_fee
 from ..kalshi_client import KalshiAPIClient
 from ..ws_monitor import FillMonitor
 from .messages import ExecutionProgress, FillReceived
@@ -54,7 +54,7 @@ class TUIServices:
         }
 
     async def get_orders(self, exchange: str | None = None) -> dict[str, Any]:
-        """Fetch resting orders from Kalshi."""
+        """Fetch resting orders from Kalshi (exchange param kept for API compat)."""
         return {"kalshi": await self._kalshi.get_orders(status="resting")}
 
     # ── Recommendations ───────────────────────────────────────────
@@ -69,7 +69,7 @@ class TUIServices:
 
     # ── Orderbook fetching ────────────────────────────────────────
 
-    async def _fetch_orderbook(self, exchange: str, market_id: str) -> dict[str, Any]:
+    async def _fetch_orderbook(self, market_id: str) -> dict[str, Any]:
         """Fetch orderbook from Kalshi."""
         return await self._kalshi.get_orderbook(market_id)
 
@@ -85,7 +85,7 @@ class TUIServices:
                 return f"Leg {leg.get('market_id')} has no computed price/quantity"
 
             cost_usd = price_cents * quantity / 100
-            fee = leg_fee("kalshi", quantity, price_cents, maker=leg.get("is_maker", False))
+            fee = kalshi_fee(quantity, price_cents, maker=leg.get("is_maker", False))
             total_with_fee = cost_usd + fee
             total_cost += total_with_fee
 
@@ -177,7 +177,7 @@ class TUIServices:
         refreshed_legs: list[dict[str, Any]] = []
         for leg in legs:
             try:
-                ob = await self._fetch_orderbook(leg.get("exchange", "kalshi"), leg["market_id"])
+                ob = await self._fetch_orderbook(leg["market_id"])
             except Exception as e:
                 return None, self._reject_all_legs(group_id, legs, f"Orderbook fetch failed: {e}")
 

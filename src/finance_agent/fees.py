@@ -24,13 +24,6 @@ def kalshi_fee(contracts: int, price_cents: int, *, maker: bool = False) -> floa
     return min(raw, cap)
 
 
-def leg_fee(exchange: str, contracts: int, price_cents: int, *, maker: bool = False) -> float:
-    """Dispatch to exchange-specific fee function."""
-    if exchange == "kalshi":
-        return kalshi_fee(contracts, price_cents, maker=maker)
-    raise ValueError(f"Unknown exchange: {exchange}")
-
-
 def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | None, int]:
     """Extract best executable price (cents) and total depth at that level.
 

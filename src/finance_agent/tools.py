@@ -117,6 +117,9 @@ def create_market_tools(kalshi: KalshiAPIClient) -> list:
     return [get_market, get_orderbook, get_trades, get_portfolio, get_orders]
 
 
+# ── Recommendation helpers ──────────────────────────────────────────
+
+
 def _validate_leg_prices(enriched_legs: list[dict[str, Any]]) -> str | None:
     """Check all legs have executable prices in the 1-99c range.
 
@@ -202,11 +205,10 @@ def _apply_manual_direction(
         enriched["side"] = side
         enriched["quantity"] = quantity
         # For buys: use ask price on the specified side
-        # For sells: use bid price on the specified side (inverse)
+        # For sells: use bid price on the specified side
         if action == "buy":
             enriched["price_cents"] = enriched.get(f"{side}_ask")
         else:
-            # sell YES → someone buys YES from us → yes_bid is the executable price
             enriched["price_cents"] = enriched.get(f"{side}_bid")
         enriched["depth"] = enriched.get(f"{side}_depth", 0)
         if not enriched["price_cents"]:
@@ -214,12 +216,20 @@ def _apply_manual_direction(
     return None
 
 
+def _assign_maker_taker(enriched_legs: list[dict[str, Any]]) -> None:
+    """Assign maker/taker roles by depth (shallowest = maker). Mutates in-place."""
+    sorted_legs = sorted(enriched_legs, key=lambda lg: lg.get("depth", 0))
+    sorted_legs[0]["is_maker"] = True
+    for leg in sorted_legs[1:]:
+        leg["is_maker"] = False
+
+
 def _validate_position_limits(
     enriched_legs: list[dict[str, Any]],
     contracts: int,
     cfg: TradingConfig,
 ) -> str | None:
-    """Check fee-inclusive cost per leg against exchange position limits.
+    """Check fee-inclusive cost per leg against position limits.
 
     Returns error string or None on success.
     """
@@ -250,161 +260,49 @@ def _validate_aggregate_limits(
     return None
 
 
-def _build_recommendation_response(
-    *,
-    enriched_legs: list[dict[str, Any]],
-    contracts: int,
-    cost_per_pair_usd: float,
-    edge_result: dict[str, Any],
-    args: dict[str, Any],
-    db: AgentDatabase,
-    session_id: str,
-    recommendation_ttl_minutes: int,
-    total_exposure: float,
-) -> dict:
-    """Store recommendation to DB and build the MCP response."""
-    db_legs = []
-    for leg in enriched_legs:
-        ob_snapshot = {
-            "yes_ask": leg.get("yes_ask"),
-            "no_ask": leg.get("no_ask"),
-            "yes_depth": leg.get("yes_depth"),
-            "no_depth": leg.get("no_depth"),
-        }
-        db_legs.append(
-            {
-                "exchange": leg["exchange"],
-                "market_id": leg["market_id"],
-                "market_title": leg["market_title"],
-                "action": leg["action"],
-                "side": leg["side"],
-                "quantity": leg.get("quantity", contracts),
-                "price_cents": leg["price_cents"],
-                "is_maker": leg.get("is_maker", False),
-                "orderbook_snapshot_json": json.dumps(ob_snapshot),
-            }
-        )
-
-    group_id, expires_at = db.log_recommendation_group(
-        session_id=session_id,
-        thesis=args.get("thesis"),
-        estimated_edge_pct=edge_result["net_edge_pct"],
-        equivalence_notes=args.get("equivalence_notes"),
-        legs=db_legs,
-        ttl_minutes=recommendation_ttl_minutes,
-        total_exposure_usd=total_exposure,
-        computed_edge_pct=edge_result["net_edge_pct"],
-        computed_fees_usd=edge_result["total_fees_usd"],
-    )
-
-    return _text(
+def _build_db_legs(enriched_legs: list[dict[str, Any]], contracts: int) -> list[dict[str, Any]]:
+    """Build leg dicts for DB storage from enriched legs."""
+    return [
         {
-            "group_id": group_id,
-            "status": "pending",
-            "expires_at": expires_at,
-            "computed": {
-                "contracts_per_leg": contracts,
-                "cost_per_pair_usd": round(cost_per_pair_usd, 4),
-                "total_cost_usd": round(contracts * cost_per_pair_usd, 2),
-                "gross_edge_usd": edge_result["gross_edge_usd"],
-                "total_fees_usd": edge_result["total_fees_usd"],
-                "net_edge_usd": edge_result["net_edge_usd"],
-                "net_edge_pct": edge_result["net_edge_pct"],
-                "fee_breakdown": edge_result["fee_breakdown"],
-            },
-            "legs": [
+            "exchange": leg["exchange"],
+            "market_id": leg["market_id"],
+            "market_title": leg["market_title"],
+            "action": leg["action"],
+            "side": leg["side"],
+            "quantity": leg.get("quantity", contracts),
+            "price_cents": leg["price_cents"],
+            "is_maker": leg.get("is_maker", False),
+            "orderbook_snapshot_json": json.dumps(
                 {
-                    "exchange": leg["exchange"],
-                    "market_id": leg["market_id"],
-                    "market_title": leg["market_title"],
-                    "action": leg["action"],
-                    "side": leg["side"],
-                    "quantity": leg.get("quantity", contracts),
-                    "price_cents": leg["price_cents"],
-                    "is_maker": leg.get("is_maker", False),
+                    "yes_ask": leg.get("yes_ask"),
+                    "no_ask": leg.get("no_ask"),
+                    "yes_depth": leg.get("yes_depth"),
+                    "no_depth": leg.get("no_depth"),
                 }
-                for leg in enriched_legs
-            ],
+            ),
         }
-    )
+        for leg in enriched_legs
+    ]
 
 
-def _build_manual_recommendation_response(
-    *,
-    enriched_legs: list[dict[str, Any]],
-    args: dict[str, Any],
-    db: AgentDatabase,
-    session_id: str,
-    recommendation_ttl_minutes: int,
-) -> dict:
-    """Store a manual recommendation to DB and build the MCP response."""
-    db_legs = []
-    total_cost = 0.0
-    total_fees = 0.0
-    for leg in enriched_legs:
-        qty = leg["quantity"]
-        fee = kalshi_fee(qty, leg["price_cents"], maker=leg.get("is_maker", False))
-        cost = leg["price_cents"] * qty / 100.0
-        total_cost += cost
-        total_fees += fee
-
-        ob_snapshot = {
-            "yes_ask": leg.get("yes_ask"),
-            "no_ask": leg.get("no_ask"),
-            "yes_depth": leg.get("yes_depth"),
-            "no_depth": leg.get("no_depth"),
-        }
-        db_legs.append(
-            {
-                "exchange": leg["exchange"],
-                "market_id": leg["market_id"],
-                "market_title": leg["market_title"],
-                "action": leg["action"],
-                "side": leg["side"],
-                "quantity": qty,
-                "price_cents": leg["price_cents"],
-                "is_maker": leg.get("is_maker", False),
-                "orderbook_snapshot_json": json.dumps(ob_snapshot),
-            }
-        )
-
-    group_id, expires_at = db.log_recommendation_group(
-        session_id=session_id,
-        thesis=args.get("thesis"),
-        estimated_edge_pct=0.0,
-        equivalence_notes=args.get("equivalence_notes"),
-        legs=db_legs,
-        ttl_minutes=recommendation_ttl_minutes,
-        total_exposure_usd=total_cost,
-        computed_edge_pct=0.0,
-        computed_fees_usd=round(total_fees, 4),
-    )
-
-    return _text(
+def _build_response_legs(enriched_legs: list[dict[str, Any]], contracts: int) -> list[dict]:
+    """Build leg dicts for the MCP response."""
+    return [
         {
-            "group_id": group_id,
-            "status": "pending",
-            "expires_at": expires_at,
-            "strategy": "manual",
-            "computed": {
-                "total_cost_usd": round(total_cost, 2),
-                "total_fees_usd": round(total_fees, 4),
-            },
-            "legs": [
-                {
-                    "exchange": leg["exchange"],
-                    "market_id": leg["market_id"],
-                    "market_title": leg["market_title"],
-                    "action": leg["action"],
-                    "side": leg["side"],
-                    "quantity": leg["quantity"],
-                    "price_cents": leg["price_cents"],
-                    "is_maker": leg.get("is_maker", False),
-                }
-                for leg in enriched_legs
-            ],
+            "exchange": leg["exchange"],
+            "market_id": leg["market_id"],
+            "market_title": leg["market_title"],
+            "action": leg["action"],
+            "side": leg["side"],
+            "quantity": leg.get("quantity", contracts),
+            "price_cents": leg["price_cents"],
+            "is_maker": leg.get("is_maker", False),
         }
-    )
+        for leg in enriched_legs
+    ]
+
+
+# ── DB tool factory ─────────────────────────────────────────────────
 
 
 def create_db_tools(
@@ -420,16 +318,6 @@ def create_db_tools(
     for auto-pricing and balanced sizing.
     """
     cfg: TradingConfig = trading_config or TradingConfig()
-
-    async def _fetch_orderbook(market_id: str) -> dict[str, Any]:
-        return await kalshi.get_orderbook(market_id)
-
-    async def _fetch_market_title(market_id: str) -> str:
-        market = await kalshi.get_market(market_id)
-        if isinstance(market, dict):
-            inner = market.get("market", market)
-            return str(inner.get("title", inner.get("question", market_id)))
-        return market_id
 
     @tool(
         "recommend_trade",
@@ -508,27 +396,32 @@ def create_db_tools(
         errors: list[str] = []
         if len(legs_input) < 2:
             errors.append("Requires 2+ legs")
-
         if strategy == "bracket" and not total_exposure:
             errors.append("Bracket strategy requires total_exposure_usd")
-
         if errors:
             return _text({"error": "; ".join(errors)})
 
-        # ── Fetch orderbooks and market titles ──────────────────
+        # ── Fetch orderbooks, extract prices, resolve titles ────
         enriched_legs: list[dict[str, Any]] = []
         for i, leg in enumerate(legs_input):
             market_id = leg["market_id"]
 
             try:
-                ob = await _fetch_orderbook(market_id)
+                ob = await kalshi.get_orderbook(market_id)
             except Exception as e:
                 return _text({"error": f"Failed to fetch orderbook for {market_id}: {e}"})
 
             try:
-                title = await _fetch_market_title(market_id)
+                market_data = await kalshi.get_market(market_id)
+                inner = (
+                    market_data.get("market", market_data) if isinstance(market_data, dict) else {}
+                )
+                title = str(inner.get("title", inner.get("question", market_id)))
             except Exception:
                 title = market_id
+
+            yes_price, yes_depth = best_price_and_depth(ob, "yes")
+            no_price, no_depth = best_price_and_depth(ob, "no")
 
             enriched_legs.append(
                 {
@@ -537,37 +430,25 @@ def create_db_tools(
                     "market_title": title,
                     "orderbook": ob,
                     "leg_index": i,
+                    "yes_ask": yes_price,
+                    "yes_depth": yes_depth,
+                    "no_ask": no_price,
+                    "no_depth": no_depth,
+                    # Bid = ask in Kalshi's binary orderbook format
+                    "yes_bid": yes_price,
+                    "no_bid": no_price,
                 }
             )
 
-        # ── Extract prices from orderbooks ──────────────────────
-        for leg in enriched_legs:
-            ob = leg["orderbook"]
-            yes_price, yes_depth = best_price_and_depth(ob, "yes")
-            no_price, no_depth = best_price_and_depth(ob, "no")
-            leg["yes_ask"] = yes_price
-            leg["yes_depth"] = yes_depth
-            leg["no_ask"] = no_price
-            leg["no_depth"] = no_depth
-            # Also extract bid prices for sell orders (manual strategy)
-            yes_bid_price, _ = best_price_and_depth(ob, "yes")
-            no_bid_price, _ = best_price_and_depth(ob, "no")
-            leg["yes_bid"] = yes_bid_price
-            leg["no_bid"] = no_bid_price
-
         # ── Strategy routing ──────────────────────────────────────
         if strategy == "bracket":
-            return await _handle_bracket(enriched_legs, args, total_exposure, cfg, db, session_id)
-        else:
-            return await _handle_manual(enriched_legs, legs_input, args, cfg, db, session_id)
+            return await _handle_bracket(enriched_legs, args, total_exposure)
+        return await _handle_manual(enriched_legs, legs_input, args)
 
     async def _handle_bracket(
         enriched_legs: list[dict[str, Any]],
         args: dict[str, Any],
         total_exposure: float,
-        cfg: TradingConfig,
-        db: AgentDatabase,
-        session_id: str,
     ) -> dict:
         """Bracket strategy: mutually exclusive outcomes, auto-computed."""
         direction_error = _determine_direction_bracket(enriched_legs)
@@ -599,12 +480,8 @@ def create_db_tools(
                     }
                 )
 
-        # Compute fees (leg-in: harder side maker, easier side taker)
-        sorted_legs = sorted(enriched_legs, key=lambda lg: lg.get("depth", 0))
-        sorted_legs[0]["is_maker"] = True
-        for leg in sorted_legs[1:]:
-            leg["is_maker"] = False
-
+        # Assign maker/taker and compute edge
+        _assign_maker_taker(enriched_legs)
         fee_legs = [
             {
                 "exchange": "kalshi",
@@ -630,62 +507,90 @@ def create_db_tools(
             return _text({"error": limit_error})
 
         # Store and respond
-        return _build_recommendation_response(
-            enriched_legs=enriched_legs,
-            contracts=contracts,
-            cost_per_pair_usd=cost_per_pair_usd,
-            edge_result=edge_result,
-            args=args,
-            db=db,
+        group_id, expires_at = db.log_recommendation_group(
             session_id=session_id,
-            recommendation_ttl_minutes=recommendation_ttl_minutes,
-            total_exposure=total_exposure,
+            thesis=args.get("thesis"),
+            estimated_edge_pct=edge_result["net_edge_pct"],
+            equivalence_notes=args.get("equivalence_notes"),
+            legs=_build_db_legs(enriched_legs, contracts),
+            ttl_minutes=recommendation_ttl_minutes,
+            total_exposure_usd=total_exposure,
+            computed_edge_pct=edge_result["net_edge_pct"],
+            computed_fees_usd=edge_result["total_fees_usd"],
+        )
+
+        return _text(
+            {
+                "group_id": group_id,
+                "status": "pending",
+                "expires_at": expires_at,
+                "computed": {
+                    "contracts_per_leg": contracts,
+                    "cost_per_pair_usd": round(cost_per_pair_usd, 4),
+                    "total_cost_usd": round(contracts * cost_per_pair_usd, 2),
+                    "gross_edge_usd": edge_result["gross_edge_usd"],
+                    "total_fees_usd": edge_result["total_fees_usd"],
+                    "net_edge_usd": edge_result["net_edge_usd"],
+                    "net_edge_pct": edge_result["net_edge_pct"],
+                    "fee_breakdown": edge_result["fee_breakdown"],
+                },
+                "legs": _build_response_legs(enriched_legs, contracts),
+            }
         )
 
     async def _handle_manual(
         enriched_legs: list[dict[str, Any]],
         legs_input: list[dict[str, Any]],
         args: dict[str, Any],
-        cfg: TradingConfig,
-        db: AgentDatabase,
-        session_id: str,
     ) -> dict:
         """Manual strategy: agent-specified positions, no guaranteed edge."""
         direction_error = _apply_manual_direction(enriched_legs, legs_input)
         if direction_error:
             return _text({"error": direction_error})
 
-        # Assign maker/taker by depth (shallowest = maker)
-        sorted_legs = sorted(enriched_legs, key=lambda lg: lg.get("depth", 0))
-        sorted_legs[0]["is_maker"] = True
-        for leg in sorted_legs[1:]:
-            leg["is_maker"] = False
+        _assign_maker_taker(enriched_legs)
 
-        # Validate aggregate position limits
+        # Validate position limits (aggregate + per-leg)
         limit_error = _validate_aggregate_limits(enriched_legs, cfg)
         if limit_error:
             return _text({"error": limit_error})
+        limit_error = _validate_position_limits(enriched_legs, 0, cfg)
+        if limit_error:
+            return _text({"error": limit_error})
 
-        # Per-leg position limits
+        # Compute totals for response
+        total_cost = 0.0
+        total_fees = 0.0
         for leg in enriched_legs:
             qty = leg["quantity"]
-            cost = leg["price_cents"] * qty / 100.0
-            fee = kalshi_fee(qty, leg["price_cents"], maker=leg.get("is_maker", False))
-            if cost + fee > cfg.kalshi_max_position_usd:
-                return _text(
-                    {
-                        "error": f"Leg {leg['market_id']} cost ${cost + fee:.2f} "
-                        f"exceeds limit ${cfg.kalshi_max_position_usd:.2f}"
-                    }
-                )
+            total_cost += leg["price_cents"] * qty / 100.0
+            total_fees += kalshi_fee(qty, leg["price_cents"], maker=leg.get("is_maker", False))
 
         # Store and respond
-        return _build_manual_recommendation_response(
-            enriched_legs=enriched_legs,
-            args=args,
-            db=db,
+        group_id, expires_at = db.log_recommendation_group(
             session_id=session_id,
-            recommendation_ttl_minutes=recommendation_ttl_minutes,
+            thesis=args.get("thesis"),
+            estimated_edge_pct=0.0,
+            equivalence_notes=args.get("equivalence_notes"),
+            legs=_build_db_legs(enriched_legs, 0),
+            ttl_minutes=recommendation_ttl_minutes,
+            total_exposure_usd=total_cost,
+            computed_edge_pct=0.0,
+            computed_fees_usd=round(total_fees, 4),
+        )
+
+        return _text(
+            {
+                "group_id": group_id,
+                "status": "pending",
+                "expires_at": expires_at,
+                "strategy": "manual",
+                "computed": {
+                    "total_cost_usd": round(total_cost, 2),
+                    "total_fees_usd": round(total_fees, 4),
+                },
+                "legs": _build_response_legs(enriched_legs, 0),
+            }
         )
 
     return [recommend_trade]
