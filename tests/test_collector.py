@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -10,7 +12,7 @@ from finance_agent.collector import (
     _as_list,
     _compute_derived,
     _compute_derived_polymarket,
-    _generate_market_listings,
+    _generate_markets_jsonl,
     _parse_days_to_expiry,
     collect_kalshi,
     collect_polymarket,
@@ -44,6 +46,22 @@ def test_parse_days_z_suffix():
 def test_parse_days_unix_timestamp():
     future_ts = (datetime.now(UTC) + timedelta(days=3)).timestamp()
     result = _parse_days_to_expiry(future_ts)
+    assert result is not None
+    assert 2.9 < result < 3.1
+
+
+def test_parse_days_datetime_object():
+    """datetime objects (as returned by Kalshi SDK) are parsed correctly."""
+    future = datetime.now(UTC) + timedelta(days=5)
+    result = _parse_days_to_expiry(future)
+    assert result is not None
+    assert 4.9 < result < 5.1
+
+
+def test_parse_days_naive_datetime():
+    """Naive datetime objects get UTC timezone applied."""
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=3)
+    result = _parse_days_to_expiry(future)
     assert result is not None
     assert 2.9 < result < 3.1
 
@@ -185,54 +203,56 @@ def test_as_list_no_matching_key():
     assert _as_list({"other": [1]}, "markets") == []
 
 
-# ── collect_kalshi (events-first) ────────────────────────────────
+# ── collect_kalshi (events-first, async) ─────────────────────────
 
 
-def test_collect_kalshi_pagination(db, mock_kalshi):
+async def test_collect_kalshi_pagination(db, mock_kalshi):
     """Events with nested markets are collected in a single pass."""
-    mock_kalshi.get_events.side_effect = [
-        {
-            "events": [
-                {
-                    "event_ticker": "EVT-1",
-                    "title": "Event 1",
-                    "category": "Politics",
-                    "mutually_exclusive": True,
-                    "markets": [
-                        {
-                            "ticker": f"M-{i}",
-                            "title": f"Market {i}",
-                            "yes_bid": 45,
-                            "yes_ask": 55,
-                            "status": "open",
-                        }
-                        for i in range(3)
-                    ],
-                },
-            ],
-            "cursor": "page2",
-        },
-        {
-            "events": [
-                {
-                    "event_ticker": "EVT-2",
-                    "title": "Event 2",
-                    "category": "Sports",
-                    "markets": [
-                        {
-                            "ticker": "M-3",
-                            "title": "Market 3",
-                            "yes_bid": 40,
-                            "yes_ask": 60,
-                            "status": "open",
-                        },
-                    ],
-                },
-            ],
-            "cursor": None,
-        },
-    ]
-    event_count, market_count = collect_kalshi(mock_kalshi, db, status="open")
+    mock_kalshi.get_events = AsyncMock(
+        side_effect=[
+            {
+                "events": [
+                    {
+                        "event_ticker": "EVT-1",
+                        "title": "Event 1",
+                        "category": "Politics",
+                        "mutually_exclusive": True,
+                        "markets": [
+                            {
+                                "ticker": f"M-{i}",
+                                "title": f"Market {i}",
+                                "yes_bid": 45,
+                                "yes_ask": 55,
+                                "status": "open",
+                            }
+                            for i in range(3)
+                        ],
+                    },
+                ],
+                "cursor": "page2",
+            },
+            {
+                "events": [
+                    {
+                        "event_ticker": "EVT-2",
+                        "title": "Event 2",
+                        "category": "Sports",
+                        "markets": [
+                            {
+                                "ticker": "M-3",
+                                "title": "Market 3",
+                                "yes_bid": 40,
+                                "yes_ask": 60,
+                                "status": "open",
+                            },
+                        ],
+                    },
+                ],
+                "cursor": None,
+            },
+        ]
+    )
+    event_count, market_count = await collect_kalshi(mock_kalshi, db, status="open")
     assert event_count == 2
     assert market_count == 4
     assert mock_kalshi.get_events.call_count == 2
@@ -243,48 +263,64 @@ def test_collect_kalshi_pagination(db, mock_kalshi):
     assert "EVT-2" in tickers
 
 
-def test_collect_kalshi_max_pages(db, mock_kalshi):
+async def test_collect_kalshi_max_pages(db, mock_kalshi):
     """max_pages limits how many pages are fetched."""
-    mock_kalshi.get_events.return_value = {
-        "events": [
-            {
-                "event_ticker": "EVT-1",
-                "title": "Event",
-                "markets": [
-                    {"ticker": "M-1", "yes_bid": 45, "yes_ask": 55, "status": "open"},
-                ],
-            },
-        ],
-        "cursor": "more",
-    }
-    event_count, market_count = collect_kalshi(mock_kalshi, db, status="settled", max_pages=1)
+    mock_kalshi.get_events = AsyncMock(
+        return_value={
+            "events": [
+                {
+                    "event_ticker": "EVT-1",
+                    "title": "Event",
+                    "markets": [
+                        {"ticker": "M-1", "yes_bid": 45, "yes_ask": 55, "status": "open"},
+                    ],
+                },
+            ],
+            "cursor": "more",
+        }
+    )
+    event_count, market_count = await collect_kalshi(
+        mock_kalshi, db, status="settled", max_pages=1
+    )
     assert event_count == 1
     assert market_count == 1
     assert mock_kalshi.get_events.call_count == 1
 
 
-# ── collect_polymarket (events-first) ────────────────────────────
+# ── collect_polymarket (events-first, async) ─────────────────────
 
 
-def test_collect_polymarket(db, mock_polymarket):
+async def test_collect_polymarket(db, mock_polymarket):
     """Polymarket events with nested markets collected in a single pass."""
-    mock_polymarket.list_events.side_effect = [
-        {
-            "events": [
-                {
-                    "slug": "evt-1",
-                    "title": "PM Event",
-                    "category": "Sports",
-                    "markets": [
-                        {"slug": "m-1", "title": "Market 1", "yes_price": 0.50, "active": True},
-                        {"slug": "m-2", "title": "Market 2", "yes_price": 0.60, "active": True},
-                    ],
-                },
-            ],
-        },
-        {"events": []},
-    ]
-    event_count, market_count = collect_polymarket(mock_polymarket, db)
+    mock_polymarket.list_events = AsyncMock(
+        side_effect=[
+            {
+                "events": [
+                    {
+                        "slug": "evt-1",
+                        "title": "PM Event",
+                        "category": "Sports",
+                        "markets": [
+                            {
+                                "slug": "m-1",
+                                "title": "Market 1",
+                                "yes_price": 0.50,
+                                "active": True,
+                            },
+                            {
+                                "slug": "m-2",
+                                "title": "Market 2",
+                                "yes_price": 0.60,
+                                "active": True,
+                            },
+                        ],
+                    },
+                ],
+            },
+            {"events": []},
+        ]
+    )
+    event_count, market_count = await collect_polymarket(mock_polymarket, db)
     assert event_count == 1
     assert market_count == 2
 
@@ -293,25 +329,92 @@ def test_collect_polymarket(db, mock_polymarket):
     assert matching[0]["title"] == "PM Event"
 
 
-# ── _generate_market_listings ────────────────────────────────────
+# ── _generate_markets_jsonl ─────────────────────────────────────
 
 
-def test_generate_market_listings(db, sample_market_snapshot, tmp_path):
+def test_generate_markets_jsonl(db, sample_market_snapshot, tmp_path):
+    # Insert an event so the event-join path is exercised
+    db.upsert_event(
+        event_ticker="EVT-1",
+        exchange="kalshi",
+        title="Test Event Title",
+        category="Politics",
+        mutually_exclusive=True,
+        markets_json="[]",
+    )
+
+    # Kalshi market with raw_json containing rules_primary
+    kalshi_raw = json.dumps({"rules_primary": "Resolves Yes if X happens."})
     db.insert_market_snapshots(
         [
             sample_market_snapshot(
-                ticker="K-1", exchange="kalshi", category="Politics", mid_price_cents=50
+                ticker="K-1",
+                exchange="kalshi",
+                category="Politics",
+                mid_price_cents=50,
+                raw_json=kalshi_raw,
             ),
             sample_market_snapshot(
-                ticker="P-1", exchange="polymarket", category="Sports", mid_price_cents=60
+                ticker="P-1",
+                exchange="polymarket",
+                category="Sports",
+                mid_price_cents=60,
+                raw_json=json.dumps({"description": "Will X happen?"}),
+            ),
+            # Polymarket market WITHOUT mid_price (the bug fix — should still be included)
+            sample_market_snapshot(
+                ticker="P-2",
+                exchange="polymarket",
+                category="Sports",
+                mid_price_cents=None,
+                yes_bid=None,
+                yes_ask=None,
+                spread_cents=None,
+                raw_json=json.dumps({"description": "No prices available"}),
             ),
         ]
     )
-    output = tmp_path / "active_markets.md"
-    _generate_market_listings(db, str(output))
-    content = output.read_text()
-    assert "# Active Markets" in content
-    assert "Politics" in content
-    assert "Sports" in content
-    assert "K-1" in content
-    assert "P-1" in content
+    output = tmp_path / "markets.jsonl"
+    _generate_markets_jsonl(db, str(output))
+
+    lines = output.read_text().strip().split("\n")
+    assert len(lines) == 3  # includes P-2 without mid_price
+
+    records = [json.loads(line) for line in lines]
+    tickers = {r["ticker"] for r in records}
+    assert "K-1" in tickers
+    assert "P-1" in tickers
+    assert "P-2" in tickers
+
+    # Verify all expected fields are present
+    for r in records:
+        assert "exchange" in r
+        assert "ticker" in r
+        assert "title" in r
+        assert "mid_price_cents" in r
+        assert "category" in r
+        assert "event_title" in r
+        assert "mutually_exclusive" in r
+        assert "description" in r
+
+    # Verify Kalshi record with matching event
+    kalshi_rec = next(r for r in records if r["ticker"] == "K-1")
+    assert kalshi_rec["exchange"] == "kalshi"
+    assert kalshi_rec["mid_price_cents"] == 50
+    # Category comes from event metadata
+    assert kalshi_rec["category"] == "Politics"
+    assert kalshi_rec["event_title"] == "Test Event Title"
+    assert kalshi_rec["mutually_exclusive"] is True
+    # Description from raw_json rules_primary
+    assert kalshi_rec["description"] == "Resolves Yes if X happens."
+
+    # Verify Polymarket record with description
+    pm_rec = next(r for r in records if r["ticker"] == "P-1")
+    assert pm_rec["exchange"] == "polymarket"
+    assert pm_rec["mid_price_cents"] == 60
+    assert pm_rec["description"] == "Will X happen?"
+
+    # Verify Polymarket record without mid_price (was previously filtered out)
+    pm_no_price = next(r for r in records if r["ticker"] == "P-2")
+    assert pm_no_price["mid_price_cents"] is None
+    assert pm_no_price["description"] == "No prices available"

@@ -36,12 +36,12 @@ This is a cross-platform arbitrage system for Kalshi and Polymarket US, built on
 ### Three-layer design
 
 **Programmatic layer** (no LLM, runs separately):
-- `collector.py` — snapshots market data from both Kalshi and Polymarket US to SQLite, generates `/workspace/data/active_markets.md` (category-grouped market listings for agent discovery)
+- `collector.py` — snapshots market data from both Kalshi and Polymarket US to SQLite, generates `/workspace/data/markets.jsonl` (one JSON object per market for agent programmatic discovery)
 - Run via: `make collect`
 
 **Agent layer** (Claude REPL, runs on demand):
 - Loads portfolios + pending recommendations from SQLite on startup, presents cross-platform dashboard
-- Reads `active_markets.md` to find cross-platform connections using semantic understanding
+- Writes Python scripts against `markets.jsonl` for bulk cross-platform matching, then investigates top candidates with MCP tools
 - Investigates opportunities: semantic market matching, price comparison, orderbook analysis
 - Records trade recommendations via `recommend_trade` tool for separate review/execution
 - All state persisted to SQLite for continuity across sessions
@@ -67,7 +67,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
-- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates enriched `active_markets.md` market listings (price, spread, volume, OI, DTE).
+- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates `markets.jsonl` (one JSON object per market with denormalized event metadata).
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
 - **prompts/system.md** — System prompt template with arb-only mission, settlement equivalence verification protocol, arbitrage structures, information hierarchy, market discovery workflow, recommendation protocol, risk rules.

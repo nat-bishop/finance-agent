@@ -1,4 +1,4 @@
-"""Thin wrapper around the kalshi_python_sync SDK."""
+"""Thin wrapper around the kalshi_python_async SDK."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kalshi_python_sync import Configuration, KalshiClient
+from kalshi_python_async import Configuration, KalshiClient
 
-from .api_base import BaseAPIClient, _thread_safe
+from .api_base import BaseAPIClient
 from .config import Credentials, TradingConfig
 
 
@@ -43,8 +43,7 @@ class KalshiAPIClient(BaseAPIClient):
 
     # -- Market data (read) --
 
-    @_thread_safe
-    def search_markets(
+    async def search_markets(
         self,
         *,
         query: str | None = None,
@@ -55,7 +54,7 @@ class KalshiAPIClient(BaseAPIClient):
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {
             "limit": limit,
             **_optional(
@@ -69,39 +68,36 @@ class KalshiAPIClient(BaseAPIClient):
         # NOTE: Kalshi API v2 removed the keyword search `query` param from
         # GET /markets.  The `query` param is accepted here for interface
         # compatibility but is silently ignored.
-        return self._to_dict(self._client.get_markets(**kwargs))
+        return self._to_dict(await self._client.get_markets(**kwargs))
 
-    @_thread_safe
-    def get_market(self, ticker: str) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.get_market(ticker))
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.get_market(ticker))
 
-    @_thread_safe
-    def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.get_market_orderbook(ticker, depth=depth))
+    async def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.get_market_orderbook(ticker, depth=depth))
 
-    @_thread_safe
-    def get_event(self, event_ticker: str, with_nested_markets: bool = True) -> dict[str, Any]:
-        self._rate_read()
+    async def get_event(
+        self, event_ticker: str, with_nested_markets: bool = True
+    ) -> dict[str, Any]:
+        await self._rate_read()
         return self._to_dict(
-            self._client.get_event(event_ticker, with_nested_markets=with_nested_markets)
+            await self._client.get_event(event_ticker, with_nested_markets=with_nested_markets)
         )
 
-    @_thread_safe
-    def get_trades(
+    async def get_trades(
         self,
         ticker: str | None = None,
         *,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit, **_optional(ticker=ticker, cursor=cursor)}
-        return self._to_dict(self._client.get_trades(**kwargs))
+        return self._to_dict(await self._client.get_trades(**kwargs))
 
-    @_thread_safe
-    def get_candlesticks(
+    async def get_candlesticks(
         self,
         ticker: str,
         *,
@@ -109,10 +105,10 @@ class KalshiAPIClient(BaseAPIClient):
         end_ts: int | None = None,
         period_interval: int = 60,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         now = int(time.time())
         return self._to_dict(
-            self._client.batch_get_market_candlesticks(
+            await self._client.batch_get_market_candlesticks(
                 market_tickers=ticker,
                 start_ts=start_ts if start_ts is not None else now - 86400,
                 end_ts=end_ts if end_ts is not None else now,
@@ -122,13 +118,11 @@ class KalshiAPIClient(BaseAPIClient):
 
     # -- Portfolio (read) --
 
-    @_thread_safe
-    def get_balance(self) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.get_balance())
+    async def get_balance(self) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.get_balance())
 
-    @_thread_safe
-    def get_positions(
+    async def get_positions(
         self,
         *,
         ticker: str | None = None,
@@ -136,53 +130,49 @@ class KalshiAPIClient(BaseAPIClient):
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {
             "limit": limit,
             "count_filter": "position",
             **_optional(ticker=ticker, event_ticker=event_ticker, cursor=cursor),
         }
-        return self._to_dict(self._client.get_positions(**kwargs))
+        return self._to_dict(await self._client.get_positions(**kwargs))
 
-    @_thread_safe
-    def get_fills(
+    async def get_fills(
         self,
         *,
         ticker: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit, **_optional(ticker=ticker, cursor=cursor)}
-        return self._to_dict(self._client.get_fills(**kwargs))
+        return self._to_dict(await self._client.get_fills(**kwargs))
 
-    @_thread_safe
-    def get_settlements(
+    async def get_settlements(
         self,
         *,
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit, **_optional(cursor=cursor)}
-        return self._to_dict(self._client.get_settlements(**kwargs))
+        return self._to_dict(await self._client.get_settlements(**kwargs))
 
     # -- Orders (write) --
 
-    @_thread_safe
-    def get_orders(
+    async def get_orders(
         self,
         *,
         ticker: str | None = None,
         status: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {"limit": limit, **_optional(ticker=ticker, status=status)}
-        return self._to_dict(self._client.get_orders(**kwargs))
+        return self._to_dict(await self._client.get_orders(**kwargs))
 
-    @_thread_safe
-    def create_order(
+    async def create_order(
         self,
         *,
         ticker: str,
@@ -195,7 +185,7 @@ class KalshiAPIClient(BaseAPIClient):
         client_order_id: str | None = None,
         expiration_ts: int | None = None,
     ) -> dict[str, Any]:
-        self._rate_write()
+        await self._rate_write()
         kwargs = {
             "ticker": ticker,
             "action": action,
@@ -209,24 +199,21 @@ class KalshiAPIClient(BaseAPIClient):
                 expiration_ts=expiration_ts,
             ),
         }
-        return self._to_dict(self._client.create_order(**kwargs))
+        return self._to_dict(await self._client.create_order(**kwargs))
 
-    @_thread_safe
-    def cancel_order(self, order_id: str) -> dict[str, Any]:
-        self._rate_write()
-        return self._to_dict(self._client.cancel_order(order_id))
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
+        await self._rate_write()
+        return self._to_dict(await self._client.cancel_order(order_id))
 
     # -- Exchange status --
 
-    @_thread_safe
-    def get_exchange_status(self) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.get_exchange_status())
+    async def get_exchange_status(self) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.get_exchange_status())
 
     # -- Events (paginated) --
 
-    @_thread_safe
-    def get_events(
+    async def get_events(
         self,
         *,
         status: str | None = None,
@@ -234,10 +221,10 @@ class KalshiAPIClient(BaseAPIClient):
         limit: int = 200,
         cursor: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         kwargs: dict[str, Any] = {
             "limit": limit,
             "with_nested_markets": with_nested_markets,
             **_optional(status=status, cursor=cursor),
         }
-        return self._to_dict(self._client.get_events(**kwargs))
+        return self._to_dict(await self._client.get_events(**kwargs))

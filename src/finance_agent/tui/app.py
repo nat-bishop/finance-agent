@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -70,14 +69,6 @@ class FinanceApp(App):
         startup_state["watchlist"] = (
             _WATCHLIST_PATH.read_text(encoding="utf-8") if _WATCHLIST_PATH.exists() else ""
         )
-        active_markets = Path("/workspace/data/active_markets.md")
-        startup_state["data_freshness"] = {
-            "active_markets_updated_at": datetime.fromtimestamp(
-                active_markets.stat().st_mtime, tz=UTC
-            ).isoformat()
-            if active_markets.exists()
-            else None,
-        }
 
         # Clear session scratch file
         session_log = Path("/workspace/data/session.log")

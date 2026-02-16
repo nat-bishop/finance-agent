@@ -1,12 +1,12 @@
-"""Thin wrapper around the polymarket-us SDK."""
+"""Thin wrapper around the polymarket-us SDK (async)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from polymarket_us import PolymarketUS
+from polymarket_us import AsyncPolymarketUS
 
-from .api_base import BaseAPIClient, _thread_safe
+from .api_base import BaseAPIClient
 from .config import Credentials, TradingConfig
 
 # Map agent action+side to Polymarket intent
@@ -35,15 +35,14 @@ class PolymarketAPIClient(BaseAPIClient):
             writes_per_sec=config.polymarket_rate_limit_writes_per_sec,
         )
         self._config = config
-        self._client = PolymarketUS(
+        self._client = AsyncPolymarketUS(
             key_id=credentials.polymarket_key_id,
             secret_key=credentials.polymarket_secret_key,
         )
 
     # -- Market data (read) --
 
-    @_thread_safe
-    def search_markets(
+    async def search_markets(
         self,
         *,
         query: str | None = None,
@@ -51,88 +50,78 @@ class PolymarketAPIClient(BaseAPIClient):
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if status:
             params["active"] = status == "open"
         if query:
             params["query"] = query
-        return self._to_dict(self._client.markets.list(params))  # type: ignore[arg-type]
+        return self._to_dict(await self._client.markets.list(params))  # type: ignore[arg-type]
 
-    @_thread_safe
-    def get_market(self, slug: str) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.markets.retrieve_by_slug(slug))
+    async def get_market(self, slug: str) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.markets.retrieve_by_slug(slug))
 
-    @_thread_safe
-    def get_orderbook(self, slug: str) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.markets.book(slug))
+    async def get_orderbook(self, slug: str) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.markets.book(slug))
 
-    @_thread_safe
-    def get_bbo(self, slug: str) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.markets.bbo(slug))
+    async def get_bbo(self, slug: str) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.markets.bbo(slug))
 
-    @_thread_safe
-    def get_event(self, slug: str) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.events.retrieve_by_slug(slug))
+    async def get_event(self, slug: str) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.events.retrieve_by_slug(slug))
 
-    @_thread_safe
-    def list_events(
+    async def list_events(
         self,
         *,
         active: bool = True,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         return self._to_dict(
-            self._client.events.list({"active": active, "limit": limit, "offset": offset})
+            await self._client.events.list({"active": active, "limit": limit, "offset": offset})
         )
 
-    @_thread_safe
-    def get_trades(
+    async def get_trades(
         self,
         slug: str,
         *,
         limit: int = 50,
     ) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.markets.trades(slug, {"limit": limit}))  # type: ignore[attr-defined]
+        await self._rate_read()
+        return self._to_dict(await self._client.markets.trades(slug, {"limit": limit}))  # type: ignore[attr-defined]
 
     # -- Portfolio (read) --
 
-    @_thread_safe
-    def get_balance(self) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.account.balances())
+    async def get_balance(self) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.account.balances())
 
-    @_thread_safe
-    def get_positions(self) -> dict[str, Any]:
-        self._rate_read()
-        return self._to_dict(self._client.portfolio.positions())
+    async def get_positions(self) -> dict[str, Any]:
+        await self._rate_read()
+        return self._to_dict(await self._client.portfolio.positions())
 
-    @_thread_safe
-    def get_orders(
+    async def get_orders(
         self,
         *,
         market_slug: str | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
-        self._rate_read()
+        await self._rate_read()
         params: dict[str, Any] = {}
         if market_slug:
             params["marketSlug"] = market_slug
         if status:
             params["status"] = status
-        return self._to_dict(self._client.orders.list(params))  # type: ignore[arg-type]
+        return self._to_dict(await self._client.orders.list(params))  # type: ignore[arg-type]
 
     # -- Orders (write) --
 
-    @_thread_safe
-    def create_order(
+    async def create_order(
         self,
         *,
         slug: str,
@@ -142,7 +131,7 @@ class PolymarketAPIClient(BaseAPIClient):
         quantity: int = 1,
         tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
     ) -> dict[str, Any]:
-        self._rate_write()
+        await self._rate_write()
         order_params: dict[str, Any] = {
             "marketSlug": slug,
             "intent": intent,
@@ -151,11 +140,14 @@ class PolymarketAPIClient(BaseAPIClient):
             "quantity": quantity,
             "tif": tif,
         }
-        return self._to_dict(self._client.orders.create(order_params))  # type: ignore[arg-type]
+        return self._to_dict(await self._client.orders.create(order_params))  # type: ignore[arg-type]
 
-    @_thread_safe
-    def cancel_order(self, order_id: str, slug: str = "") -> dict[str, Any]:
-        self._rate_write()
+    async def cancel_order(self, order_id: str, slug: str = "") -> dict[str, Any]:
+        await self._rate_write()
         params = {"marketSlug": slug} if slug else {}
-        self._client.orders.cancel(order_id, params)  # type: ignore[arg-type]
+        await self._client.orders.cancel(order_id, params)  # type: ignore[arg-type]
         return {"status": "cancelled", "order_id": order_id}
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._client.close()

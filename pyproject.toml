@@ -9,7 +9,7 @@ description = "Cross-platform prediction market arbitrage agent"
 requires-python = ">=3.13"
 dependencies = [
     "claude-agent-sdk>=0.1.33",
-    "kalshi-python-sync>=3.6.0",
+    "kalshi-python-async>=3.6.0",
     "python-dotenv>=1.2.0",
     "pydantic>=2.12",
     "pydantic-settings>=2.12",
@@ -21,6 +21,7 @@ dependencies = [
     "textual>=2.1",
     "websockets>=14.0",
     "cryptography>=44.0",
+    "urllib3>=2.6.3",
 ]
 
 [project.optional-dependencies]

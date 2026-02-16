@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from typing import Literal
@@ -44,3 +45,11 @@ class RateLimiter:
     def acquire_write_sync(self, cost: float = 1.0) -> None:
         while (wait := self._try_acquire("write", cost)) is not None:
             time.sleep(wait)
+
+    async def acquire_read(self, cost: float = 1.0) -> None:
+        while (wait := self._try_acquire("read", cost)) is not None:
+            await asyncio.sleep(wait)
+
+    async def acquire_write(self, cost: float = 1.0) -> None:
+        while (wait := self._try_acquire("write", cost)) is not None:
+            await asyncio.sleep(wait)

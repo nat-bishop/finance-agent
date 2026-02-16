@@ -6,7 +6,7 @@ up:
 	docker compose run --build --rm agent
 
 down:
-	docker compose down -v
+	docker compose down --remove-orphans
 
 shell:
 	docker compose run --build --rm agent /bin/bash

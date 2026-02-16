@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ..config import Credentials, TradingConfig
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class TUIServices:
-    """Async wrappers around sync DB reads and exchange API calls."""
+    """Async wrappers around DB reads and exchange API calls."""
 
     def __init__(
         self,
@@ -38,7 +37,6 @@ class TUIServices:
         self._config = config
         self._session_id = session_id
         self._credentials = credentials
-        self._executor = ThreadPoolExecutor(max_workers=4)
         self._fill_monitor: FillMonitor | None = None
 
     def _get_fill_monitor(self) -> FillMonitor:
@@ -52,22 +50,13 @@ class TUIServices:
 
     async def get_portfolio(self) -> dict[str, Any]:
         """Fetch balances and positions from both exchanges."""
-        loop = asyncio.get_running_loop()
         data: dict[str, Any] = {}
 
-        # Fire all calls in parallel — per-exchange locks serialize same-exchange
-        coros = [
-            loop.run_in_executor(self._executor, self._kalshi.get_balance),
-            loop.run_in_executor(self._executor, self._kalshi.get_positions),
-        ]
+        # Fire all calls in parallel
+        coros = [self._kalshi.get_balance(), self._kalshi.get_positions()]
         labels = ["k_balance", "k_positions"]
         if self._pm:
-            coros.extend(
-                [
-                    loop.run_in_executor(self._executor, self._pm.get_balance),
-                    loop.run_in_executor(self._executor, self._pm.get_positions),
-                ]
-            )
+            coros.extend([self._pm.get_balance(), self._pm.get_positions()])
             labels.extend(["pm_balance", "pm_positions"])
 
         results = dict(zip(labels, await asyncio.gather(*coros), strict=True))
@@ -85,22 +74,13 @@ class TUIServices:
 
     async def get_orders(self, exchange: str | None = None) -> dict[str, Any]:
         """Fetch resting orders from exchange(s)."""
-        loop = asyncio.get_running_loop()
-
         coros: list = []
         keys: list[str] = []
         if exchange in ("kalshi", None):
-            coros.append(
-                loop.run_in_executor(
-                    self._executor, lambda: self._kalshi.get_orders(status="resting")
-                )
-            )
+            coros.append(self._kalshi.get_orders(status="resting"))
             keys.append("kalshi")
         if exchange in ("polymarket", None) and self._pm:
-            pm = self._pm
-            coros.append(
-                loop.run_in_executor(self._executor, lambda: pm.get_orders(status="resting"))
-            )
+            coros.append(self._pm.get_orders(status="resting"))
             keys.append("polymarket")
 
         values = await asyncio.gather(*coros)
@@ -119,17 +99,11 @@ class TUIServices:
     # ── Orderbook fetching ────────────────────────────────────────
 
     async def _fetch_orderbook(self, exchange: str, market_id: str) -> dict[str, Any]:
-        """Fetch orderbook from exchange (async wrapper)."""
-        loop = asyncio.get_running_loop()
+        """Fetch orderbook from exchange."""
         if exchange == "kalshi":
-            return await loop.run_in_executor(
-                self._executor, lambda: self._kalshi.get_orderbook(market_id)
-            )
+            return await self._kalshi.get_orderbook(market_id)
         if self._pm:
-            return await loop.run_in_executor(
-                self._executor,
-                lambda: self._pm.get_orderbook(market_id),  # type: ignore[union-attr]
-            )
+            return await self._pm.get_orderbook(market_id)
         raise ValueError(f"Exchange {exchange} not available")
 
     # ── Order execution ───────────────────────────────────────────
@@ -169,7 +143,6 @@ class TUIServices:
 
     async def execute_order(self, leg: dict[str, Any]) -> dict[str, Any]:
         """Place a single order based on a recommendation leg."""
-        loop = asyncio.get_running_loop()
         exchange = leg["exchange"]
         logger.info(
             "Executing order: %s %s %s on %s @ %dc x%d (maker=%s)",
@@ -192,10 +165,7 @@ class TUIServices:
                 "order_type": leg.get("order_type", "limit"),
                 price_key: leg["price_cents"],
             }
-            return await loop.run_in_executor(
-                self._executor,
-                lambda: self._kalshi.create_order(**params),
-            )
+            return await self._kalshi.create_order(**params)
 
         if not self._pm:
             raise ValueError("Polymarket not enabled")
@@ -207,10 +177,7 @@ class TUIServices:
             "price": cents_to_usd(leg["price_cents"]),
             "quantity": leg["quantity"],
         }
-        return await loop.run_in_executor(
-            self._executor,
-            lambda: self._pm.create_order(**params_pm),  # type: ignore[union-attr]
-        )
+        return await self._pm.create_order(**params_pm)
 
     # ── Execution helpers ─────────────────────────────────────────
 
@@ -538,17 +505,10 @@ class TUIServices:
     async def cancel_order(self, exchange: str, order_id: str) -> dict[str, Any]:
         """Cancel an order on the specified exchange."""
         logger.info("Cancelling order %s on %s", order_id, exchange)
-        loop = asyncio.get_running_loop()
         if exchange == "kalshi":
-            return await loop.run_in_executor(
-                self._executor,
-                lambda: self._kalshi.cancel_order(order_id),
-            )
+            return await self._kalshi.cancel_order(order_id)
         if self._pm:
-            return await loop.run_in_executor(
-                self._executor,
-                lambda: self._pm.cancel_order(order_id),  # type: ignore[union-attr]
-            )
+            return await self._pm.cancel_order(order_id)
         raise ValueError(f"Unknown exchange: {exchange}")
 
     # ── DB queries ────────────────────────────────────────────────

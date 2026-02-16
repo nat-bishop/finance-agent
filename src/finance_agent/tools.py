@@ -51,8 +51,8 @@ def create_market_tools(
         exchange = _require_exchange(args, polymarket)
         mid = args["market_id"]
         if exchange == "kalshi":
-            return _text(await asyncio.to_thread(kalshi.get_market, mid))
-        return _text(await asyncio.to_thread(polymarket.get_market, mid))  # type: ignore[union-attr]
+            return _text(await kalshi.get_market(mid))
+        return _text(await polymarket.get_market(mid))  # type: ignore[union-attr]
 
     @tool(
         "get_orderbook",
@@ -71,12 +71,10 @@ def create_market_tools(
         exchange = _require_exchange(args, polymarket)
         mid = args["market_id"]
         if exchange == "kalshi":
-            return _text(
-                await asyncio.to_thread(kalshi.get_orderbook, mid, depth=args.get("depth", 10))
-            )
+            return _text(await kalshi.get_orderbook(mid, depth=args.get("depth", 10)))
         if args.get("depth", 10) <= 1:
-            return _text(await asyncio.to_thread(polymarket.get_bbo, mid))  # type: ignore[union-attr]
-        return _text(await asyncio.to_thread(polymarket.get_orderbook, mid))  # type: ignore[union-attr]
+            return _text(await polymarket.get_bbo(mid))  # type: ignore[union-attr]
+        return _text(await polymarket.get_orderbook(mid))  # type: ignore[union-attr]
 
     @tool(
         "get_event",
@@ -90,8 +88,8 @@ def create_market_tools(
         exchange = _require_exchange(args, polymarket)
         eid = args["event_id"]
         if exchange == "kalshi":
-            return _text(await asyncio.to_thread(kalshi.get_event, eid))
-        return _text(await asyncio.to_thread(polymarket.get_event, eid))  # type: ignore[union-attr]
+            return _text(await kalshi.get_event(eid))
+        return _text(await polymarket.get_event(eid))  # type: ignore[union-attr]
 
     @tool(
         "get_price_history",
@@ -118,8 +116,7 @@ def create_market_tools(
     )
     async def get_price_history(args: dict) -> dict:
         return _text(
-            await asyncio.to_thread(
-                kalshi.get_candlesticks,
+            await kalshi.get_candlesticks(
                 args["market_id"],
                 start_ts=args.get("start_ts"),
                 end_ts=args.get("end_ts"),
@@ -144,8 +141,8 @@ def create_market_tools(
         exchange = _require_exchange(args, polymarket)
         mid, limit = args["market_id"], args.get("limit", 50)
         if exchange == "kalshi":
-            return _text(await asyncio.to_thread(kalshi.get_trades, mid, limit=limit))
-        return _text(await asyncio.to_thread(polymarket.get_trades, mid, limit=limit))  # type: ignore[union-attr]
+            return _text(await kalshi.get_trades(mid, limit=limit))
+        return _text(await polymarket.get_trades(mid, limit=limit))  # type: ignore[union-attr]
 
     @tool(
         "get_portfolio",
@@ -173,24 +170,14 @@ def create_market_tools(
         exchange = args.get("exchange", "").lower()
         data: dict[str, Any] = {}
 
-        # Fire core calls in parallel across exchanges (separate locks)
+        # Fire core calls in parallel across exchanges
         coros: list = []
         labels: list[str] = []
         if exchange in ("kalshi", ""):
-            coros.extend(
-                [
-                    asyncio.to_thread(kalshi.get_balance),
-                    asyncio.to_thread(kalshi.get_positions),
-                ]
-            )
+            coros.extend([kalshi.get_balance(), kalshi.get_positions()])
             labels.extend(["k_balance", "k_positions"])
         if exchange in ("polymarket", "") and polymarket:
-            coros.extend(
-                [
-                    asyncio.to_thread(polymarket.get_balance),
-                    asyncio.to_thread(polymarket.get_positions),
-                ]
-            )
+            coros.extend([polymarket.get_balance(), polymarket.get_positions()])
             labels.extend(["pm_balance", "pm_positions"])
 
         results = dict(zip(labels, await asyncio.gather(*coros), strict=True))
@@ -201,9 +188,9 @@ def create_market_tools(
                 "positions": results["k_positions"],
             }
             if args.get("include_fills"):
-                kalshi_data["fills"] = await asyncio.to_thread(kalshi.get_fills)
+                kalshi_data["fills"] = await kalshi.get_fills()
             if args.get("include_settlements"):
-                kalshi_data["settlements"] = await asyncio.to_thread(kalshi.get_settlements)
+                kalshi_data["settlements"] = await kalshi.get_settlements()
             data["kalshi"] = kalshi_data
 
         if "pm_balance" in results:
@@ -241,16 +228,10 @@ def create_market_tools(
         coros: list = []
         keys: list[str] = []
         if exchange in ("kalshi", ""):
-            coros.append(
-                asyncio.to_thread(kalshi.get_orders, ticker=args.get("market_id"), status=status)
-            )
+            coros.append(kalshi.get_orders(ticker=args.get("market_id"), status=status))
             keys.append("kalshi")
         if exchange in ("polymarket", "") and polymarket:
-            coros.append(
-                asyncio.to_thread(
-                    polymarket.get_orders, market_slug=args.get("market_id"), status=status
-                )
-            )
+            coros.append(polymarket.get_orders(market_slug=args.get("market_id"), status=status))
             keys.append("polymarket")
 
         values = await asyncio.gather(*coros)
@@ -499,13 +480,13 @@ def create_db_tools(
             return polymarket
         raise ValueError(f"Unknown exchange: {exchange}")
 
-    def _fetch_orderbook(exchange: str, market_id: str) -> dict[str, Any]:
+    async def _fetch_orderbook(exchange: str, market_id: str) -> dict[str, Any]:
         client = _get_client(exchange)
-        return client.get_orderbook(market_id)
+        return await client.get_orderbook(market_id)
 
-    def _fetch_market_title(exchange: str, market_id: str) -> str:
+    async def _fetch_market_title(exchange: str, market_id: str) -> str:
         client = _get_client(exchange)
-        market = client.get_market(market_id)
+        market = await client.get_market(market_id)
         if isinstance(market, dict):
             # Kalshi nests under "market" key, Polymarket may not
             inner = market.get("market", market)
@@ -592,12 +573,12 @@ def create_db_tools(
             market_id = leg["market_id"]
 
             try:
-                ob = await asyncio.to_thread(_fetch_orderbook, exchange, market_id)
+                ob = await _fetch_orderbook(exchange, market_id)
             except Exception as e:
                 return _text({"error": f"Failed to fetch orderbook for {market_id}: {e}"})
 
             try:
-                title = await asyncio.to_thread(_fetch_market_title, exchange, market_id)
+                title = await _fetch_market_title(exchange, market_id)
             except Exception:
                 title = market_id
 

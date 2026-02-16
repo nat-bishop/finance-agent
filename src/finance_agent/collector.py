@@ -9,6 +9,8 @@ single paginated pass, storing both event structure and market snapshots.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -33,12 +35,16 @@ def _parse_days_to_expiry(close_time: Any) -> float | None:
     if not close_time:
         return None
     try:
-        if isinstance(close_time, str):
+        if isinstance(close_time, datetime):
+            close_dt = close_time
+        elif isinstance(close_time, str):
             close_dt = datetime.fromisoformat(close_time)
         elif isinstance(close_time, int | float):
             close_dt = datetime.fromtimestamp(close_time, tz=UTC)
         else:
             return None
+        if close_dt.tzinfo is None:
+            close_dt = close_dt.replace(tzinfo=UTC)
         return max(0.0, (close_dt - datetime.now(UTC)).total_seconds() / 86400)
     except (ValueError, TypeError, OSError):
         return None
@@ -178,7 +184,7 @@ def _upsert_kalshi_event(db: AgentDatabase, event: dict[str, Any]) -> str | None
     return et
 
 
-def collect_kalshi(
+async def collect_kalshi(
     client: KalshiAPIClient,
     db: AgentDatabase,
     *,
@@ -201,7 +207,7 @@ def collect_kalshi(
 
     while True:
         try:
-            resp = client.get_events(status=status, with_nested_markets=True, cursor=cursor)
+            resp = await client.get_events(status=status, with_nested_markets=True, cursor=cursor)
         except Exception as e:
             logger.warning("Error during %s collection: %s", label, e)
             break
@@ -246,7 +252,7 @@ def collect_kalshi(
 # ── Polymarket: events-first collection ──────────────────────────
 
 
-def collect_polymarket(
+async def collect_polymarket(
     client: PolymarketAPIClient,
     db: AgentDatabase,
 ) -> tuple[int, int]:
@@ -264,7 +270,7 @@ def collect_polymarket(
 
     while True:
         try:
-            resp = client.list_events(active=True, limit=100, offset=offset)
+            resp = await client.list_events(active=True, limit=100, offset=offset)
         except Exception as e:
             logger.warning("Error during Polymarket event collection: %s", e)
             break
@@ -327,138 +333,91 @@ def collect_polymarket(
     return event_count, market_count
 
 
-# ── Market listings (for agent discovery) ────────────────────────
+# ── Market data export (for agent discovery) ─────────────────────
 
 
-def _fmt_volume(n: int | float | None) -> str:
-    """Format volume for compact display: 1234 → '1.2K', 1234567 → '1.2M'."""
-    if not n:
-        return "0"
-    n = int(n)
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-    return str(n)
-
-
-def _format_market_line(m: dict[str, Any]) -> str:
-    """Format a single market line for the listings file."""
-    spr = m["spread_cents"]
-    spr_s = f"spr:{spr}c" if spr is not None else "spr:?"
-    vol_s = f"vol24h:{_fmt_volume(m['volume_24h'])}"
-    oi_s = f"oi:{_fmt_volume(m['open_interest'])}"
-    dte = m["days_to_expiration"]
-    dte_s = f"dte:{int(dte)}d" if dte is not None else "dte:?"
-    return (
-        f"- {m['title']} — {m['mid_price_cents']}c"
-        f" | {spr_s} {vol_s} {oi_s} {dte_s}"
-        f" [{m['ticker']}]"
-    )
-
-
-def _format_event_section(
-    evt_ticker: str | None,
-    markets: list[dict[str, Any]],
-    event_map: dict[tuple[str, str], dict[str, Any]],
-    exchange: str,
-) -> list[str]:
-    """Format a single event group (or standalone markets) for the listings file."""
-    evt_meta = event_map.get((evt_ticker, exchange)) if evt_ticker else None
-
-    if evt_meta and len(markets) >= 2:
-        mut_excl = evt_meta.get("mutually_exclusive")
-        header = f"\n**{evt_ticker} — {evt_meta['title']}** ({len(markets)} markets"
-        if mut_excl:
-            price_sum = sum(m["mid_price_cents"] or 0 for m in markets)
-            header += f", mutually exclusive, sum: {price_sum}c"
-        header += ")"
-        return [header, *(_format_market_line(m) for m in markets)]
-
-    return [_format_market_line(m) for m in markets]
-
-
-def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
-    """Write category-grouped market summary for agent semantic discovery."""
-    markets = db.get_latest_snapshots(status="open", require_mid_price=True)
+def _generate_markets_jsonl(db: AgentDatabase, output_path: str) -> None:
+    """Write one JSON object per line for agent programmatic discovery."""
+    markets = db.get_latest_snapshots(status="open", require_mid_price=False)
 
     event_rows = db.get_all_events()
     event_map: dict[tuple[str, str], dict[str, Any]] = {
         (e["event_ticker"], e["exchange"]): e for e in event_rows
     }
 
-    # Build nested: {category: {exchange: {event_ticker: [markets]}}}
-    by_cat: dict[str, dict[str, dict[str | None, list]]] = {}
-    for m in markets:
-        cat = m["category"] or "Other"
-        exch = m["exchange"]
-        evt = m["event_ticker"]
-        by_cat.setdefault(cat, {}).setdefault(exch, {}).setdefault(evt, []).append(m)
-
-    now = _now_iso()
-    flat_total: dict[str, int] = {"kalshi": 0, "polymarket": 0}
-    for cat_data in by_cat.values():
-        for exch, evt_groups in cat_data.items():
-            flat_total[exch] = flat_total.get(exch, 0) + sum(len(ms) for ms in evt_groups.values())
-
-    lines = [f"# Active Markets — {now}\n"]
-    lines.append(
-        f"\n{flat_total['kalshi']} Kalshi, {flat_total['polymarket']} Polymarket. Prices in cents."
-    )
-    lines.append("Format: Title — MIDc | spr:SPREAD vol24h:VOL24H oi:OI dte:DTE [TICKER]\n")
-
-    for cat in sorted(by_cat):
-        lines.append(f"\n## {cat}\n")
-        for exch in ("kalshi", "polymarket"):
-            evt_groups = by_cat[cat].get(exch, {})
-            if not evt_groups:
-                continue
-            total_markets = sum(len(ms) for ms in evt_groups.values())
-            lines.append(f"\n### {exch.title()} ({total_markets} markets)")
-
-            for evt_ticker, ms in evt_groups.items():
-                lines.extend(_format_event_section(evt_ticker, ms, event_map, exch))
-
-        lines.append("")
-
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines), encoding="utf-8")
-    logger.info("  -> Market listings written to %s", output_path)
+
+    count = 0
+    with out.open("w", encoding="utf-8") as f:
+        for m in markets:
+            evt_ticker = m.get("event_ticker") or ""
+            evt_meta = event_map.get((evt_ticker, m["exchange"]), {})
+
+            # Parse raw_json for description
+            raw: dict[str, Any] = {}
+            if m.get("raw_json"):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    raw = json.loads(m["raw_json"])
+
+            record = {
+                "exchange": m["exchange"],
+                "ticker": m["ticker"],
+                "event_ticker": m.get("event_ticker"),
+                "event_title": evt_meta.get("title"),
+                "mutually_exclusive": bool(evt_meta.get("mutually_exclusive", False)),
+                "title": m["title"],
+                "description": raw.get("description") or raw.get("rules_primary"),
+                "category": evt_meta.get("category") or m.get("category"),
+                "mid_price_cents": m.get("mid_price_cents"),
+                "spread_cents": m.get("spread_cents"),
+                "yes_bid": m.get("yes_bid"),
+                "yes_ask": m.get("yes_ask"),
+                "volume_24h": m.get("volume_24h"),
+                "open_interest": m.get("open_interest"),
+                "days_to_expiration": m.get("days_to_expiration"),
+            }
+            f.write(json.dumps(record, default=str) + "\n")
+            count += 1
+
+    logger.info("  -> %d markets written to %s", count, output_path)
 
 
 # ── Entry point ──────────────────────────────────────────────────
 
 
-def run_collector() -> None:
-    """Main entry point for the collector."""
+async def _run_collector_async() -> None:
+    """Async collector implementation — runs both platforms concurrently."""
     from .logging_config import setup_logging
 
     setup_logging()
 
     _, credentials, trading_config = load_configs()
 
-    client = KalshiAPIClient(credentials, trading_config)
+    kalshi = KalshiAPIClient(credentials, trading_config)
     db = AgentDatabase(trading_config.db_path)
 
     start = time.time()
     logger.info("Data collector starting")
     logger.info("DB: %s", trading_config.db_path)
 
+    pm_client = None
     try:
-        # Kalshi: open events + nested markets
-        k_events, k_markets = collect_kalshi(client, db, status="open")
+        # Build tasks
+        tasks = [collect_kalshi(kalshi, db, status="open")]
 
-        # Polymarket
-        pm_events = 0
-        pm_markets = 0
         if trading_config.polymarket_enabled and credentials.polymarket_key_id:
             pm_client = PolymarketAPIClient(credentials, trading_config)
-            pm_events, pm_markets = collect_polymarket(pm_client, db)
+            tasks.append(collect_polymarket(pm_client, db))
 
-        # Generate market listings for agent semantic discovery
-        listings_path = str(Path(trading_config.db_path).parent / "active_markets.md")
-        _generate_market_listings(db, listings_path)
+        # Run concurrently
+        results = await asyncio.gather(*tasks)
+        k_events, k_markets = results[0]
+        pm_events, pm_markets = results[1] if len(results) > 1 else (0, 0)
+
+        # Generate JSONL market data for agent programmatic discovery
+        jsonl_path = str(Path(trading_config.db_path).parent / "markets.jsonl")
+        _generate_markets_jsonl(db, jsonl_path)
 
         # Purge old snapshots
         db.purge_old_snapshots(trading_config.snapshot_retention_days)
@@ -470,7 +429,14 @@ def run_collector() -> None:
     except KeyboardInterrupt:
         logger.warning("Interrupted")
     finally:
+        if pm_client:
+            await pm_client.close()
         db.close()
+
+
+def run_collector() -> None:
+    """Main entry point for the collector."""
+    asyncio.run(_run_collector_async())
 
 
 if __name__ == "__main__":

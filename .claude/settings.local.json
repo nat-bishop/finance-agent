@@ -41,7 +41,11 @@
       "Bash(git show:*)",
       "Bash(make:*)",
       "Bash(make lint:*)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(curl:*)",
+      "Bash(find:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv add:*)"
     ]
   },
   "hooks": {
