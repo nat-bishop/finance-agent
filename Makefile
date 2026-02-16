@@ -1,21 +1,18 @@
-.PHONY: build run shell clean logs lint format test test-cov collect backup startup nuke-db nuke-data
+.PHONY: up down shell logs lint format test test-cov collect backup startup nuke-db nuke-data
 
 # ── Docker ───────────────────────────────────────────────────
 
-build:
-	docker compose build
+up:
+	docker compose run --build --rm agent
 
-run:
-	docker compose run --rm agent
-
-shell:
-	docker compose run --rm agent /bin/bash
-
-clean:
+down:
 	docker compose down -v
 
+shell:
+	docker compose run --build --rm agent /bin/bash
+
 logs:
-	@if [ -f workspace/data/agent.log ]; then tail -100 workspace/data/agent.log; else echo "No agent.log yet -- run make run first"; fi
+	@if [ -f workspace/data/agent.log ]; then tail -100 workspace/data/agent.log; else echo "No agent.log yet -- run make up first"; fi
 
 # ── Code quality (local) ────────────────────────────────────
 
@@ -39,13 +36,13 @@ test-cov:
 # ── Data pipeline (Docker) ──────────────────────────────────
 
 collect:
-	docker compose run --rm agent python -m finance_agent.collector
+	docker compose run --build --rm agent python -m finance_agent.collector
 
 backup:
-	docker compose run --rm agent python -c "from finance_agent.database import AgentDatabase; from finance_agent.config import load_configs; _, _, tc = load_configs(); db = AgentDatabase(tc.db_path); print(db.backup_if_needed(tc.backup_dir) or 'No backup needed'); db.close()"
+	docker compose run --build --rm agent python -c "from finance_agent.database import AgentDatabase; from finance_agent.config import load_configs; _, _, tc = load_configs(); db = AgentDatabase(tc.db_path); print(db.backup_if_needed(tc.backup_dir) or 'No backup needed'); db.close()"
 
 startup:
-	docker compose run --rm agent python -c "from finance_agent.config import load_configs; from finance_agent.database import AgentDatabase; import json; _, _, tc = load_configs(); db = AgentDatabase(tc.db_path); state = db.get_session_state(); print(json.dumps(state, indent=2, default=str)); db.close()"
+	docker compose run --build --rm agent python -c "from finance_agent.config import load_configs; from finance_agent.database import AgentDatabase; import json; _, _, tc = load_configs(); db = AgentDatabase(tc.db_path); state = db.get_session_state(); print(json.dumps(state, indent=2, default=str)); db.close()"
 
 # ── Dangerous resets ────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-"""Initial schema from ORM models.
+"""Initial schema — 6 tables with all FKs and indexes.
 
 Revision ID: 0001
 Revises: None
@@ -25,6 +25,7 @@ def upgrade() -> None:
         sa.Column("pnl_usd", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index("idx_sessions_ended_at", "sessions", ["ended_at"])
 
     op.create_table(
         "market_snapshots",
@@ -59,8 +60,11 @@ def upgrade() -> None:
     op.create_index("idx_snapshots_ticker_time", "market_snapshots", ["ticker", "captured_at"])
     op.create_index("idx_snapshots_series", "market_snapshots", ["series_ticker"])
     op.create_index("idx_snapshots_category", "market_snapshots", ["category"])
-    op.create_index("idx_snapshots_exchange", "market_snapshots", ["exchange"])
-    op.create_index("idx_snapshots_exchange_status", "market_snapshots", ["exchange", "status"])
+    op.create_index(
+        "idx_snapshots_latest",
+        "market_snapshots",
+        ["status", "exchange", "ticker", "captured_at"],
+    )
 
     op.create_table(
         "events",
@@ -76,89 +80,25 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "signals",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("generated_at", sa.Text(), nullable=False),
-        sa.Column("scan_type", sa.Text(), nullable=False),
-        sa.Column("exchange", sa.Text(), server_default="kalshi", nullable=True),
-        sa.Column("ticker", sa.Text(), nullable=False),
-        sa.Column("event_ticker", sa.Text(), nullable=True),
-        sa.Column("signal_strength", sa.Float(), nullable=True),
-        sa.Column("estimated_edge_pct", sa.Float(), nullable=True),
-        sa.Column("details_json", sa.Text(), nullable=True),
-        sa.Column("status", sa.Text(), server_default="pending", nullable=True),
-        sa.Column("acted_at", sa.Text(), nullable=True),
-        sa.Column("session_id", sa.Text(), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index(
-        "idx_signals_pending",
-        "signals",
-        ["status"],
-        sqlite_where=sa.text("status = 'pending'"),
-    )
-    op.create_index("idx_signals_type", "signals", ["scan_type"])
-    op.create_index("idx_signals_exchange", "signals", ["exchange"])
-
-    op.create_table(
-        "trades",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("session_id", sa.Text(), sa.ForeignKey("sessions.id"), nullable=False),
-        sa.Column("exchange", sa.Text(), nullable=False),
-        sa.Column("timestamp", sa.Text(), nullable=False),
-        sa.Column("ticker", sa.Text(), nullable=False),
-        sa.Column("action", sa.Text(), nullable=False),
-        sa.Column("side", sa.Text(), nullable=False),
-        sa.Column("count", sa.Integer(), nullable=False),
-        sa.Column("price_cents", sa.Integer(), nullable=True),
-        sa.Column("order_type", sa.Text(), nullable=True),
-        sa.Column("order_id", sa.Text(), nullable=True),
-        sa.Column("status", sa.Text(), nullable=True),
-        sa.Column("result_json", sa.Text(), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("idx_trades_ticker", "trades", ["ticker"])
-    op.create_index("idx_trades_session", "trades", ["session_id"])
-    op.create_index("idx_trades_status", "trades", ["status"])
-
-    op.create_table(
-        "portfolio_snapshots",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("captured_at", sa.Text(), nullable=False),
-        sa.Column("session_id", sa.Text(), nullable=True),
-        sa.Column("balance_usd", sa.Float(), nullable=True),
-        sa.Column("positions_json", sa.Text(), nullable=True),
-        sa.Column("open_orders_json", sa.Text(), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-    )
-
-    op.create_table(
-        "watchlist",
-        sa.Column("ticker", sa.Text(), nullable=False),
-        sa.Column("exchange", sa.Text(), server_default="kalshi", nullable=False),
-        sa.Column("added_at", sa.Text(), nullable=False),
-        sa.Column("reason", sa.Text(), nullable=True),
-        sa.Column("alert_condition", sa.Text(), nullable=True),
-        sa.PrimaryKeyConstraint("ticker", "exchange"),
-    )
-
-    op.create_table(
         "recommendation_groups",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("session_id", sa.Text(), nullable=False),
+        sa.Column("session_id", sa.Text(), sa.ForeignKey("sessions.id"), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("thesis", sa.Text(), nullable=True),
         sa.Column("equivalence_notes", sa.Text(), nullable=True),
         sa.Column("estimated_edge_pct", sa.Float(), nullable=True),
-        sa.Column("signal_id", sa.Integer(), nullable=True),
         sa.Column("status", sa.Text(), server_default="pending", nullable=True),
         sa.Column("expires_at", sa.Text(), nullable=True),
         sa.Column("reviewed_at", sa.Text(), nullable=True),
         sa.Column("executed_at", sa.Text(), nullable=True),
+        sa.Column("total_exposure_usd", sa.Float(), nullable=True),
+        sa.Column("computed_edge_pct", sa.Float(), nullable=True),
+        sa.Column("computed_fees_usd", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("idx_group_status", "recommendation_groups", ["status"])
     op.create_index("idx_rec_session", "recommendation_groups", ["session_id"])
+    op.create_index("idx_group_created_at", "recommendation_groups", ["created_at"])
 
     op.create_table(
         "recommendation_legs",
@@ -173,26 +113,54 @@ def upgrade() -> None:
         sa.Column("exchange", sa.Text(), nullable=False),
         sa.Column("market_id", sa.Text(), nullable=False),
         sa.Column("market_title", sa.Text(), nullable=True),
-        sa.Column("action", sa.Text(), nullable=False),
-        sa.Column("side", sa.Text(), nullable=False),
-        sa.Column("quantity", sa.Integer(), nullable=False),
-        sa.Column("price_cents", sa.Integer(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=True),
+        sa.Column("side", sa.Text(), nullable=True),
+        sa.Column("quantity", sa.Integer(), nullable=True),
+        sa.Column("price_cents", sa.Integer(), nullable=True),
         sa.Column("order_type", sa.Text(), server_default="limit", nullable=True),
         sa.Column("status", sa.Text(), server_default="pending", nullable=True),
         sa.Column("order_id", sa.Text(), nullable=True),
         sa.Column("executed_at", sa.Text(), nullable=True),
+        sa.Column("is_maker", sa.Boolean(), nullable=True),
+        sa.Column("fill_price_cents", sa.Integer(), nullable=True),
+        sa.Column("fill_quantity", sa.Integer(), nullable=True),
+        sa.Column("orderbook_snapshot_json", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("idx_leg_group", "recommendation_legs", ["group_id"])
 
+    op.create_table(
+        "trades",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("session_id", sa.Text(), sa.ForeignKey("sessions.id"), nullable=False),
+        sa.Column(
+            "leg_id",
+            sa.Integer(),
+            sa.ForeignKey("recommendation_legs.id"),
+            nullable=True,
+        ),
+        sa.Column("exchange", sa.Text(), nullable=False),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("ticker", sa.Text(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=False),
+        sa.Column("side", sa.Text(), nullable=False),
+        sa.Column("quantity", sa.Integer(), nullable=False),
+        sa.Column("price_cents", sa.Integer(), nullable=True),
+        sa.Column("order_type", sa.Text(), nullable=True),
+        sa.Column("order_id", sa.Text(), nullable=True),
+        sa.Column("status", sa.Text(), nullable=True),
+        sa.Column("result_json", sa.Text(), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("idx_trades_ticker", "trades", ["ticker"])
+    op.create_index("idx_trades_session", "trades", ["session_id"])
+    op.create_index("idx_trades_status", "trades", ["status"])
+
 
 def downgrade() -> None:
+    op.drop_table("trades")
     op.drop_table("recommendation_legs")
     op.drop_table("recommendation_groups")
-    op.drop_table("watchlist")
-    op.drop_table("portfolio_snapshots")
-    op.drop_table("trades")
-    op.drop_table("signals")
     op.drop_table("events")
     op.drop_table("market_snapshots")
     op.drop_table("sessions")

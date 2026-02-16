@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, event, func, insert, select
+from sqlalchemy import create_engine, delete, event, func, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 
@@ -171,22 +171,24 @@ class AgentDatabase:
         ticker: str,
         action: str,
         side: str,
-        count: int,
+        quantity: int,
         price_cents: int | None = None,
         order_type: str | None = None,
         order_id: str | None = None,
         status: str | None = None,
         result_json: str | None = None,
         exchange: str = "kalshi",
+        leg_id: int | None = None,
     ) -> int:
         trade = Trade(
             session_id=session_id,
+            leg_id=leg_id,
             exchange=exchange,
             timestamp=_now(),
             ticker=ticker,
             action=action,
             side=side,
-            count=count,
+            quantity=quantity,
             price_cents=price_cents,
             order_type=order_type,
             order_id=order_id,
@@ -327,6 +329,19 @@ class AgentDatabase:
             session.execute(insert(MarketSnapshot), filtered)
             session.commit()
         return len(filtered)
+
+    def purge_old_snapshots(self, retention_days: int = 7) -> int:
+        """Delete market snapshots older than retention_days. Returns count deleted."""
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
+        with self._session_factory() as session:
+            result = session.execute(
+                delete(MarketSnapshot).where(MarketSnapshot.captured_at < cutoff)
+            )
+            session.commit()
+            deleted: int = result.rowcount  # type: ignore[attr-defined]
+        if deleted:
+            logger.info("Purged %d snapshots older than %d days", deleted, retention_days)
+        return deleted
 
     # ── Events (upsert for collector) ─────────────────────────
 

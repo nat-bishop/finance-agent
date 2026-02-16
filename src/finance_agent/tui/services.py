@@ -225,7 +225,7 @@ class TUIServices:
     def _parse_fill(fill: dict[str, Any], leg: dict[str, Any]) -> tuple[int, int]:
         """Extract fill price (cents) and quantity from an exchange fill response."""
         price = fill.get("fill_price_cents", fill.get("price", leg["price_cents"]))
-        qty = fill.get("fill_quantity", fill.get("count", leg["quantity"]))
+        qty = fill.get("fill_quantity", fill.get("quantity", leg["quantity"]))
         if isinstance(price, str):
             price = int(float(price) * 100)
         return int(price), int(qty)
@@ -239,13 +239,14 @@ class TUIServices:
             ticker=leg["market_id"],
             action=leg["action"],
             side=leg["side"],
-            count=leg["quantity"],
+            quantity=leg["quantity"],
             price_cents=leg["price_cents"],
             order_type="limit",
             order_id=order_id,
             status="placed",
             result_json=json.dumps(result, default=str),
             exchange=leg["exchange"],
+            leg_id=leg["id"],
         )
         self.db.update_leg_status(leg["id"], "executed", order_id)
         return {"leg_id": leg["id"], "status": "executed", "order_id": order_id}

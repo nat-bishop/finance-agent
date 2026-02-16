@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from helpers import get_row, raw_select
@@ -19,9 +19,7 @@ def test_db_creates_all_tables(db):
         "market_snapshots",
         "events",
         "trades",
-        "portfolio_snapshots",
         "sessions",
-        "watchlist",
         "recommendation_groups",
         "recommendation_legs",
         "alembic_version",
@@ -423,3 +421,93 @@ def test_backup_prunes_old(db, tmp_path):
         db.backup_if_needed(str(backup_dir), max_age_hours=0, max_backups=3)
     remaining = list(backup_dir.glob("agent_*.db"))
     assert len(remaining) <= 3
+
+
+# ── Trade → Leg linkage ─────────────────────────────────────────
+
+
+def test_log_trade_with_leg_id(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            }
+        ],
+    )
+    group = db.get_group(group_id)
+    leg_id = group["legs"][0]["id"]
+    trade_id = db.log_trade(
+        session_id,
+        "K-1",
+        "buy",
+        "yes",
+        10,
+        price_cents=45,
+        exchange="kalshi",
+        leg_id=leg_id,
+    )
+    trades = db.get_trades()
+    trade = next(t for t in trades if t["id"] == trade_id)
+    assert trade["leg_id"] == leg_id
+
+
+def test_log_trade_without_leg_id(db, session_id):
+    trade_id = db.log_trade(session_id, "K-1", "buy", "yes", 10)
+    trades = db.get_trades()
+    trade = next(t for t in trades if t["id"] == trade_id)
+    assert trade["leg_id"] is None
+
+
+# ── Recommendation group FK ─────────────────────────────────────
+
+
+def test_recommendation_group_session_fk(db):
+    """RecommendationGroup.session_id must reference an existing session."""
+    import sqlalchemy
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        db.log_recommendation_group(
+            session_id="nonexistent",
+            thesis="Should fail",
+            estimated_edge_pct=1.0,
+            legs=[{"exchange": "kalshi", "market_id": "K-1"}],
+        )
+
+
+# ── Snapshot purge ──────────────────────────────────────────────
+
+
+def test_purge_old_snapshots(db, sample_market_snapshot):
+    old_ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    recent_ts = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    db.insert_market_snapshots(
+        [
+            sample_market_snapshot(ticker="OLD-1", captured_at=old_ts),
+            sample_market_snapshot(ticker="OLD-2", captured_at=old_ts),
+            sample_market_snapshot(ticker="NEW-1", captured_at=recent_ts),
+        ]
+    )
+    deleted = db.purge_old_snapshots(retention_days=7)
+    assert deleted == 2
+    remaining = db.get_latest_snapshots(status="open")
+    assert len(remaining) == 1
+    assert remaining[0]["ticker"] == "NEW-1"
+
+
+def test_purge_old_snapshots_nothing_to_purge(db, sample_market_snapshot):
+    recent_ts = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    db.insert_market_snapshots(
+        [
+            sample_market_snapshot(ticker="NEW-1", captured_at=recent_ts),
+        ]
+    )
+    deleted = db.purge_old_snapshots(retention_days=7)
+    assert deleted == 0

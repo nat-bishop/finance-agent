@@ -6,10 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Docker
-make build          # docker compose build
-make run            # run agent TUI in Docker
+make up             # build + run agent TUI in Docker
+make down           # stop containers (workspace data preserved)
 make shell          # bash into container
-make clean          # stop containers (workspace data preserved)
 make logs           # tail the agent log file (workspace/data/agent.log)
 
 # Data pipeline (Docker)
@@ -62,7 +61,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point calls TUI. Wires `setup_logging()`.
 - **logging_config.py** — `setup_logging()` configures root logger with stderr console + optional file handler. Idempotent, quiets noisy libraries (alembic, sqlalchemy, urllib3).
 - **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `polymarket_max_position_usd=50`, `min_edge_pct=7.0`, `recommendation_ttl_minutes=60`. Also loads and templates `prompts/system.md`.
-- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 8 tables. Alembic autogenerate reads these.
+- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 6 tables. Alembic autogenerate reads these.
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 7 read-only tools, `create_db_tools(db, session_id)` → 1 tool (`recommend_trade` with legs array). Exchange is a parameter, not a namespace.
 - **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.

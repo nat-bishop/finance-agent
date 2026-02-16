@@ -460,6 +460,9 @@ def run_collector() -> None:
         listings_path = str(Path(trading_config.db_path).parent / "active_markets.md")
         _generate_market_listings(db, listings_path)
 
+        # Purge old snapshots
+        db.purge_old_snapshots(trading_config.snapshot_retention_days)
+
         elapsed = time.time() - start
         logger.info("Collection complete in %.1fs", elapsed)
         logger.info("  Kalshi: %d events (%d markets)", k_events, k_markets)

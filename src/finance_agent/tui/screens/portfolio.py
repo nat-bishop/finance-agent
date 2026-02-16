@@ -163,7 +163,7 @@ class PortfolioScreen(Screen):
                 str(trade.get("ticker", "")),
                 str(trade.get("action", "")),
                 str(trade.get("side", "")),
-                str(trade.get("count", "")),
+                str(trade.get("quantity", "")),
                 str(trade.get("price_cents", "")),
                 str(trade.get("status", "")),
             )

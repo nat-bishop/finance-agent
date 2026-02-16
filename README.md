@@ -144,18 +144,16 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 8 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 6 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
 | `market_snapshots` | collector | agent | exchange, ticker, mid_price_cents, status |
 | `events` | collector | agent | (event_ticker, exchange) PK, markets_json |
-| `trades` | TUI executor | agent, TUI | exchange, ticker, action, side, price_cents |
-| `recommendation_groups` | agent | TUI | session_id, thesis, estimated_edge_pct, status |
+| `trades` | TUI executor | agent, TUI | exchange, ticker, action, side, quantity, leg_id FK |
+| `recommendation_groups` | agent | TUI | session_id FK, thesis, estimated_edge_pct, status |
 | `recommendation_legs` | agent | TUI | group_id FK, exchange, market_id, action, side, price_cents |
-| `portfolio_snapshots` | TUI | TUI | balance_usd, positions_json |
 | `sessions` | main | agent, TUI | started_at, summary, trades_placed, recommendations_made |
-| `watchlist` | agent (markdown) | — | (ticker, exchange) PK — agent now uses `/workspace/data/watchlist.md` instead |
 
 ## Workspace
 
@@ -180,7 +178,7 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
   config.py            # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
-  models.py            # SQLAlchemy ORM models (canonical schema for all 8 tables)
+  models.py            # SQLAlchemy ORM models (canonical schema for all 6 tables)
   database.py          # AgentDatabase: ORM queries, Alembic migration runner, backup
   tools.py             # Unified MCP tool factories (7 market + 1 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)

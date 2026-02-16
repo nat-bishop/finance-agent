@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models — canonical schema definition for all 9 tables."""
+"""SQLAlchemy ORM models — canonical schema definition for all 6 tables."""
 
 from __future__ import annotations
 
@@ -50,8 +50,7 @@ class MarketSnapshot(Base):
         Index("idx_snapshots_ticker_time", "ticker", "captured_at"),
         Index("idx_snapshots_series", "series_ticker"),
         Index("idx_snapshots_category", "category"),
-        Index("idx_snapshots_exchange", "exchange"),
-        Index("idx_snapshots_exchange_status", "exchange", "status"),
+        Index("idx_snapshots_latest", "status", "exchange", "ticker", "captured_at"),
     )
 
 
@@ -79,12 +78,13 @@ class Trade(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(Text, ForeignKey("sessions.id"), nullable=False)
+    leg_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("recommendation_legs.id"))
     exchange: Mapped[str] = mapped_column(Text, nullable=False)
     timestamp: Mapped[str] = mapped_column(Text, nullable=False)
     ticker: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     side: Mapped[str] = mapped_column(Text, nullable=False)
-    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     price_cents: Mapped[int | None] = mapped_column(Integer)
     order_type: Mapped[str | None] = mapped_column(Text)
     order_id: Mapped[str | None] = mapped_column(Text)
@@ -96,20 +96,6 @@ class Trade(Base):
         Index("idx_trades_session", "session_id"),
         Index("idx_trades_status", "status"),
     )
-
-
-# ── Portfolio Snapshots ───────────────────────────────────────
-
-
-class PortfolioSnapshot(Base):
-    __tablename__ = "portfolio_snapshots"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    captured_at: Mapped[str] = mapped_column(Text, nullable=False)
-    session_id: Mapped[str | None] = mapped_column(Text)
-    balance_usd: Mapped[float | None] = mapped_column(Float)
-    positions_json: Mapped[str | None] = mapped_column(Text)
-    open_orders_json: Mapped[str | None] = mapped_column(Text)
 
 
 # ── Sessions ──────────────────────────────────────────────────
@@ -126,18 +112,7 @@ class Session(Base):
     recommendations_made: Mapped[int] = mapped_column(Integer, server_default="0")
     pnl_usd: Mapped[float | None] = mapped_column(Float)
 
-
-# ── Watchlist (legacy — watchlist is now /workspace/data/watchlist.md) ──
-
-
-class Watchlist(Base):
-    __tablename__ = "watchlist"
-
-    ticker: Mapped[str] = mapped_column(Text, primary_key=True)
-    exchange: Mapped[str] = mapped_column(Text, primary_key=True, server_default="kalshi")
-    added_at: Mapped[str] = mapped_column(Text, nullable=False)
-    reason: Mapped[str | None] = mapped_column(Text)
-    alert_condition: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (Index("idx_sessions_ended_at", "ended_at"),)
 
 
 # ── Recommendation Groups ────────────────────────────────────
@@ -147,7 +122,7 @@ class RecommendationGroup(Base):
     __tablename__ = "recommendation_groups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, ForeignKey("sessions.id"), nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     thesis: Mapped[str | None] = mapped_column(Text)
     equivalence_notes: Mapped[str | None] = mapped_column(Text)
@@ -170,6 +145,7 @@ class RecommendationGroup(Base):
     __table_args__ = (
         Index("idx_group_status", "status"),
         Index("idx_rec_session", "session_id"),
+        Index("idx_group_created_at", "created_at"),
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,10 +168,10 @@ class RecommendationLeg(Base):
     exchange: Mapped[str] = mapped_column(Text, nullable=False)
     market_id: Mapped[str] = mapped_column(Text, nullable=False)
     market_title: Mapped[str | None] = mapped_column(Text)
-    action: Mapped[str | None] = mapped_column(Text)  # derived from prices by code
-    side: Mapped[str | None] = mapped_column(Text)  # derived from prices by code
-    quantity: Mapped[int | None] = mapped_column(Integer)  # computed from total_exposure_usd
-    price_cents: Mapped[int | None] = mapped_column(Integer)  # computed from orderbook
+    action: Mapped[str | None] = mapped_column(Text)
+    side: Mapped[str | None] = mapped_column(Text)
+    quantity: Mapped[int | None] = mapped_column(Integer)
+    price_cents: Mapped[int | None] = mapped_column(Integer)
     order_type: Mapped[str | None] = mapped_column(Text, server_default="limit")
     status: Mapped[str | None] = mapped_column(Text, server_default="pending")
     order_id: Mapped[str | None] = mapped_column(Text)

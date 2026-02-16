@@ -93,7 +93,7 @@ class HistoryScreen(Screen):
                 str(t.get("ticker", "")),
                 str(t.get("action", "")),
                 str(t.get("side", "")),
-                str(t.get("count", "")),
+                str(t.get("quantity", "")),
                 str(t.get("price_cents", "")),
                 str(t.get("status", "")),
             )
