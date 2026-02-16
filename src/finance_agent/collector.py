@@ -435,9 +435,12 @@ async def _run_collector_async() -> None:
         _generate_markets_jsonl(db, jsonl_path)
 
         # Sync Kalshi daily historical data (incremental)
-        from .backfill import sync_daily
+        from .backfill import backfill_missing_meta, sync_daily
 
         sync_daily(db)
+
+        # Backfill metadata for historical tickers missing titles/categories
+        await backfill_missing_meta(kalshi, db)
 
         # Purge old snapshots
         db.purge_old_snapshots(trading_config.snapshot_retention_days)

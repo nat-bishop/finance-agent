@@ -405,6 +405,18 @@ class AgentDatabase:
             session.commit()
         return len(rows)
 
+    def get_missing_meta_tickers(self, limit: int = 200) -> list[str]:
+        """Return tickers in kalshi_daily that have no kalshi_market_meta row."""
+        with self._session_factory() as session:
+            meta_tickers = select(KalshiMarketMeta.ticker)
+            stmt = (
+                select(KalshiDaily.ticker_name)
+                .where(KalshiDaily.ticker_name.notin_(meta_tickers))
+                .distinct()
+                .limit(limit)
+            )
+            return list(session.scalars(stmt).all())
+
     # ── Events (upsert for collector) ─────────────────────────
 
     def upsert_event(

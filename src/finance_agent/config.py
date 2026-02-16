@@ -42,7 +42,7 @@ class TradingConfig:
     polymarket_rate_limit_writes_per_sec: int = 50  # tightest: DELETE /order (500/10s)
     recommendation_ttl_minutes: int = 60
 
-    polymarket_enabled: bool = True
+    polymarket_enabled: bool = False
     polymarket_max_position_usd: float = 50.0
 
     execution_timeout_seconds: int = 300  # 5 min fill timeout for leg-in
