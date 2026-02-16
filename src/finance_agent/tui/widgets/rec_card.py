@@ -16,32 +16,6 @@ from ...constants import EXCHANGE_KALSHI, STATUS_PENDING
 class RecCard(Vertical):
     """Displays a recommendation group with its legs."""
 
-    DEFAULT_CSS = """
-    RecCard {
-        height: auto;
-        padding: 1;
-        border: solid $warning;
-        margin: 0 0 1 0;
-    }
-    RecCard .rec-title {
-        text-style: bold;
-    }
-    RecCard .rec-detail {
-        color: $text-muted;
-    }
-    RecCard .rec-stale {
-        color: $error;
-        text-style: bold;
-    }
-    RecCard .rec-actions {
-        height: 3;
-        margin-top: 1;
-    }
-    RecCard .rec-actions Button {
-        margin-right: 1;
-    }
-    """
-
     def __init__(self, group: dict[str, Any], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.group = group

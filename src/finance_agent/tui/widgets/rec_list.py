@@ -14,21 +14,6 @@ from .rec_card import RecCard
 class RecList(VerticalScroll):
     """Displays pending recommendation groups."""
 
-    DEFAULT_CSS = """
-    RecList {
-        height: 1fr;
-        padding: 0;
-    }
-    RecList .rec-list-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    RecList .rec-empty {
-        color: $text-muted;
-        text-style: italic;
-    }
-    """
-
     def compose(self) -> ComposeResult:
         yield Static("Pending Recs", classes="rec-list-title")
         yield Static("No pending recommendations", classes="rec-empty", id="rec-empty")

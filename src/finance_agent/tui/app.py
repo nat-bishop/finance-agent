@@ -28,8 +28,7 @@ from .screens.portfolio import PortfolioScreen
 from .screens.recommendations import RecommendationsScreen
 from .services import TUIServices
 
-# Container filesystem contract — defined by Dockerfile + docker-compose mounts
-_WATCHLIST_PATH = Path("/workspace/analysis/watchlist.md")
+_KB_PATH = Path("/workspace/analysis/knowledge_base.md")
 
 
 class FinanceApp(App):
@@ -68,14 +67,9 @@ class FinanceApp(App):
 
         # Build startup context
         startup_state = db.get_session_state()
-        startup_state["watchlist"] = (
-            _WATCHLIST_PATH.read_text(encoding="utf-8") if _WATCHLIST_PATH.exists() else ""
+        startup_state["knowledge_base"] = (
+            _KB_PATH.read_text(encoding="utf-8") if _KB_PATH.exists() else ""
         )
-
-        # Clear session scratch file
-        session_log = Path("/workspace/analysis/session.log")
-        session_log.parent.mkdir(parents=True, exist_ok=True)
-        session_log.write_text("", encoding="utf-8")
 
         # Exchange clients
         kalshi = KalshiAPIClient(credentials, trading_config)

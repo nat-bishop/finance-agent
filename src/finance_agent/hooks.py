@@ -81,12 +81,7 @@ def create_audit_hooks(
             summary=f"Duration: {duration:.0f}s | Recommendations: {rec_count}",
             recommendations_made=rec_count,
         )
-        return {  # type: ignore[return-value]
-            "systemMessage": (
-                "Update /workspace/analysis/watchlist.md with any markets "
-                "to track next session before stopping."
-            )
-        }
+        return _EMPTY
 
     return {
         "PreToolUse": [

@@ -12,22 +12,6 @@ from textual.widgets import Static
 class PortfolioPanel(Vertical):
     """Shows balances and position counts for both exchanges."""
 
-    DEFAULT_CSS = """
-    PortfolioPanel {
-        height: auto;
-        padding: 1;
-        border: solid $primary;
-        margin: 0 0 1 0;
-    }
-    PortfolioPanel .portfolio-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    PortfolioPanel .balance-line {
-        margin: 0;
-    }
-    """
-
     def compose(self) -> ComposeResult:
         yield Static("Portfolio", classes="portfolio-title")
         yield Static("Loading...", id="portfolio-content")

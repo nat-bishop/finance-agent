@@ -41,13 +41,13 @@ Kalshi market analysis system built on `claude-agent-sdk`. The agent runs as an 
 - Investigates opportunities using MCP tools for live market data (orderbooks, trades, portfolio)
 - Two recommendation strategies: `bracket` (guaranteed arb, auto-computed) and `manual` (agent-specified correlated trades)
 - Records trade recommendations via `recommend_trade` tool for separate review/execution
-- Persists findings to `/workspace/analysis/knowledge_base.json` across sessions
+- Persists findings to `/workspace/analysis/knowledge_base.md` across sessions
 
 **TUI layer** (Textual, runs the app):
 - `tui/app.py` — FinanceApp: initializes clients, DB, SDK, registers 4 screens (F1-F4)
 - `tui/services.py` — async wrappers bridging exchange clients to Textual event loop
 - `tui/screens/` — dashboard (chat+sidebar), recommendations, portfolio, history
-- `tui/widgets/` — 7 widgets: agent_chat, rec_card, rec_list, portfolio_panel, status_bar, ask_modal, confirm_modal
+- `tui/widgets/` — 8 widgets: agent_chat, rec_card, rec_list, portfolio_panel, kb_panel, status_bar, ask_modal, confirm_modal
 
 ### Source -> Runtime boundary
 
@@ -71,7 +71,7 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 - **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Dormant module. Thin wrapper around `polymarket-us` SDK. Preserved for future re-enablement but not imported by active code.
 - **fees.py** — Kalshi fee calculations: P(1-P) parabolic formula, `kalshi_fee()`, `best_price_and_depth()`, `compute_arb_edge()`.
-- **hooks.py** — Hooks using `HookMatcher`. Auto-approve with file protection (denies Write/Edit to read-only paths), recommendation counting via PostToolUse, session end with watchlist reminder.
+- **hooks.py** — Hooks using `HookMatcher`. Auto-approve with file protection (denies Write/Edit to read-only paths), recommendation counting via PostToolUse, session end DB recording.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
 - **collector.py** — Standalone Kalshi data collector. Paginated event collection via `GET /events`. Generates `markets.jsonl` (one JSON object per market with denormalized event metadata). Also triggers incremental Kalshi daily history sync and upserts market metadata to `kalshi_market_meta`.
 - **backfill.py** — Kalshi historical daily data sync from public S3 bucket. Dynamic: fetches only missing days (full backfill on empty DB, incremental on subsequent runs). Called by collector or standalone via `python -m finance_agent.backfill`.
@@ -86,8 +86,8 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 - **Conventions**: Prices in cents, action+side, exchange column always "kalshi" in active code. Domain strings (`"kalshi"`, `"pending"`, `"yes"`, `"buy"`, `"bracket"`, etc.) defined in `constants.py` — import from there, don't hardcode.
 - **Config**: `Credentials` loads from env vars/`.env`; `TradingConfig` and `AgentConfig` are source-level defaults. Path fields on TradingConfig have `FA_*` env var overrides for Docker.
 - **Hook ordering**: PreToolUse (auto-approve + file protection) → PostToolUse rec audit → Stop session end.
-- **Startup context injection**: `main.py` calls `db.get_session_state()` and injects result into `BEGIN_SESSION` message. Agent starts with full context — no tool call needed.
-- **Watchlist**: `/workspace/analysis/watchlist.md` — markdown file the agent reads/writes directly (replaces former DB watchlist tools).
+- **Startup context injection**: `app.py` calls `db.get_session_state()` and injects result (including knowledge base content) into `BEGIN_SESSION` message. Agent starts with full context — no tool call needed.
+- **Knowledge base**: `/workspace/analysis/knowledge_base.md` — single markdown file the agent reads/writes for persistent memory (watchlist, verified findings, rejected ideas, patterns). Displayed in sidebar KBPanel.
 - **Analyst-only**: Agent recommends trades via `recommend_trade` DB tool. Exchange client methods remain for TUI executor.
 
 ### Logging

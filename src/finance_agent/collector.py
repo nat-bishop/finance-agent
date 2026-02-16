@@ -306,6 +306,7 @@ async def _run_collector_async() -> None:
     except KeyboardInterrupt:
         logger.warning("Interrupted")
     finally:
+        await kalshi._client.close()
         db.close()
 
 

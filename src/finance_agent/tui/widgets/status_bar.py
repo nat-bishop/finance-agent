@@ -11,16 +11,6 @@ from textual.widgets import Static
 class StatusBar(Static):
     """Persistent bottom bar: session, cost, rec count."""
 
-    DEFAULT_CSS = """
-    StatusBar {
-        dock: bottom;
-        height: 1;
-        background: $surface;
-        color: $text-muted;
-        padding: 0 1;
-    }
-    """
-
     session_id: reactive[str] = reactive("")
     total_cost: reactive[float] = reactive(0.0)
     rec_count: reactive[int] = reactive(0)

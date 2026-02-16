@@ -112,6 +112,7 @@ def sync_daily(db: AgentDatabase) -> int:
 
     for i in range(total_days):
         current = start_date + timedelta(days=i)
+        logger.info("  Fetching %s [%d/%d]...", current, i + 1, total_days)
         t0 = time.time()
         records = _fetch_daily(current)
         elapsed = time.time() - t0

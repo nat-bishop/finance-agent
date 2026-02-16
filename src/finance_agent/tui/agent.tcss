@@ -52,6 +52,24 @@ PortfolioPanel {
     margin: 0 0 1 0;
 }
 
+PortfolioPanel .portfolio-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+PortfolioPanel .balance-line {
+    margin: 0;
+}
+
+/* Knowledge base panel */
+KBPanel {
+    height: auto;
+    max-height: 20;
+    padding: 1;
+    border: solid $success;
+    margin: 0 0 1 0;
+}
+
 /* Rec cards */
 RecCard {
     height: auto;
@@ -68,6 +86,11 @@ RecCard .rec-detail {
     color: $text-muted;
 }
 
+RecCard .rec-stale {
+    color: $error;
+    text-style: bold;
+}
+
 RecCard .rec-actions {
     height: 3;
     margin-top: 1;
@@ -80,6 +103,17 @@ RecCard .rec-actions Button {
 /* Rec list */
 RecList {
     height: 1fr;
+    padding: 0;
+}
+
+RecList .rec-list-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+RecList .rec-empty {
+    color: $text-muted;
+    text-style: italic;
 }
 
 /* AskModal */
@@ -154,16 +188,6 @@ PortfolioScreen {
     padding: 1;
     border: solid $primary;
     margin: 0 0 1 0;
-}
-
-/* Signals screen */
-SignalsScreen {
-    layout: vertical;
-}
-
-#signals-container {
-    height: 1fr;
-    padding: 1;
 }
 
 /* History screen */

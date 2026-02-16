@@ -88,11 +88,11 @@ async def test_session_end_writes_db(db, session_id):
     assert "Recommendations:" in row["summary"]
 
 
-async def test_session_end_returns_watchlist_reminder(db, session_id):
+async def test_session_end_returns_empty(db, session_id):
     hooks = create_audit_hooks(db, session_id)
     stop_hook = hooks["Stop"][0].hooks[0]
     result = await stop_hook({}, None, None)
-    assert "watchlist" in result["systemMessage"].lower()
+    assert result == {}
 
 
 async def test_session_end_duration_in_summary(db, session_id):

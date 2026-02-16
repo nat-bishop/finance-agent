@@ -21,20 +21,6 @@ from ..messages import AgentCostUpdate, AgentResponseComplete, AgentStreaming
 class AgentChat(Vertical):
     """Agent chat pane: RichLog for output + Input for user messages."""
 
-    DEFAULT_CSS = """
-    AgentChat {
-        height: 1fr;
-    }
-    AgentChat #chat-log {
-        height: 1fr;
-        scrollbar-size: 1 1;
-    }
-    AgentChat #chat-input {
-        dock: bottom;
-        height: 3;
-    }
-    """
-
     def __init__(
         self,
         client: ClaudeSDKClient,

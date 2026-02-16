@@ -20,6 +20,7 @@ from ..messages import (
 )
 from ..services import TUIServices
 from ..widgets.agent_chat import AgentChat
+from ..widgets.kb_panel import KBPanel
 from ..widgets.portfolio_panel import PortfolioPanel
 from ..widgets.rec_list import RecList
 from ..widgets.status_bar import StatusBar
@@ -55,6 +56,7 @@ class DashboardScreen(Screen):
             yield AgentChat(self._client, self._startup_msg, id="agent-chat")
             with Vertical(id="sidebar"):
                 yield PortfolioPanel(id="portfolio-panel")
+                yield KBPanel(id="kb-panel")
                 yield RecList(id="rec-list")
         yield StatusBar(id="status-bar")
 
@@ -67,12 +69,17 @@ class DashboardScreen(Screen):
         self.run_worker(self._refresh_sidebar())
 
     async def _refresh_sidebar(self) -> None:
-        """Refresh portfolio and rec list from live data."""
+        """Refresh portfolio, knowledge base, and rec list from live data."""
         try:
             portfolio = await self._services.get_portfolio()
             self.query_one("#portfolio-panel", PortfolioPanel).update_data(portfolio)
         except Exception:
             logger.debug("Failed to refresh portfolio", exc_info=True)
+
+        try:
+            self.query_one("#kb-panel", KBPanel).refresh_content()
+        except Exception:
+            logger.debug("Failed to refresh knowledge base", exc_info=True)
 
         try:
             groups = self._services.get_pending_groups()
