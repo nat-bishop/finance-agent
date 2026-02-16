@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static
 
-from ...constants import EXCHANGE_KALSHI, STATUS_PENDING
+from ...constants import STATUS_PENDING
 
 
 class RecCard(Vertical):
@@ -22,7 +22,6 @@ class RecCard(Vertical):
 
     def _compose_legs(self) -> Iterable[Static]:
         for leg in self.group.get("legs", []):
-            exch = "K" if leg.get("exchange") == EXCHANGE_KALSHI else "PM"
             action = (leg.get("action") or "?").upper()
             side = (leg.get("side") or "?").upper()
             price = leg.get("price_cents")
@@ -32,7 +31,7 @@ class RecCard(Vertical):
             price_str = f"@ {price}c" if price is not None else "@ ?"
             qty_str = f"x{qty}" if qty is not None else ""
 
-            yield Static(f"  {exch}: {action} {side} {price_str} {qty_str}{maker}")
+            yield Static(f"  K: {action} {side} {price_str} {qty_str}{maker}")
 
     def _compose_metrics(self) -> Iterable[Static]:
         edge = self.group.get("computed_edge_pct") or self.group.get("estimated_edge_pct")

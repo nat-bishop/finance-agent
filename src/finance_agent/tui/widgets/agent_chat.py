@@ -15,7 +15,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Input, RichLog
 
-from ..messages import AgentCostUpdate, AgentResponseComplete, AgentStreaming
+from ..messages import AgentCostUpdate, AgentResponseComplete
 
 
 class AgentChat(Vertical):
@@ -51,7 +51,6 @@ class AgentChat(Vertical):
     async def _send_and_stream(self, message: str, *, show_input: bool = True) -> None:
         chat_input = self.query_one("#chat-input", Input)
         chat_input.disabled = True
-        self.post_message(AgentStreaming())
 
         log = self.query_one("#chat-log", RichLog)
         try:

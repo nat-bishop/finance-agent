@@ -7,7 +7,6 @@ import asyncio
 from finance_agent.tui.messages import (
     AgentCostUpdate,
     AgentResponseComplete,
-    AgentStreaming,
     AskUserQuestionRequest,
     RecommendationCreated,
     RecommendationExecuted,
@@ -21,11 +20,6 @@ def test_agent_cost_update():
 
 def test_agent_response_complete():
     msg = AgentResponseComplete()
-    assert msg is not None
-
-
-def test_agent_streaming():
-    msg = AgentStreaming()
     assert msg is not None
 
 

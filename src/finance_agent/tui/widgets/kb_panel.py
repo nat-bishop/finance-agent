@@ -30,16 +30,16 @@ class KBPanel(VerticalScroll):
         """Re-read knowledge_base.md and update display."""
         content = self.query_one("#kb-content", Static)
         try:
-            if _KB_PATH.exists():
-                text = _KB_PATH.read_text(encoding="utf-8").strip()
-                if text:
-                    if len(text) > _MAX_DISPLAY_CHARS:
-                        text = text[:_MAX_DISPLAY_CHARS] + "\n\n... (truncated)"
-                    content.update(Markdown(text))
-                else:
-                    content.update("Empty knowledge base")
-            else:
+            if not _KB_PATH.exists():
                 content.update("No knowledge base yet")
+                return
+            text = _KB_PATH.read_text(encoding="utf-8").strip()
+            if not text:
+                content.update("Empty knowledge base")
+                return
+            if len(text) > _MAX_DISPLAY_CHARS:
+                text = text[:_MAX_DISPLAY_CHARS] + "\n\n... (truncated)"
+            content.update(Markdown(text))
         except Exception:
             logger.debug("Failed to read knowledge base", exc_info=True)
             content.update("Error reading knowledge base")

@@ -166,10 +166,9 @@ class FinanceApp(App):
         if self._client:
             with contextlib.suppress(Exception):
                 await self._client.__aexit__(None, None, None)
-        monitor = getattr(self._services, "_fill_monitor", None) if self._services else None
-        if monitor is not None:
+        if self._services and self._services._fill_monitor:
             with contextlib.suppress(Exception):
-                await monitor.close()
+                await self._services._fill_monitor.close()
         if self._db and self._session_id:
             with contextlib.suppress(Exception):
                 # Only end session if not already ended by the Stop hook

@@ -19,10 +19,6 @@ class AgentResponseComplete(Message):
     """Agent finished streaming a response."""
 
 
-class AgentStreaming(Message):
-    """Agent started streaming a response."""
-
-
 class RecommendationCreated(Message):
     """A new recommendation was logged by the agent."""
 

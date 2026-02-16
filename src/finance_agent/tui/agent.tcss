@@ -57,10 +57,6 @@ PortfolioPanel .portfolio-title {
     margin-bottom: 1;
 }
 
-PortfolioPanel .balance-line {
-    margin: 0;
-}
-
 /* Knowledge base panel */
 KBPanel {
     height: auto;

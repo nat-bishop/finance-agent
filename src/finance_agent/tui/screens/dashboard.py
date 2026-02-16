@@ -64,8 +64,8 @@ class DashboardScreen(Screen):
         bar = self.query_one("#status-bar", StatusBar)
         bar.session_id = self._session_id
 
-        # Initial data load
-        self.set_interval(30, self._poll_state)
+        # Initial data load + 30s polling for external changes
+        self.set_interval(30, self._refresh_sidebar)
         self.run_worker(self._refresh_sidebar())
 
     async def _refresh_sidebar(self) -> None:
@@ -86,10 +86,6 @@ class DashboardScreen(Screen):
             self.query_one("#rec-list", RecList).update_recs(groups)
         except Exception:
             logger.debug("Failed to refresh rec list", exc_info=True)
-
-    async def _poll_state(self) -> None:
-        """Periodic refresh for external changes."""
-        await self._refresh_sidebar()
 
     # ── Message handlers ──────────────────────────────────────────
 
