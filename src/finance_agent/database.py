@@ -215,6 +215,7 @@ class AgentDatabase:
         total_exposure_usd: float | None = None,
         computed_edge_pct: float | None = None,
         computed_fees_usd: float | None = None,
+        strategy: str = "bracket",
     ) -> tuple[int, str]:
         """Insert a recommendation group + legs atomically. Returns (group_id, expires_at)."""
         now = _now()
@@ -230,6 +231,7 @@ class AgentDatabase:
             total_exposure_usd=total_exposure_usd,
             computed_edge_pct=computed_edge_pct,
             computed_fees_usd=computed_fees_usd,
+            strategy=strategy,
         )
         for i, leg in enumerate(legs or []):
             group.legs.append(

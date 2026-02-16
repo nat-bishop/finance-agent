@@ -134,6 +134,7 @@ class RecommendationGroup(Base):
     total_exposure_usd: Mapped[float | None] = mapped_column(Float)
     computed_edge_pct: Mapped[float | None] = mapped_column(Float)
     computed_fees_usd: Mapped[float | None] = mapped_column(Float)
+    strategy: Mapped[str | None] = mapped_column(Text, server_default="bracket")
 
     legs: Mapped[list[RecommendationLeg]] = relationship(
         back_populates="group",

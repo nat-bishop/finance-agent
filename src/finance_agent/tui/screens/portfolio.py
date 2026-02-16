@@ -36,7 +36,6 @@ class PortfolioScreen(Screen):
             # Balances
             with Horizontal():
                 yield Static("Loading...", id="kalshi-balance", classes="balance-card")
-                yield Static("Loading...", id="pm-balance", classes="balance-card")
 
             # Positions table
             yield Static("[bold]Positions[/]")
@@ -96,16 +95,6 @@ class PortfolioScreen(Screen):
             k_bal = f"${k_bal / 100:.2f}"
         self.query_one("#kalshi-balance", Static).update(f"Kalshi: {k_bal}")
 
-        pm = portfolio.get("polymarket", {})
-        if pm:
-            pm_balance = pm.get("balance", {})
-            pm_bal = pm_balance.get("balance", pm_balance.get("cash_balance", "?"))
-            if isinstance(pm_bal, int | float):
-                pm_bal = f"${pm_bal:.2f}"
-            self.query_one("#pm-balance", Static).update(f"Polymarket: {pm_bal}")
-        else:
-            self.query_one("#pm-balance", Static).update("Polymarket: disabled")
-
     def _update_positions(self, portfolio: dict[str, Any]) -> None:
         table = self.query_one("#positions-table", DataTable)
         table.clear()
@@ -121,19 +110,6 @@ class PortfolioScreen(Screen):
                     str(pos.get("total_traded", pos.get("position", ""))),
                     str(pos.get("average_price", "")),
                 )
-
-        pm = portfolio.get("polymarket", {})
-        if pm:
-            pm_positions = pm.get("positions", {}).get("positions", [])
-            if isinstance(pm_positions, list):
-                for pos in pm_positions:
-                    table.add_row(
-                        "PM",
-                        str(pos.get("slug", pos.get("market_slug", ""))),
-                        str(pos.get("side", "")),
-                        str(pos.get("quantity", pos.get("size", ""))),
-                        str(pos.get("average_price", "")),
-                    )
 
     def _update_orders(self, orders: dict[str, Any]) -> None:
         table = self.query_one("#orders-table", DataTable)

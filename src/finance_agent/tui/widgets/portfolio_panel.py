@@ -47,15 +47,4 @@ class PortfolioPanel(Vertical):
         k_pos_count = len(k_pos_list) if isinstance(k_pos_list, list) else 0
         lines.append(f"Kalshi: {k_bal_val} | {k_pos_count} positions")
 
-        pm = data.get("polymarket", {})
-        if pm:
-            pm_balance = pm.get("balance", {})
-            pm_bal_val = pm_balance.get("balance", pm_balance.get("cash_balance", "?"))
-            if isinstance(pm_bal_val, int | float):
-                pm_bal_val = f"${pm_bal_val:.2f}"
-            pm_positions = pm.get("positions", {})
-            pm_pos_list = pm_positions.get("positions", [])
-            pm_pos_count = len(pm_pos_list) if isinstance(pm_pos_list, list) else 0
-            lines.append(f"PM: {pm_bal_val} | {pm_pos_count} positions")
-
         content.update("\n".join(lines) if lines else "No data")

@@ -434,9 +434,9 @@ def create_db_tools(
                     "yes_depth": yes_depth,
                     "no_ask": no_price,
                     "no_depth": no_depth,
-                    # Bid = ask in Kalshi's binary orderbook format
-                    "yes_bid": yes_price,
-                    "no_bid": no_price,
+                    # Derive bid prices from opposite side (binary market: bid = 100 - opposite ask)
+                    "yes_bid": (100 - no_price) if no_price else None,
+                    "no_bid": (100 - yes_price) if yes_price else None,
                 }
             )
 
@@ -517,6 +517,7 @@ def create_db_tools(
             total_exposure_usd=total_exposure,
             computed_edge_pct=edge_result["net_edge_pct"],
             computed_fees_usd=edge_result["total_fees_usd"],
+            strategy="bracket",
         )
 
         return _text(
@@ -577,6 +578,7 @@ def create_db_tools(
             total_exposure_usd=total_cost,
             computed_edge_pct=0.0,
             computed_fees_usd=round(total_fees, 4),
+            strategy="manual",
         )
 
         return _text(

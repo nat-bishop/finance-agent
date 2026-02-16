@@ -266,6 +266,44 @@ async def test_recommend_trade_manual_requires_action_side(db, session_id, mock_
     assert "action" in data["error"].lower() or "side" in data["error"].lower()
 
 
+async def test_recommend_trade_manual_sell(db, session_id, mock_kalshi):
+    """Manual sell orders should use bid prices (100 - opposite ask), not ask prices."""
+    from unittest.mock import AsyncMock
+
+    # yes_ask=45, no_ask=55 → yes_bid = 100-55 = 45, no_bid = 100-45 = 55
+    # yes_ask=60, no_ask=40 → yes_bid = 100-40 = 60, no_bid = 100-60 = 40
+    mock_kalshi.get_orderbook = AsyncMock(
+        side_effect=[
+            {"yes": [[45, 100]], "no": [[55, 100]]},
+            {"yes": [[60, 100]], "no": [[40, 100]]},
+        ]
+    )
+    mock_kalshi.get_market = AsyncMock(return_value={"market": {"title": "Test Sell Market"}})
+
+    tools = create_db_tools(db, session_id, mock_kalshi)
+    result = await _call(tools, 0)(
+        {
+            "thesis": "Sell-side manual strategy: sell YES on overpriced market, buy YES on underpriced",
+            "strategy": "manual",
+            "legs": [
+                {"market_id": "K-1", "action": "sell", "side": "yes", "quantity": 5},
+                {"market_id": "K-2", "action": "buy", "side": "yes", "quantity": 5},
+            ],
+        }
+    )
+    data = json.loads(result["content"][0]["text"])
+    assert data["group_id"] > 0
+    assert data["strategy"] == "manual"
+
+    # Verify the sell leg uses bid price (100 - no_ask = 100 - 55 = 45)
+    sell_leg = next(lg for lg in data["legs"] if lg["action"] == "sell")
+    assert sell_leg["price_cents"] == 45  # yes_bid = 100 - no_ask(55) = 45
+
+    # Verify the buy leg uses ask price (60)
+    buy_leg = next(lg for lg in data["legs"] if lg["action"] == "buy")
+    assert buy_leg["price_cents"] == 60  # yes_ask = 60
+
+
 async def test_recommend_trade_manual_aggregate_limit(db, session_id, mock_kalshi):
     """Manual strategy should reject when aggregate exposure exceeds limit."""
     from unittest.mock import AsyncMock
@@ -293,6 +331,43 @@ async def test_recommend_trade_manual_aggregate_limit(db, session_id, mock_kalsh
     )
     data = json.loads(result["content"][0]["text"])
     assert "error" in data
+
+
+async def test_recommend_trade_bracket_stores_strategy(db, session_id, mock_kalshi):
+    """Bracket strategy should store strategy='bracket' in DB."""
+    from finance_agent.config import TradingConfig
+
+    _bracket_mocks(mock_kalshi)
+    cfg = TradingConfig(min_edge_pct=0.0)
+    tools = create_db_tools(db, session_id, mock_kalshi, trading_config=cfg)
+    await _call(tools, 0)(
+        {
+            "thesis": "Bracket strategy stored in DB",
+            "strategy": "bracket",
+            "total_exposure_usd": 50.0,
+            "legs": [{"market_id": "K-1"}, {"market_id": "K-2"}, {"market_id": "K-3"}],
+        }
+    )
+    groups = db.get_pending_groups()
+    assert groups[0]["strategy"] == "bracket"
+
+
+async def test_recommend_trade_manual_stores_strategy(db, session_id, mock_kalshi):
+    """Manual strategy should store strategy='manual' in DB."""
+    _manual_mocks(mock_kalshi)
+    tools = create_db_tools(db, session_id, mock_kalshi)
+    await _call(tools, 0)(
+        {
+            "thesis": "Manual strategy stored in DB",
+            "strategy": "manual",
+            "legs": [
+                {"market_id": "K-1", "action": "buy", "side": "yes", "quantity": 10},
+                {"market_id": "K-2", "action": "buy", "side": "yes", "quantity": 10},
+            ],
+        }
+    )
+    groups = db.get_pending_groups()
+    assert groups[0]["strategy"] == "manual"
 
 
 # ── Tool count verification ──────────────────────────────────────

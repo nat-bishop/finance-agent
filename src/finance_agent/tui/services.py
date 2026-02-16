@@ -182,7 +182,15 @@ class TUIServices:
                 return None, self._reject_all_legs(group_id, legs, f"Orderbook fetch failed: {e}")
 
             side = leg.get("side", "yes")
-            price, depth = best_price_and_depth(ob, side)
+            action = leg.get("action", "buy")
+            if action == "buy":
+                price, depth = best_price_and_depth(ob, side)
+            else:
+                # For sells, derive bid from opposite side's ask
+                opposite = "no" if side == "yes" else "yes"
+                opp_ask, _ = best_price_and_depth(ob, opposite)
+                price = (100 - opp_ask) if opp_ask else None
+                _, depth = best_price_and_depth(ob, side)
 
             rec_price = leg.get("price_cents")
             if price and rec_price:
@@ -204,9 +212,9 @@ class TUIServices:
                 }
             )
 
-        # Recompute edge with fresh prices
+        # Recompute edge with fresh prices (only for bracket strategy)
         contracts = refreshed_legs[0].get("quantity", 0) if refreshed_legs else 0
-        if contracts > 0:
+        if group.get("strategy") != "manual" and contracts > 0:
             fee_legs = [
                 {
                     "exchange": lg.get("exchange", "kalshi"),
