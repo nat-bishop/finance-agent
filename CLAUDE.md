@@ -12,7 +12,7 @@ make shell          # bash into container
 make logs           # tail the agent log file (workspace/data/agent.log)
 
 # Data pipeline (Docker)
-make collect        # snapshot market data to SQLite (both platforms)
+make collect        # snapshot market data + sync Kalshi daily history
 make backup         # backup SQLite database
 make startup        # dump session state JSON (debug)
 
@@ -61,13 +61,14 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point calls TUI. Wires `setup_logging()`.
 - **logging_config.py** — `setup_logging()` configures root logger with stderr console + optional file handler. Idempotent, quiets noisy libraries (alembic, sqlalchemy, urllib3).
 - **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `polymarket_max_position_usd=50`, `min_edge_pct=7.0`, `recommendation_ttl_minutes=60`. Also loads and templates `prompts/system.md`.
-- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 6 tables. Alembic autogenerate reads these.
+- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 8 tables. Alembic autogenerate reads these.
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 7 read-only tools, `create_db_tools(db, session_id)` → 1 tool (`recommend_trade` with legs array). Exchange is a parameter, not a namespace.
 - **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
-- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates `markets.jsonl` (one JSON object per market with denormalized event metadata).
+- **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates `markets.jsonl` (one JSON object per market with denormalized event metadata). Also triggers incremental Kalshi daily history sync and upserts market metadata to `kalshi_market_meta`.
+- **backfill.py** — Kalshi historical daily data sync from public S3 bucket. Dynamic: fetches only missing days (full backfill on empty DB, incremental on subsequent runs). Called by collector or standalone via `python -m finance_agent.backfill`.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
 - **prompts/system.md** — System prompt template with arb-only mission, settlement equivalence verification protocol, arbitrage structures, information hierarchy, market discovery workflow, recommendation protocol, risk rules.

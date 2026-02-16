@@ -144,7 +144,7 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 6 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 8 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
@@ -154,6 +154,8 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 | `recommendation_groups` | agent | TUI | session_id FK, thesis, estimated_edge_pct, status |
 | `recommendation_legs` | agent | TUI | group_id FK, exchange, market_id, action, side, price_cents |
 | `sessions` | main | agent, TUI | started_at, summary, trades_placed, recommendations_made |
+| `kalshi_daily` | collector (S3) | agent scripts | date, ticker_name, high, low, daily_volume, open_interest |
+| `kalshi_market_meta` | collector | agent scripts | ticker PK, title, category, event_ticker, first_seen |
 
 ## Workspace
 

@@ -17,6 +17,8 @@ from sqlalchemy.orm import sessionmaker
 
 from finance_agent.models import (
     Event,
+    KalshiDaily,
+    KalshiMarketMeta,
     MarketSnapshot,
     RecommendationGroup,
     RecommendationLeg,
@@ -342,6 +344,66 @@ class AgentDatabase:
         if deleted:
             logger.info("Purged %d snapshots older than %d days", deleted, retention_days)
         return deleted
+
+    # ── Kalshi daily history ─────────────────────────────────
+
+    _DAILY_COLS = {c.name for c in KalshiDaily.__table__.columns} - {"id"}
+
+    def get_kalshi_daily_max_date(self) -> str | None:
+        """Return the latest date in kalshi_daily, or None if empty."""
+        with self._session_factory() as session:
+            return session.scalar(select(func.max(KalshiDaily.date)))
+
+    def insert_kalshi_daily(self, rows: list[dict[str, Any]]) -> int:
+        """Bulk upsert daily Kalshi data. Returns count inserted/updated."""
+        if not rows:
+            return 0
+        filtered = [{k: v for k, v in row.items() if k in self._DAILY_COLS} for row in rows]
+        stmt = sqlite_insert(KalshiDaily)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["date", "ticker_name"],
+            set_={
+                "report_ticker": stmt.excluded.report_ticker,
+                "payout_type": stmt.excluded.payout_type,
+                "open_interest": stmt.excluded.open_interest,
+                "daily_volume": stmt.excluded.daily_volume,
+                "block_volume": stmt.excluded.block_volume,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "status": stmt.excluded.status,
+            },
+        )
+        with self._session_factory() as session:
+            session.execute(stmt, filtered)
+            session.commit()
+        return len(filtered)
+
+    # ── Kalshi market metadata ───────────────────────────────
+
+    def upsert_market_meta(self, rows: list[dict[str, Any]]) -> int:
+        """Bulk upsert market metadata. Preserves first_seen on conflict."""
+        if not rows:
+            return 0
+        now = _now()
+        for row in rows:
+            row.setdefault("first_seen", now)
+            row.setdefault("last_seen", now)
+        stmt = sqlite_insert(KalshiMarketMeta)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["ticker"],
+            set_={
+                "event_ticker": stmt.excluded.event_ticker,
+                "series_ticker": stmt.excluded.series_ticker,
+                "title": stmt.excluded.title,
+                "category": stmt.excluded.category,
+                "last_seen": stmt.excluded.last_seen,
+                # first_seen intentionally NOT updated
+            },
+        )
+        with self._session_factory() as session:
+            session.execute(stmt, rows)
+            session.commit()
+        return len(rows)
 
     # ── Events (upsert for collector) ─────────────────────────
 

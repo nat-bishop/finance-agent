@@ -202,6 +202,7 @@ async def collect_kalshi(
     event_count = 0
     market_count = 0
     market_batch: list[dict[str, Any]] = []
+    meta_batch: list[dict[str, Any]] = []
     cursor: str | None = None
     pages = 0
 
@@ -222,12 +223,25 @@ async def collect_kalshi(
                 continue
             event_count += 1
             nested = event.get("markets", [])
-            market_batch.extend(_compute_derived(m, now) for m in nested)
+            for m in nested:
+                market_batch.append(_compute_derived(m, now))
+                meta_batch.append(
+                    {
+                        "ticker": m.get("ticker"),
+                        "event_ticker": event.get("event_ticker"),
+                        "series_ticker": event.get("series_ticker"),
+                        "title": m.get("title"),
+                        "category": event.get("category"),
+                    }
+                )
             page_markets += len(nested)
 
         if len(market_batch) >= 500:
             market_count += db.insert_market_snapshots(market_batch)
             market_batch.clear()
+        if len(meta_batch) >= 500:
+            db.upsert_market_meta(meta_batch)
+            meta_batch.clear()
 
         pages += 1
         logger.info(
@@ -244,6 +258,8 @@ async def collect_kalshi(
 
     if market_batch:
         market_count += db.insert_market_snapshots(market_batch)
+    if meta_batch:
+        db.upsert_market_meta(meta_batch)
 
     logger.info("  -> %d events, %d market snapshots", event_count, market_count)
     return event_count, market_count
@@ -417,6 +433,11 @@ async def _run_collector_async() -> None:
         # Generate JSONL market data for agent programmatic discovery
         jsonl_path = str(Path(trading_config.db_path).parent / "markets.jsonl")
         _generate_markets_jsonl(db, jsonl_path)
+
+        # Sync Kalshi daily historical data (incremental)
+        from .backfill import sync_daily
+
+        sync_daily(db)
 
         # Purge old snapshots
         db.purge_old_snapshots(trading_config.snapshot_retention_days)

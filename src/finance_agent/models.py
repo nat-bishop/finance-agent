@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models — canonical schema definition for all 6 tables."""
+"""SQLAlchemy ORM models — canonical schema definition for all 8 tables."""
 
 from __future__ import annotations
 
@@ -184,3 +184,56 @@ class RecommendationLeg(Base):
     group: Mapped[RecommendationGroup] = relationship(back_populates="legs")
 
     __table_args__ = (Index("idx_leg_group", "group_id"),)
+
+
+# ── Kalshi Daily History ─────────────────────────────────────
+
+
+class KalshiDaily(Base):
+    """Daily EOD market data from Kalshi's public S3 reporting bucket."""
+
+    __tablename__ = "kalshi_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[str] = mapped_column(Text, nullable=False)
+    ticker_name: Mapped[str] = mapped_column(Text, nullable=False)
+    report_ticker: Mapped[str] = mapped_column(Text, nullable=False)
+    payout_type: Mapped[str | None] = mapped_column(Text)
+    open_interest: Mapped[int | None] = mapped_column(Integer)
+    daily_volume: Mapped[int | None] = mapped_column(Integer)
+    block_volume: Mapped[int | None] = mapped_column(Integer)
+    high: Mapped[int | None] = mapped_column(Integer)
+    low: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_kalshi_daily_unique", "date", "ticker_name", unique=True),
+        Index("idx_kalshi_daily_ticker", "ticker_name"),
+        Index("idx_kalshi_daily_report", "report_ticker"),
+    )
+
+
+# ── Kalshi Market Metadata ───────────────────────────────────
+
+
+class KalshiMarketMeta(Base):
+    """Permanent market metadata catalog, never purged.
+
+    Populated automatically during ``make collect`` from Kalshi API data.
+    Provides titles/categories for joining with ``kalshi_daily`` history.
+    """
+
+    __tablename__ = "kalshi_market_meta"
+
+    ticker: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_ticker: Mapped[str | None] = mapped_column(Text)
+    series_ticker: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
+    first_seen: Mapped[str | None] = mapped_column(Text)
+    last_seen: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("idx_meta_series", "series_ticker"),
+        Index("idx_meta_category", "category"),
+    )
