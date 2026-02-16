@@ -20,7 +20,6 @@ from ..database import AgentDatabase
 from ..hooks import create_audit_hooks
 from ..kalshi_client import KalshiAPIClient
 from ..main import build_options
-from ..polymarket_client import PolymarketAPIClient
 from ..tools import create_db_tools, create_market_tools
 from .messages import AskUserQuestionRequest, RecommendationCreated
 from .screens.dashboard import DashboardScreen
@@ -33,7 +32,7 @@ _WATCHLIST_PATH = Path("/workspace/data/watchlist.md")
 
 
 class FinanceApp(App):
-    """Cross-platform arbitrage analyst TUI."""
+    """Kalshi market analyst TUI."""
 
     TITLE = "Finance Agent"
     CSS_PATH = "agent.tcss"
@@ -77,18 +76,11 @@ class FinanceApp(App):
 
         # Exchange clients
         kalshi = KalshiAPIClient(credentials, trading_config)
-        polymarket_enabled = trading_config.polymarket_enabled and bool(
-            credentials.polymarket_key_id
-        )
-        pm_client = (
-            PolymarketAPIClient(credentials, trading_config) if polymarket_enabled else None
-        )
 
         # Services
         services = TUIServices(
             db=db,
             kalshi=kalshi,
-            polymarket=pm_client,
             config=trading_config,
             session_id=session_id,
             credentials=credentials,
@@ -97,12 +89,11 @@ class FinanceApp(App):
 
         # MCP tools
         mcp_tools = {
-            "markets": create_market_tools(kalshi, pm_client),
+            "markets": create_market_tools(kalshi),
             "db": create_db_tools(
                 db,
                 session_id,
                 kalshi,
-                pm_client,
                 trading_config,
                 trading_config.recommendation_ttl_minutes,
             ),

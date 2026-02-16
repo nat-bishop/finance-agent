@@ -1,7 +1,6 @@
-"""Real fee calculations for Kalshi and Polymarket US.
+"""Real fee calculations for Kalshi.
 
 Kalshi uses a P(1-P) parabolic formula — highest fees at 50c, near-zero at extremes.
-Polymarket US charges 0.10% taker on total premium; maker orders are free.
 """
 
 from __future__ import annotations
@@ -25,36 +24,20 @@ def kalshi_fee(contracts: int, price_cents: int, *, maker: bool = False) -> floa
     return min(raw, cap)
 
 
-def polymarket_fee(contracts: int, price_cents: int, *, maker: bool = False) -> float:
-    """Polymarket US fee. Returns fee in USD.
-
-    Taker: 0.10% of total premium (contracts * price), min $0.001 per trade.
-    Maker: free ($0.00).
-    """
-    if maker or contracts <= 0 or not (1 <= price_cents <= 99):
-        return 0.0
-    premium_usd = contracts * price_cents / 100.0
-    fee = premium_usd * 0.001  # 0.10%
-    return max(fee, 0.001)
-
-
 def leg_fee(exchange: str, contracts: int, price_cents: int, *, maker: bool = False) -> float:
     """Dispatch to exchange-specific fee function."""
     if exchange == "kalshi":
         return kalshi_fee(contracts, price_cents, maker=maker)
-    if exchange == "polymarket":
-        return polymarket_fee(contracts, price_cents, maker=maker)
     raise ValueError(f"Unknown exchange: {exchange}")
 
 
 def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | None, int]:
     """Extract best executable price (cents) and total depth at that level.
 
-    Handles both Kalshi format ({yes: [[price, qty], ...], no: [...]})
-    and generic format ({asks: [...], bids: [...]}).
+    Handles Kalshi format ({yes: [[price, qty], ...], no: [...]}).
     """
     ob = orderbook.get("orderbook", orderbook)
-    asks = ob.get("yes", ob.get("asks", [])) if side == "yes" else ob.get("no", ob.get("asks", []))
+    asks = ob.get("yes", []) if side == "yes" else ob.get("no", [])
 
     if not asks:
         return None, 0
@@ -75,7 +58,6 @@ def compute_arb_edge(
 
     Each leg dict must have: exchange, price_cents, maker (bool).
 
-    For cross-platform 2-leg: edge = $1 payout - cost per pair.
     For bracket N-leg (same exchange): edge = sum of prices - $1 per set.
     """
     if not legs or contracts <= 0:
@@ -89,18 +71,11 @@ def compute_arb_edge(
         }
 
     cost_per_pair_cents = sum(leg["price_cents"] for leg in legs)
-    total_cost_usd = contracts * cost_per_pair_cents / 100.0
 
-    # Cross-platform: payout = $1 per pair. Bracket: payout from selling at sum > $1.
-    exchanges = {leg["exchange"] for leg in legs}
-    if len(exchanges) > 1:
-        # Cross-platform: buy cheap YES + buy cheap NO = guaranteed $1 payout
-        payout_per_pair_cents = 100
-    else:
-        # Bracket: selling all outcomes at sum > 100c, guaranteed cost = 100c per set
-        payout_per_pair_cents = cost_per_pair_cents
-        cost_per_pair_cents = 100  # you collect the sum, pay out $1
-        total_cost_usd = contracts * 100 / 100.0
+    # Bracket: selling all outcomes at sum > 100c, guaranteed cost = 100c per set
+    payout_per_pair_cents = cost_per_pair_cents
+    cost_per_pair_cents = 100  # you collect the sum, pay out $1
+    total_cost_usd = contracts * 100 / 100.0
 
     gross_edge_per_pair = abs(payout_per_pair_cents - cost_per_pair_cents) / 100.0
     gross_edge_usd = contracts * gross_edge_per_pair
@@ -108,12 +83,10 @@ def compute_arb_edge(
     fee_breakdown = []
     total_fees = 0.0
     for leg in legs:
-        fee = leg_fee(
-            leg["exchange"], contracts, leg["price_cents"], maker=leg.get("maker", False)
-        )
+        fee = kalshi_fee(contracts, leg["price_cents"], maker=leg.get("maker", False))
         fee_breakdown.append(
             {
-                "exchange": leg["exchange"],
+                "exchange": leg.get("exchange", "kalshi"),
                 "price_cents": leg["price_cents"],
                 "maker": leg.get("maker", False),
                 "fee_usd": round(fee, 4),

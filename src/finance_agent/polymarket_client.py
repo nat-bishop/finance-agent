@@ -31,8 +31,8 @@ class PolymarketAPIClient(BaseAPIClient):
 
     def __init__(self, credentials: Credentials, config: TradingConfig) -> None:
         super().__init__(
-            reads_per_sec=config.polymarket_rate_limit_reads_per_sec,
-            writes_per_sec=config.polymarket_rate_limit_writes_per_sec,
+            reads_per_sec=getattr(config, "polymarket_rate_limit_reads_per_sec", 10),
+            writes_per_sec=getattr(config, "polymarket_rate_limit_writes_per_sec", 10),
         )
         self._config = config
         self._client = AsyncPolymarketUS(

@@ -96,29 +96,27 @@ def test_log_trade_stores_all_fields(db, session_id):
         order_id="ORD-1",
         status="placed",
         result_json='{"ok": true}',
-        exchange="polymarket",
+        exchange="kalshi",
     )
     trades = db.get_trades()
     r = next(t for t in trades if t["ticker"] == "TICKER-X")
-    assert r["exchange"] == "polymarket"
+    assert r["exchange"] == "kalshi"
     assert r["price_cents"] == 45
     assert r["order_id"] == "ORD-1"
     assert r["status"] == "placed"
 
 
-@pytest.mark.parametrize("exchange", ["kalshi", "polymarket"])
-def test_log_trade_exchange(db, session_id, exchange):
-    db.log_trade(session_id, "T-1", "buy", "yes", 1, exchange=exchange)
-    trades = db.get_trades(exchange=exchange)
-    assert trades[0]["exchange"] == exchange
+def test_log_trade_exchange(db, session_id):
+    db.log_trade(session_id, "T-1", "buy", "yes", 1, exchange="kalshi")
+    trades = db.get_trades(exchange="kalshi")
+    assert trades[0]["exchange"] == "kalshi"
 
 
 def test_get_trades_with_filter(db, session_id):
     db.log_trade(session_id, "T-1", "buy", "yes", 10, exchange="kalshi")
-    db.log_trade(session_id, "T-2", "sell", "no", 5, exchange="polymarket")
+    db.log_trade(session_id, "T-2", "sell", "no", 5, exchange="kalshi")
     trades = db.get_trades(exchange="kalshi")
-    assert len(trades) == 1
-    assert trades[0]["ticker"] == "T-1"
+    assert len(trades) == 2
 
 
 # ── Recommendation Groups ────────────────────────────────────────
@@ -149,9 +147,9 @@ def test_log_recommendation_group_returns_id(db, session_id):
 def test_log_recommendation_group_with_multiple_legs(db, session_id):
     group_id, _ = db.log_recommendation_group(
         session_id=session_id,
-        thesis="Arb opportunity",
+        thesis="Bracket arb opportunity",
         estimated_edge_pct=7.0,
-        equivalence_notes="Same event",
+        equivalence_notes="Same event, mutually exclusive outcomes",
         legs=[
             {
                 "exchange": "kalshi",
@@ -160,26 +158,35 @@ def test_log_recommendation_group_with_multiple_legs(db, session_id):
                 "action": "buy",
                 "side": "yes",
                 "quantity": 10,
-                "price_cents": 45,
+                "price_cents": 30,
             },
             {
-                "exchange": "polymarket",
-                "market_id": "PM-1",
+                "exchange": "kalshi",
+                "market_id": "K-2",
                 "market_title": "Leg 2",
-                "action": "sell",
+                "action": "buy",
                 "side": "yes",
                 "quantity": 10,
-                "price_cents": 52,
+                "price_cents": 30,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-3",
+                "market_title": "Leg 3",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
             },
         ],
     )
     group = db.get_group(group_id)
     assert group is not None
-    assert len(group["legs"]) == 2
+    assert len(group["legs"]) == 3
     assert group["legs"][0]["leg_index"] == 0
     assert group["legs"][1]["leg_index"] == 1
-    assert group["legs"][0]["exchange"] == "kalshi"
-    assert group["legs"][1]["exchange"] == "polymarket"
+    assert group["legs"][2]["leg_index"] == 2
+    assert all(leg["exchange"] == "kalshi" for leg in group["legs"])
 
 
 def test_log_recommendation_group_ttl(db, session_id):
@@ -367,10 +374,9 @@ def test_upsert_event_update(db, sample_event):
 
 def test_upsert_event_composite_pk(db, sample_event):
     db.upsert_event(**sample_event(event_ticker="EVT-1", exchange="kalshi"))
-    db.upsert_event(**sample_event(event_ticker="EVT-1", exchange="polymarket"))
     events = db.get_all_events()
     count = sum(1 for e in events if e["event_ticker"] == "EVT-1")
-    assert count == 2
+    assert count == 1
 
 
 # ── get_session_state ────────────────────────────────────────────

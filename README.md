@@ -1,16 +1,16 @@
 # Finance Agent
 
-Cross-platform arbitrage system for [Kalshi](https://kalshi.com) and [Polymarket US](https://polymarket.us), built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
+Kalshi market analysis system built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
 
-Finds markets that resolve to the same outcome across platforms, verifies identical settlement criteria, and produces structured arbitrage recommendations. Includes a terminal UI for reviewing recommendations, executing trades, and monitoring positions.
+Discovers mispricings across Kalshi markets using code-first analysis — bracket arbitrage on mutually exclusive events, price correlations across categories, and custom analytical scripts. Produces structured trade recommendations for review and execution via a terminal UI.
 
 ## Architecture
 
 **Three-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates `markets.jsonl` (one JSON object per market with denormalized event metadata for programmatic discovery).
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots Kalshi market data to SQLite, syncs daily history from S3, and generates `markets.jsonl` (one JSON object per market with denormalized event metadata for programmatic discovery).
 
-2. **Agent layer** (Claude) — writes Python scripts against `markets.jsonl` for bulk cross-platform matching, investigates top candidates using MCP tools, verifies settlement equivalence, and records trade recommendations via `recommend_trade` with a `legs` array. All state persists in SQLite for continuity across sessions.
+2. **Agent layer** (Claude) — writes Python scripts against `markets.jsonl` and SQLite for bulk market analysis, investigates top candidates using MCP tools, and records trade recommendations via `recommend_trade`. Two strategies: `bracket` (guaranteed arb, auto-computed) and `manual` (agent-specified correlated trades). Persists findings to a knowledge base across sessions.
 
 3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 4 navigable screens.
 
@@ -20,7 +20,7 @@ Finds markets that resolve to the same outcome across platforms, verifies identi
 |-----|--------|---------|
 | F1 | Dashboard | Agent chat (left) + portfolio summary & pending recs sidebar (right) |
 | F2 | Recommendations | Full recommendation review with grouped execution and rejection |
-| F3 | Portfolio | Balances, positions, resting orders, recent trades across both exchanges |
+| F3 | Portfolio | Balances, positions, resting orders, recent trades |
 | F4 | History | Session list with drill-down to per-session trades and recommendations |
 
 ## Quickstart
@@ -32,7 +32,6 @@ Finds markets that resolve to the same outcome across platforms, verifies identi
 - Docker (for sandboxed execution)
 - Kalshi API credentials (key ID + RSA private key)
 - Anthropic API key
-- Optional: Polymarket US credentials (key ID + secret key)
 
 ### Setup
 
@@ -42,7 +41,6 @@ uv sync --extra dev --extra skills
 
 cp .env.example .env
 # Edit .env: ANTHROPIC_API_KEY, KALSHI_API_KEY_ID, key path
-# Optional: POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY
 ```
 
 ### Run
@@ -58,36 +56,34 @@ Or locally: `make collect && uv run python -m finance_agent.main`
 ## Data Pipeline
 
 ```bash
-make collect    # snapshot markets + events to SQLite, generate markets.jsonl
+make collect    # snapshot markets + events to SQLite, sync daily history, generate markets.jsonl
 make backup     # backup the database
 make startup    # print startup context JSON (debug)
 ```
 
-The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data fresh. The agent writes Python scripts against `markets.jsonl` for bulk cross-platform matching, then uses semantic understanding to verify settlement equivalence on top candidates.
+The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data fresh. The agent writes Python scripts against `markets.jsonl` and queries SQLite for historical analysis.
 
 ## Agent Tools
 
-8 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
+6 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
 
-### Market Tools (7)
+### Market Tools (5)
 
 | Tool | Params | Notes |
 |------|--------|-------|
-| `get_market` | `exchange`, `market_id` | Full details, rules, settlement source |
-| `get_orderbook` | `exchange`, `market_id`, `depth?` | `depth=1` uses Polymarket BBO |
-| `get_event` | `exchange`, `event_id` | Event with nested markets |
-| `get_price_history` | `market_id`, `start_ts?`, `end_ts?`, `interval?` | Kalshi only |
-| `get_trades` | `exchange`, `market_id`, `limit?` | Recent executions |
-| `get_portfolio` | `exchange?`, `include_fills?`, `include_settlements?` | Omit exchange = both |
-| `get_orders` | `exchange?`, `market_id?`, `status?` | Omit exchange = all platforms |
+| `get_market` | `market_id` | Full details, rules, settlement source |
+| `get_orderbook` | `market_id`, `depth?` | Executable prices and depth |
+| `get_trades` | `market_id`, `limit?` | Recent executions |
+| `get_portfolio` | `include_fills?`, `include_settlements?` | Balances and positions |
+| `get_orders` | `market_id?`, `status?` | Resting orders |
 
 ### Database Tools (1)
 
 | Tool | Notes |
 |------|-------|
-| `recommend_trade` | Record an arbitrage recommendation with `thesis`, `estimated_edge_pct`, required `equivalence_notes` (settlement verification), and a `legs` array (2+ required). Each leg specifies exchange, market_id, action, side, quantity, price_cents. Schema enforces enums and numeric bounds. |
+| `recommend_trade` | Two strategies: `bracket` (mutually exclusive events, auto-computed direction/sizing/edge) and `manual` (agent-specified action/side/quantity per leg). Both require `thesis` and `legs` array (2+ required). |
 
-**Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`. Exchange: `kalshi` or `polymarket`.
+**Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`.
 
 ## Recommendation Lifecycle
 
@@ -95,25 +91,24 @@ The collector is a standalone script with no LLM dependency. Run it on a schedul
 Agent recommends → TUI review → Execute or Reject
 ```
 
-1. **Agent calls `recommend_trade`** — creates a recommendation group with 2+ legs in SQLite. Group-level fields: thesis, estimated edge, equivalence notes (required — settlement verification). Per-leg fields: exchange, market, action, side, quantity, price. Schema enforces enums (`kalshi`/`polymarket`, `buy`/`sell`, `yes`/`no`) and numeric bounds. Recommendations expire after `recommendation_ttl_minutes` (default 60).
+1. **Agent calls `recommend_trade`** — creates a recommendation group with 2+ legs in SQLite. For `bracket` strategy: auto-computes direction, balanced sizing, and net edge (must exceed `min_edge_pct`). For `manual` strategy: agent specifies action, side, and quantity per leg; system validates limits and computes fees.
 
 2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Shows edge, thesis, expiry countdown, and per-leg details.
 
-3. **Execute** — confirmation modal shows order details and cost. On confirm, the TUI service layer validates position limits, places orders via the exchange clients per leg, logs trades for audit, and updates leg + group status.
+3. **Execute** — confirmation modal shows order details and cost. On confirm, the TUI service layer validates position limits, places orders via the Kalshi client per leg, logs trades for audit, and updates leg + group status.
 
 4. **Reject** — marks all legs and the group as rejected. Visible in history.
 
-## Analysis Flow
+## Analysis Strategies
 
-```
-Discovery → Investigation → Verification → Sizing → Recommendation
-```
+### Bracket Arbitrage (Guaranteed)
+Mutually exclusive outcomes within a single event where YES prices sum ≠ 100c. Discovery via `scan_brackets.py`, validation with orderbook depth, recommendation via `strategy=bracket`.
 
-1. **Discovery** — Agent writes a Python script to load `markets.jsonl`, fuzzy-match titles across platforms, pre-filter by spread/volume/DTE, and rank candidates by price gap
-2. **Investigation** — Agent follows arb-specific protocol: match markets, verify settlement equivalence (5-point checklist), check orderbooks
-3. **Verification** — Settlement equivalence verification (resolution source, timing, boundary conditions, conditional resolution, rounding), executable orderbook prices
-4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, orderbook depth for position size
-5. **Recommendation** — Agent calls `recommend_trade` with all legs in one call, stored in DB for review
+### Correlation Analysis (Relationship)
+Markets whose prices should move together but have diverged. Discovery via `correlations.py`, investigation with `get_market` to understand divergence, recommendation via `strategy=manual`.
+
+### Custom Analysis (Code-First)
+Agent writes Python scripts for any analysis pattern: calendar spreads, category anomalies, volume/price divergences, new market launches vs established markets.
 
 ## Configuration
 
@@ -125,20 +120,15 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 |---|---|
 | Kalshi API key ID | `KALSHI_API_KEY_ID` |
 | Kalshi private key (PEM) | `KALSHI_PRIVATE_KEY` |
-| Polymarket key ID | `POLYMARKET_KEY_ID` |
-| Polymarket secret key | `POLYMARKET_SECRET_KEY` |
 
 **Trading defaults** (in `config.py` — edit source to change):
 
 | Parameter | Default |
 |---|---|
 | Kalshi max position | $100 |
-| Polymarket max position | $50 |
 | Max portfolio | $1,000 |
 | Max contracts/order | 50 |
 | Min edge required | 7% |
-| Kalshi fee rate | 3% |
-| Polymarket fee rate | 0% |
 | Claude budget/session | $2 |
 | Recommendation TTL | 60 min |
 
@@ -161,11 +151,18 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 
 ```
 /workspace/
+  scripts/
+    db_utils.py           # Shared database query helpers
+    scan_brackets.py      # Bracket arb scanner
+    correlations.py       # Pairwise price correlations
+    query_history.py      # Daily history queries
+    market_info.py        # Full market lookup
+    category_overview.py  # Category summary stats
+    schema_reference.md   # Database schema reference
   lib/
-    normalize_prices.py   # Cross-platform price comparison with fee-adjusted edge
-    match_markets.py      # Bulk title similarity matching across platforms
-    kelly_size.py         # Kelly criterion position sizing
-  analysis/               # Agent-written analysis (writable)
+    kelly_size.py         # Kelly criterion position sizing (legacy)
+  analysis/
+    knowledge_base.json   # Persistent findings across sessions
   data/
     agent.db              # SQLite database
     markets.jsonl         # Market data: one JSON object per market (generated by collector)
@@ -180,13 +177,15 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
   config.py            # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
-  models.py            # SQLAlchemy ORM models (canonical schema for all 6 tables)
+  models.py            # SQLAlchemy ORM models (canonical schema for all 8 tables)
   database.py          # AgentDatabase: ORM queries, Alembic migration runner, backup
-  tools.py             # Unified MCP tool factories (7 market + 1 DB)
+  tools.py             # Unified MCP tool factories (5 market + 1 DB = 6 tools)
+  fees.py              # Kalshi fee calculations (P(1-P) formula)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
-  polymarket_client.py # Polymarket US SDK wrapper, intent maps
+  polymarket_client.py # Dormant: Polymarket US SDK wrapper (preserved for future)
   hooks.py             # Recommendation counting, session lifecycle
-  collector.py         # Market data collector (both platforms, market listings)
+  collector.py         # Kalshi market data collector
+  backfill.py          # Kalshi daily history sync from S3
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations

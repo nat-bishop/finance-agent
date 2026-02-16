@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from finance_agent.tui.services import TUIServices
 
 # ── _extract_order_id (static, pure) ───────────────────────────────
@@ -53,14 +51,6 @@ class TestValidateExecution:
         assert error is not None
         assert "kalshi" in error.lower()
 
-    def test_polymarket_over_limit(self, services, sample_group):
-        sample_group["legs"] = [
-            {"exchange": "polymarket", "price_cents": 50, "quantity": 200},
-        ]
-        error = services.validate_execution(sample_group)
-        assert error is not None
-        assert "polymarket" in error.lower()
-
     def test_empty_legs_passes(self, services):
         assert services.validate_execution({"legs": []}) is None
 
@@ -71,41 +61,24 @@ class TestValidateExecution:
 # ── get_portfolio (async) ──────────────────────────────────────────
 
 
-async def test_get_portfolio_both_exchanges(services, mock_kalshi, mock_polymarket):
+async def test_get_portfolio(services, mock_kalshi):
     portfolio = await services.get_portfolio()
     assert "kalshi" in portfolio
-    assert "polymarket" in portfolio
     mock_kalshi.get_balance.assert_called_once()
     mock_kalshi.get_positions.assert_called_once()
-    mock_polymarket.get_balance.assert_called_once()
-    mock_polymarket.get_positions.assert_called_once()
-
-
-async def test_get_portfolio_no_polymarket(services_no_pm, mock_kalshi):
-    portfolio = await services_no_pm.get_portfolio()
-    assert "kalshi" in portfolio
-    assert "polymarket" not in portfolio
 
 
 # ── get_orders (async) ─────────────────────────────────────────────
 
 
-async def test_get_orders_both(services):
+async def test_get_orders(services):
     orders = await services.get_orders()
     assert "kalshi" in orders
-    assert "polymarket" in orders
 
 
 async def test_get_orders_kalshi_only(services):
     orders = await services.get_orders(exchange="kalshi")
     assert "kalshi" in orders
-    assert "polymarket" not in orders
-
-
-async def test_get_orders_no_polymarket(services_no_pm):
-    orders = await services_no_pm.get_orders()
-    assert "kalshi" in orders
-    assert "polymarket" not in orders
 
 
 # ── execute_order (async) ──────────────────────────────────────────
@@ -127,45 +100,21 @@ async def test_execute_order_kalshi(services, mock_kalshi):
     mock_kalshi.create_order.assert_called_once()
 
 
-async def test_execute_order_polymarket(services, mock_polymarket):
-    mock_polymarket.create_order.return_value = {"order": {"id": "PM-ORD-1"}}
-    leg = {
-        "exchange": "polymarket",
-        "market_id": "pm-slug",
-        "action": "buy",
-        "side": "yes",
-        "quantity": 5,
-        "price_cents": 52,
-    }
-    await services.execute_order(leg)
-    mock_polymarket.create_order.assert_called_once()
-
-
-async def test_execute_order_polymarket_disabled(services_no_pm):
-    leg = {
-        "exchange": "polymarket",
-        "market_id": "pm-slug",
-        "action": "buy",
-        "side": "yes",
-        "quantity": 5,
-        "price_cents": 52,
-    }
-    with pytest.raises(ValueError, match="not enabled"):
-        await services_no_pm.execute_order(leg)
-
-
 # ── execute_recommendation_group (async, integration) ──────────────
 
 
-async def test_execute_group_success(services, mock_kalshi, mock_polymarket, db, session_id):
+async def test_execute_group_success(services, mock_kalshi, db, session_id):
+    from unittest.mock import AsyncMock
+
     mock_kalshi.create_order.return_value = {"order": {"order_id": "K-ORD-1"}}
-    mock_polymarket.create_order.return_value = {"order": {"id": "PM-ORD-1"}}
+    # Mock orderbook to match leg prices (avoid slippage rejection)
+    mock_kalshi.get_orderbook = AsyncMock(return_value={"yes": [[45, 100]], "no": [[55, 100]]})
 
     group_id, _ = db.log_recommendation_group(
         session_id=session_id,
-        thesis="Test arb",
+        thesis="Test bracket arb",
         estimated_edge_pct=7.0,
-        equivalence_notes="Same event",
+        equivalence_notes="Same event, mutually exclusive",
         legs=[
             {
                 "exchange": "kalshi",
@@ -177,13 +126,13 @@ async def test_execute_group_success(services, mock_kalshi, mock_polymarket, db,
                 "price_cents": 45,
             },
             {
-                "exchange": "polymarket",
-                "market_id": "PM-1",
+                "exchange": "kalshi",
+                "market_id": "K-2",
                 "market_title": "Leg 2",
-                "action": "sell",
+                "action": "buy",
                 "side": "yes",
                 "quantity": 10,
-                "price_cents": 52,
+                "price_cents": 45,
             },
         ],
     )
@@ -218,16 +167,15 @@ async def test_execute_group_validation_failure(services, db, session_id):
     assert group["status"] == "rejected"
 
 
-async def test_execute_group_partial_failure(
-    services, mock_kalshi, mock_polymarket, db, session_id
-):
-    mock_kalshi.create_order.return_value = {"order": {"order_id": "K-ORD-1"}}
-    mock_polymarket.create_order.side_effect = Exception("API error")
+async def test_execute_group_partial_failure(services, mock_kalshi, db, session_id):
+    from unittest.mock import AsyncMock
 
-    # Kalshi depth < PM depth → Kalshi is maker (placed first, succeeds),
-    # PM is taker (placed second, fails)
-    mock_kalshi.get_orderbook.return_value = {"yes": [[45, 10]], "no": [[55, 10]]}
-    mock_polymarket.get_orderbook.return_value = {"yes": [[52, 100]], "no": [[48, 100]]}
+    mock_kalshi.create_order.side_effect = [
+        {"order": {"order_id": "K-ORD-1"}},  # first leg succeeds
+        Exception("API error"),  # second leg fails
+    ]
+
+    mock_kalshi.get_orderbook = AsyncMock(return_value={"yes": [[45, 100]], "no": [[55, 100]]})
 
     group_id, _ = db.log_recommendation_group(
         session_id=session_id,
@@ -245,13 +193,13 @@ async def test_execute_group_partial_failure(
                 "price_cents": 45,
             },
             {
-                "exchange": "polymarket",
-                "market_id": "PM-1",
+                "exchange": "kalshi",
+                "market_id": "K-2",
                 "market_title": "Leg 2",
                 "action": "buy",
-                "side": "no",
+                "side": "yes",
                 "quantity": 10,
-                "price_cents": 48,
+                "price_cents": 45,
             },
         ],
     )
@@ -303,6 +251,8 @@ async def test_cancel_order_kalshi(services, mock_kalshi):
     mock_kalshi.cancel_order.assert_called_once_with("ORD-1")
 
 
-async def test_cancel_order_unknown_exchange(services_no_pm):
-    with pytest.raises(ValueError, match="Unknown exchange"):
-        await services_no_pm.cancel_order("binance", "ORD-1")
+async def test_cancel_order_forwards_to_kalshi(services, mock_kalshi):
+    """cancel_order always forwards to Kalshi regardless of exchange param."""
+    mock_kalshi.cancel_order.return_value = {"status": "cancelled"}
+    await services.cancel_order("kalshi", "ORD-2")
+    mock_kalshi.cancel_order.assert_called_with("ORD-2")

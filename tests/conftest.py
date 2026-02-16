@@ -156,10 +156,6 @@ def mock_kalshi():
         return_value={"ticker": "K-MKT-1", "title": "Test Kalshi Market"}
     )
     client.get_orderbook = AsyncMock(return_value={"yes": [[45, 100]], "no": [[55, 100]]})
-    client.get_event = AsyncMock(
-        return_value={"event_ticker": "EVT-1", "title": "Test Event", "markets": []}
-    )
-    client.get_candlesticks = AsyncMock(return_value={"candlesticks": []})
     client.get_trades = AsyncMock(return_value={"trades": []})
     client.get_balance = AsyncMock(return_value={"balance": 10000})
     client.get_positions = AsyncMock(return_value={"positions": []})
@@ -170,37 +166,4 @@ def mock_kalshi():
     client.create_order = AsyncMock(return_value={"order": {"order_id": "K-ORD-1"}})
     client.cancel_order = AsyncMock(return_value={"status": "cancelled"})
     client.get_exchange_status = AsyncMock(return_value={})
-    return client
-
-
-@pytest.fixture
-def mock_polymarket():
-    """Mock PolymarketAPIClient with realistic return values (async methods)."""
-    client = MagicMock()
-    client.search_markets = AsyncMock(
-        return_value={
-            "markets": [
-                {
-                    "slug": "test-market",
-                    "title": "Test PM Market",
-                    "yes_price": 0.52,
-                    "active": True,
-                },
-            ],
-        }
-    )
-    client.get_market = AsyncMock(return_value={"slug": "test-market", "title": "Test PM Market"})
-    client.get_orderbook = AsyncMock(return_value={"yes": [[52, 100]], "no": [[48, 100]]})
-    client.get_bbo = AsyncMock(return_value={"best_bid": 0.50, "best_ask": 0.54})
-    client.get_event = AsyncMock(
-        return_value={"slug": "test-event", "title": "Test Event", "markets": []}
-    )
-    client.get_trades = AsyncMock(return_value={"trades": []})
-    client.get_balance = AsyncMock(return_value={"balance": "500.00"})
-    client.get_positions = AsyncMock(return_value={"positions": []})
-    client.get_orders = AsyncMock(return_value={"orders": []})
-    client.list_events = AsyncMock(return_value={"events": []})
-    client.create_order = AsyncMock(return_value={"order": {"id": "PM-ORD-1"}})
-    client.cancel_order = AsyncMock(return_value={"status": "cancelled", "order_id": "PM-ORD-1"})
-    client.close = AsyncMock()
     return client

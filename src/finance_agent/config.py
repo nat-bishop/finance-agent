@@ -38,12 +38,7 @@ class TradingConfig:
     backup_max_age_hours: int = 24
     kalshi_rate_limit_reads_per_sec: int = 30  # Kalshi Basic tier
     kalshi_rate_limit_writes_per_sec: int = 30  # Kalshi Basic tier
-    polymarket_rate_limit_reads_per_sec: int = 15  # tightest: /positions (150/10s)
-    polymarket_rate_limit_writes_per_sec: int = 50  # tightest: DELETE /order (500/10s)
     recommendation_ttl_minutes: int = 60
-
-    polymarket_enabled: bool = False
-    polymarket_max_position_usd: float = 50.0
 
     execution_timeout_seconds: int = 300  # 5 min fill timeout for leg-in
     max_slippage_cents: int = 3  # reject execution if orderbook moved >N cents
@@ -85,8 +80,6 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
         "MAX_PORTFOLIO_USD": trading_config.max_portfolio_usd,
         "MAX_ORDER_COUNT": trading_config.max_order_count,
         "MIN_EDGE_PCT": trading_config.min_edge_pct,
-        "POLYMARKET_MAX_POSITION_USD": trading_config.polymarket_max_position_usd,
-        "POLYMARKET_ENABLED": trading_config.polymarket_enabled,
         "RECOMMENDATION_TTL_MINUTES": trading_config.recommendation_ttl_minutes,
         "EXECUTION_TIMEOUT_SECONDS": trading_config.execution_timeout_seconds,
         "MAX_SLIPPAGE_CENTS": trading_config.max_slippage_cents,

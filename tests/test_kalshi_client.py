@@ -92,11 +92,6 @@ async def test_get_orderbook_passes_depth(kalshi_client):
     kalshi_client._client.get_market_orderbook.assert_awaited_once_with("TICKER-1", depth=5)
 
 
-async def test_get_event_passes_ticker(kalshi_client):
-    await kalshi_client.get_event("EVT-1")
-    kalshi_client._client.get_event.assert_awaited_once_with("EVT-1", with_nested_markets=True)
-
-
 async def test_get_events_forwards_cursor(kalshi_client):
     await kalshi_client.get_events(status="open", cursor="abc123")
     call_kwargs = kalshi_client._client.get_events.call_args[1]

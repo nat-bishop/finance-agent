@@ -2,9 +2,9 @@
 
 Standalone script, no LLM. Run via `make collect` or `python -m finance_agent.collector`.
 
-Events-first architecture: both Kalshi and Polymarket organise around Events,
-each containing one or more Markets.  We fetch events with nested markets in a
-single paginated pass, storing both event structure and market snapshots.
+Events-first architecture: Kalshi organises around Events, each containing one or
+more Markets.  We fetch events with nested markets in a single paginated pass,
+storing both event structure and market snapshots.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from typing import Any
 from .config import load_configs
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
-from .polymarket_client import PolymarketAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -101,54 +100,6 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
         "days_to_expiration": _parse_days_to_expiry(close_time),
         "close_time": str(close_time) if close_time else None,
         "settlement_value": market.get("settlement_value"),
-        "markets_in_event": None,
-    }
-
-
-def _compute_derived_polymarket(market: dict[str, Any], now: str) -> dict[str, Any]:
-    yes_price = market.get("yes_price") or market.get("lastTradePrice")
-    mid_cents = int(float(yes_price) * 100) if yes_price is not None else None
-    implied_prob = float(yes_price) if yes_price is not None else None
-
-    def _to_cents(key1: str, key2: str) -> int | None:
-        v = market.get(key1) or market.get(key2)
-        return int(float(v) * 100) if v is not None else None
-
-    yes_bid_cents = _to_cents("bestBid", "best_bid")
-    yes_ask_cents = _to_cents("bestAsk", "best_ask")
-    spread_cents = None
-
-    if yes_bid_cents is not None and yes_ask_cents is not None:
-        spread_cents = yes_ask_cents - yes_bid_cents
-        mid_cents = (yes_bid_cents + yes_ask_cents) // 2
-        implied_prob = mid_cents / 100.0
-
-    close_time = market.get("endDate") or market.get("end_date")
-    volume = market.get("volume") or market.get("volumeNum")
-    slug = market.get("slug") or market.get("ticker_slug") or market.get("id", "")
-
-    return {
-        **_base_snapshot(now, "polymarket", market),
-        "ticker": slug,
-        "event_ticker": market.get("eventSlug") or market.get("event_slug"),
-        "series_ticker": None,
-        "title": market.get("title") or market.get("question"),
-        "category": market.get("category"),
-        "status": "open" if market.get("active") else "closed",
-        "yes_bid": yes_bid_cents,
-        "yes_ask": yes_ask_cents,
-        "no_bid": None,
-        "no_ask": None,
-        "last_price": mid_cents,
-        "volume": int(volume) if volume else None,
-        "volume_24h": None,
-        "open_interest": market.get("openInterest") or market.get("open_interest"),
-        "spread_cents": spread_cents,
-        "mid_price_cents": mid_cents,
-        "implied_probability": implied_prob,
-        "days_to_expiration": _parse_days_to_expiry(close_time),
-        "close_time": str(close_time) if close_time else None,
-        "settlement_value": None,
         "markets_in_event": None,
     }
 
@@ -265,90 +216,6 @@ async def collect_kalshi(
     return event_count, market_count
 
 
-# ── Polymarket: events-first collection ──────────────────────────
-
-
-async def collect_polymarket(
-    client: PolymarketAPIClient,
-    db: AgentDatabase,
-) -> tuple[int, int]:
-    """Collect Polymarket events with nested markets in a single pass.
-
-    Returns (event_count, market_count).
-    """
-    logger.info("Collecting Polymarket events...")
-
-    now = _now_iso()
-    event_count = 0
-    market_count = 0
-    market_batch: list[dict[str, Any]] = []
-    offset = 0
-
-    while True:
-        try:
-            resp = await client.list_events(active=True, limit=100, offset=offset)
-        except Exception as e:
-            logger.warning("Error during Polymarket event collection: %s", e)
-            break
-
-        events = _as_list(resp, "events", "data")
-        if not events:
-            break
-
-        for event in events:
-            slug = event.get("slug") or event.get("id", "")
-            if not slug:
-                continue
-
-            nested = event.get("markets", [])
-
-            # Store event structure
-            markets_summary = [
-                {
-                    "slug": m.get("slug"),
-                    "title": m.get("title") or m.get("question"),
-                    "yes_price": m.get("yes_price") or m.get("lastTradePrice"),
-                    "active": m.get("active"),
-                }
-                for m in nested
-            ]
-            db.upsert_event(
-                event_ticker=slug,
-                exchange="polymarket",
-                title=event.get("title"),
-                category=event.get("category"),
-                mutually_exclusive=event.get("mutuallyExclusive")
-                or event.get("mutually_exclusive"),
-                markets_json=json.dumps(markets_summary, default=str),
-            )
-            event_count += 1
-
-            # Extract market snapshots — inject parent event slug as fallback
-            for m in nested:
-                if not m.get("eventSlug") and not m.get("event_slug"):
-                    m["eventSlug"] = slug
-                market_batch.append(_compute_derived_polymarket(m, now))
-
-        if len(market_batch) >= 500:
-            market_count += db.insert_market_snapshots(market_batch)
-            market_batch.clear()
-
-        offset += len(events)
-        logger.info(
-            "  page %d: %d events (total: %d events, %d markets)",
-            offset // 100,
-            len(events),
-            event_count,
-            market_count + len(market_batch),
-        )
-
-    if market_batch:
-        market_count += db.insert_market_snapshots(market_batch)
-
-    logger.info("  -> %d events, %d market snapshots", event_count, market_count)
-    return event_count, market_count
-
-
 # ── Market data export (for agent discovery) ─────────────────────
 
 
@@ -403,7 +270,7 @@ def _generate_markets_jsonl(db: AgentDatabase, output_path: str) -> None:
 
 
 async def _run_collector_async() -> None:
-    """Async collector implementation — runs both platforms concurrently."""
+    """Async collector implementation — Kalshi only."""
     from .logging_config import setup_logging
 
     setup_logging()
@@ -417,18 +284,8 @@ async def _run_collector_async() -> None:
     logger.info("Data collector starting")
     logger.info("DB: %s", trading_config.db_path)
 
-    pm_client = None
     try:
-        # Build tasks
-        coros = [collect_kalshi(kalshi, db, status="open")]
-
-        if trading_config.polymarket_enabled and credentials.polymarket_key_id:
-            pm_client = PolymarketAPIClient(credentials, trading_config)
-            coros.append(collect_polymarket(pm_client, db))
-
-        # Run concurrently, pad with (0,0) so unpacking always works
-        results = [*await asyncio.gather(*coros), (0, 0)]
-        (k_events, k_markets), (pm_events, pm_markets) = results[0], results[1]
+        k_events, k_markets = await collect_kalshi(kalshi, db, status="open")
 
         # Generate JSONL market data for agent programmatic discovery
         jsonl_path = str(Path(trading_config.db_path).parent / "markets.jsonl")
@@ -448,12 +305,9 @@ async def _run_collector_async() -> None:
         elapsed = time.time() - start
         logger.info("Collection complete in %.1fs", elapsed)
         logger.info("  Kalshi: %d events (%d markets)", k_events, k_markets)
-        logger.info("  Polymarket: %d events (%d markets)", pm_events, pm_markets)
     except KeyboardInterrupt:
         logger.warning("Interrupted")
     finally:
-        if pm_client:
-            await pm_client.close()
         db.close()
 
 

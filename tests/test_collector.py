@@ -11,11 +11,9 @@ import pytest
 from finance_agent.collector import (
     _as_list,
     _compute_derived,
-    _compute_derived_polymarket,
     _generate_markets_jsonl,
     _parse_days_to_expiry,
     collect_kalshi,
-    collect_polymarket,
 )
 
 # ── _parse_days_to_expiry ────────────────────────────────────────
@@ -126,64 +124,6 @@ def test_compute_derived_settlement_value():
     assert result["settlement_value"] == "yes"
 
 
-# ── _compute_derived_polymarket ──────────────────────────────────
-
-
-def test_compute_derived_polymarket_usd_to_cents():
-    now = datetime.now(UTC).isoformat()
-    market = {
-        "slug": "test-slug",
-        "title": "Test PM",
-        "yes_price": 0.55,
-        "active": True,
-        "volume": 1000,
-    }
-    result = _compute_derived_polymarket(market, now)
-    assert result["mid_price_cents"] == 55
-    assert result["ticker"] == "test-slug"
-    assert result["status"] == "open"
-    assert result["exchange"] == "polymarket"
-
-
-def test_compute_derived_polymarket_camelcase_keys():
-    now = datetime.now(UTC).isoformat()
-    market = {
-        "slug": "test",
-        "title": "Test",
-        "yes_price": 0.50,
-        "bestBid": 0.48,
-        "bestAsk": 0.52,
-        "active": True,
-    }
-    result = _compute_derived_polymarket(market, now)
-    assert result["yes_bid"] == 48
-    assert result["yes_ask"] == 52
-    assert result["spread_cents"] == 4
-    assert result["mid_price_cents"] == 50
-
-
-def test_compute_derived_polymarket_snake_case_keys():
-    now = datetime.now(UTC).isoformat()
-    market = {
-        "slug": "test",
-        "title": "Test",
-        "yes_price": 0.50,
-        "best_bid": 0.48,
-        "best_ask": 0.52,
-        "active": True,
-    }
-    result = _compute_derived_polymarket(market, now)
-    assert result["yes_bid"] == 48
-    assert result["yes_ask"] == 52
-
-
-def test_compute_derived_polymarket_closed_status():
-    now = datetime.now(UTC).isoformat()
-    market = {"slug": "test", "title": "Test", "active": False}
-    result = _compute_derived_polymarket(market, now)
-    assert result["status"] == "closed"
-
-
 # ── _as_list ─────────────────────────────────────────────────────
 
 
@@ -287,48 +227,6 @@ async def test_collect_kalshi_max_pages(db, mock_kalshi):
     assert mock_kalshi.get_events.call_count == 1
 
 
-# ── collect_polymarket (events-first, async) ─────────────────────
-
-
-async def test_collect_polymarket(db, mock_polymarket):
-    """Polymarket events with nested markets collected in a single pass."""
-    mock_polymarket.list_events = AsyncMock(
-        side_effect=[
-            {
-                "events": [
-                    {
-                        "slug": "evt-1",
-                        "title": "PM Event",
-                        "category": "Sports",
-                        "markets": [
-                            {
-                                "slug": "m-1",
-                                "title": "Market 1",
-                                "yes_price": 0.50,
-                                "active": True,
-                            },
-                            {
-                                "slug": "m-2",
-                                "title": "Market 2",
-                                "yes_price": 0.60,
-                                "active": True,
-                            },
-                        ],
-                    },
-                ],
-            },
-            {"events": []},
-        ]
-    )
-    event_count, market_count = await collect_polymarket(mock_polymarket, db)
-    assert event_count == 1
-    assert market_count == 2
-
-    events = db.get_all_events()
-    matching = [e for e in events if e["event_ticker"] == "evt-1"]
-    assert matching[0]["title"] == "PM Event"
-
-
 # ── _generate_markets_jsonl ─────────────────────────────────────
 
 
@@ -354,37 +252,16 @@ def test_generate_markets_jsonl(db, sample_market_snapshot, tmp_path):
                 mid_price_cents=50,
                 raw_json=kalshi_raw,
             ),
-            sample_market_snapshot(
-                ticker="P-1",
-                exchange="polymarket",
-                category="Sports",
-                mid_price_cents=60,
-                raw_json=json.dumps({"description": "Will X happen?"}),
-            ),
-            # Polymarket market WITHOUT mid_price (the bug fix — should still be included)
-            sample_market_snapshot(
-                ticker="P-2",
-                exchange="polymarket",
-                category="Sports",
-                mid_price_cents=None,
-                yes_bid=None,
-                yes_ask=None,
-                spread_cents=None,
-                raw_json=json.dumps({"description": "No prices available"}),
-            ),
         ]
     )
     output = tmp_path / "markets.jsonl"
     _generate_markets_jsonl(db, str(output))
 
     lines = output.read_text().strip().split("\n")
-    assert len(lines) == 3  # includes P-2 without mid_price
+    assert len(lines) == 1
 
     records = [json.loads(line) for line in lines]
-    tickers = {r["ticker"] for r in records}
-    assert "K-1" in tickers
-    assert "P-1" in tickers
-    assert "P-2" in tickers
+    assert records[0]["ticker"] == "K-1"
 
     # Verify all expected fields are present
     for r in records:
@@ -398,23 +275,10 @@ def test_generate_markets_jsonl(db, sample_market_snapshot, tmp_path):
         assert "description" in r
 
     # Verify Kalshi record with matching event
-    kalshi_rec = next(r for r in records if r["ticker"] == "K-1")
+    kalshi_rec = records[0]
     assert kalshi_rec["exchange"] == "kalshi"
     assert kalshi_rec["mid_price_cents"] == 50
-    # Category comes from event metadata
     assert kalshi_rec["category"] == "Politics"
     assert kalshi_rec["event_title"] == "Test Event Title"
     assert kalshi_rec["mutually_exclusive"] is True
-    # Description from raw_json rules_primary
     assert kalshi_rec["description"] == "Resolves Yes if X happens."
-
-    # Verify Polymarket record with description
-    pm_rec = next(r for r in records if r["ticker"] == "P-1")
-    assert pm_rec["exchange"] == "polymarket"
-    assert pm_rec["mid_price_cents"] == 60
-    assert pm_rec["description"] == "Will X happen?"
-
-    # Verify Polymarket record without mid_price (was previously filtered out)
-    pm_no_price = next(r for r in records if r["ticker"] == "P-2")
-    assert pm_no_price["mid_price_cents"] is None
-    assert pm_no_price["description"] == "No prices available"

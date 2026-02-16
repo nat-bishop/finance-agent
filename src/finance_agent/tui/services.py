@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -12,7 +11,6 @@ from ..config import Credentials, TradingConfig
 from ..database import AgentDatabase
 from ..fees import best_price_and_depth, compute_arb_edge, leg_fee
 from ..kalshi_client import KalshiAPIClient
-from ..polymarket_client import PM_INTENT_MAP, PolymarketAPIClient, cents_to_usd
 from ..ws_monitor import FillMonitor
 from .messages import ExecutionProgress, FillReceived
 
@@ -26,14 +24,12 @@ class TUIServices:
         self,
         db: AgentDatabase,
         kalshi: KalshiAPIClient,
-        polymarket: PolymarketAPIClient | None,
         config: TradingConfig,
         session_id: str,
         credentials: Credentials | None = None,
     ) -> None:
         self.db = db
         self._kalshi = kalshi
-        self._pm = polymarket
         self._config = config
         self._session_id = session_id
         self._credentials = credentials
@@ -49,42 +45,17 @@ class TUIServices:
     # ── Portfolio ──────────────────────────────────────────────────
 
     async def get_portfolio(self) -> dict[str, Any]:
-        """Fetch balances and positions from both exchanges."""
-        data: dict[str, Any] = {}
-
-        # Fire all calls in parallel
-        coros = [self._kalshi.get_balance(), self._kalshi.get_positions()]
-        labels = ["k_balance", "k_positions"]
-        if self._pm:
-            coros.extend([self._pm.get_balance(), self._pm.get_positions()])
-            labels.extend(["pm_balance", "pm_positions"])
-
-        results = dict(zip(labels, await asyncio.gather(*coros), strict=True))
-        data["kalshi"] = {
-            "balance": results["k_balance"],
-            "positions": results["k_positions"],
-        }
-        if self._pm:
-            data["polymarket"] = {
-                "balance": results["pm_balance"],
-                "positions": results["pm_positions"],
+        """Fetch balances and positions from Kalshi."""
+        return {
+            "kalshi": {
+                "balance": await self._kalshi.get_balance(),
+                "positions": await self._kalshi.get_positions(),
             }
-
-        return data
+        }
 
     async def get_orders(self, exchange: str | None = None) -> dict[str, Any]:
-        """Fetch resting orders from exchange(s)."""
-        coros: list = []
-        keys: list[str] = []
-        if exchange in ("kalshi", None):
-            coros.append(self._kalshi.get_orders(status="resting"))
-            keys.append("kalshi")
-        if exchange in ("polymarket", None) and self._pm:
-            coros.append(self._pm.get_orders(status="resting"))
-            keys.append("polymarket")
-
-        values = await asyncio.gather(*coros)
-        return dict(zip(keys, values, strict=True))
+        """Fetch resting orders from Kalshi."""
+        return {"kalshi": await self._kalshi.get_orders(status="resting")}
 
     # ── Recommendations ───────────────────────────────────────────
 
@@ -99,12 +70,8 @@ class TUIServices:
     # ── Orderbook fetching ────────────────────────────────────────
 
     async def _fetch_orderbook(self, exchange: str, market_id: str) -> dict[str, Any]:
-        """Fetch orderbook from exchange."""
-        if exchange == "kalshi":
-            return await self._kalshi.get_orderbook(market_id)
-        if self._pm:
-            return await self._pm.get_orderbook(market_id)
-        raise ValueError(f"Exchange {exchange} not available")
+        """Fetch orderbook from Kalshi."""
+        return await self._kalshi.get_orderbook(market_id)
 
     # ── Order execution ───────────────────────────────────────────
 
@@ -112,26 +79,20 @@ class TUIServices:
         """Check position limits with fee-aware cost. Returns error or None."""
         total_cost = 0.0
         for leg in group.get("legs", []):
-            exchange = leg["exchange"]
             price_cents = leg.get("price_cents", 0)
             quantity = leg.get("quantity", 0)
             if not price_cents or not quantity:
                 return f"Leg {leg.get('market_id')} has no computed price/quantity"
 
             cost_usd = price_cents * quantity / 100
-            fee = leg_fee(exchange, quantity, price_cents, maker=leg.get("is_maker", False))
+            fee = leg_fee("kalshi", quantity, price_cents, maker=leg.get("is_maker", False))
             total_with_fee = cost_usd + fee
             total_cost += total_with_fee
 
-            max_usd = (
-                self._config.kalshi_max_position_usd
-                if exchange == "kalshi"
-                else self._config.polymarket_max_position_usd
-            )
-            if total_with_fee > max_usd:
+            if total_with_fee > self._config.kalshi_max_position_usd:
                 return (
                     f"Order ${total_with_fee:.2f} (incl ${fee:.4f} fee) "
-                    f"exceeds {exchange} limit ${max_usd:.2f}"
+                    f"exceeds kalshi limit ${self._config.kalshi_max_position_usd:.2f}"
                 )
 
         if total_cost > self._config.max_portfolio_usd:
@@ -142,42 +103,27 @@ class TUIServices:
         return None
 
     async def execute_order(self, leg: dict[str, Any]) -> dict[str, Any]:
-        """Place a single order based on a recommendation leg."""
-        exchange = leg["exchange"]
+        """Place a single order on Kalshi."""
         logger.info(
-            "Executing order: %s %s %s on %s @ %dc x%d (maker=%s)",
+            "Executing order: %s %s %s @ %dc x%d (maker=%s)",
             leg["action"],
             leg["side"],
             leg["market_id"],
-            exchange,
             leg["price_cents"],
             leg["quantity"],
             leg.get("is_maker", False),
         )
 
-        if exchange == "kalshi":
-            price_key = "yes_price" if leg["side"] == "yes" else "no_price"
-            params = {
-                "ticker": leg["market_id"],
-                "action": leg["action"],
-                "side": leg["side"],
-                "count": leg["quantity"],
-                "order_type": leg.get("order_type", "limit"),
-                price_key: leg["price_cents"],
-            }
-            return await self._kalshi.create_order(**params)
-
-        if not self._pm:
-            raise ValueError("Polymarket not enabled")
-        intent = PM_INTENT_MAP[(leg["action"], leg["side"])]
-        params_pm = {
-            "slug": leg["market_id"],
-            "intent": intent,
-            "order_type": "ORDER_TYPE_LIMIT",
-            "price": cents_to_usd(leg["price_cents"]),
-            "quantity": leg["quantity"],
+        price_key = "yes_price" if leg["side"] == "yes" else "no_price"
+        params = {
+            "ticker": leg["market_id"],
+            "action": leg["action"],
+            "side": leg["side"],
+            "count": leg["quantity"],
+            "order_type": leg.get("order_type", "limit"),
+            price_key: leg["price_cents"],
         }
-        return await self._pm.create_order(**params_pm)
+        return await self._kalshi.create_order(**params)
 
     # ── Execution helpers ─────────────────────────────────────────
 
@@ -212,7 +158,7 @@ class TUIServices:
             order_id=order_id,
             status="placed",
             result_json=json.dumps(result, default=str),
-            exchange=leg["exchange"],
+            exchange=leg.get("exchange", "kalshi"),
             leg_id=leg["id"],
         )
         self.db.update_leg_status(leg["id"], "executed", order_id)
@@ -231,7 +177,7 @@ class TUIServices:
         refreshed_legs: list[dict[str, Any]] = []
         for leg in legs:
             try:
-                ob = await self._fetch_orderbook(leg["exchange"], leg["market_id"])
+                ob = await self._fetch_orderbook(leg.get("exchange", "kalshi"), leg["market_id"])
             except Exception as e:
                 return None, self._reject_all_legs(group_id, legs, f"Orderbook fetch failed: {e}")
 
@@ -263,7 +209,7 @@ class TUIServices:
         if contracts > 0:
             fee_legs = [
                 {
-                    "exchange": lg["exchange"],
+                    "exchange": lg.get("exchange", "kalshi"),
                     "price_cents": lg["price_cents"],
                     "maker": lg.get("is_maker", False),
                 }
@@ -372,7 +318,7 @@ class TUIServices:
             self._config.execution_timeout_seconds,
         )
         fill = await fill_monitor.wait_for_fill(
-            maker_leg["exchange"],
+            maker_leg.get("exchange", "kalshi"),
             order_id,
             self._config.execution_timeout_seconds,
             market_slug=maker_leg["market_id"],
@@ -380,7 +326,7 @@ class TUIServices:
         if not fill:
             logger.warning("Maker leg timed out, cancelling order %s", order_id)
             try:
-                await self.cancel_order(maker_leg["exchange"], order_id)
+                await self.cancel_order("kalshi", order_id)
             except Exception as cancel_err:
                 logger.error("Failed to cancel maker leg: %s", cancel_err)
             self.db.update_group_status(group_id, "rejected")
@@ -395,7 +341,7 @@ class TUIServices:
         fill_price, fill_qty = self._parse_fill(fill, maker_leg)
         self.db.update_leg_fill(maker_leg["id"], fill_price, fill_qty)
         logger.info("Maker fill confirmed: %d contracts @ %dc", fill_qty, fill_price)
-        _emit(FillReceived(order_id, fill_price, fill_qty, maker_leg["exchange"]))
+        _emit(FillReceived(order_id, fill_price, fill_qty, maker_leg.get("exchange", "kalshi")))
         _emit(ExecutionProgress(group_id, "maker_filled", maker_leg.get("id")))
 
         # Place taker legs
@@ -407,7 +353,7 @@ class TUIServices:
                 taker_order_id = taker_result["order_id"]
 
                 taker_fill = await fill_monitor.wait_for_fill(
-                    taker_leg["exchange"],
+                    taker_leg.get("exchange", "kalshi"),
                     taker_order_id,
                     30,
                     market_slug=taker_leg["market_id"],
@@ -415,7 +361,9 @@ class TUIServices:
                 if taker_fill:
                     tp, tq = self._parse_fill(taker_fill, taker_leg)
                     self.db.update_leg_fill(taker_leg["id"], tp, tq)
-                    _emit(FillReceived(taker_order_id, tp, tq, taker_leg["exchange"]))
+                    _emit(
+                        FillReceived(taker_order_id, tp, tq, taker_leg.get("exchange", "kalshi"))
+                    )
                 else:
                     logger.warning("Taker leg didn't fill within 30s — attempting unwind")
                     await self._attempt_unwind(maker_leg, results)
@@ -453,7 +401,7 @@ class TUIServices:
         logger.warning(
             "Attempting to unwind filled leg %d on %s",
             filled_leg["id"],
-            filled_leg["exchange"],
+            filled_leg.get("exchange", "kalshi"),
         )
         # Reverse: if we bought YES, now sell YES
         reverse_action = "sell" if filled_leg["action"] == "buy" else "buy"
@@ -503,13 +451,9 @@ class TUIServices:
     # ── Order management ──────────────────────────────────────────
 
     async def cancel_order(self, exchange: str, order_id: str) -> dict[str, Any]:
-        """Cancel an order on the specified exchange."""
+        """Cancel an order on Kalshi."""
         logger.info("Cancelling order %s on %s", order_id, exchange)
-        if exchange == "kalshi":
-            return await self._kalshi.cancel_order(order_id)
-        if self._pm:
-            return await self._pm.cancel_order(order_id)
-        raise ValueError(f"Unknown exchange: {exchange}")
+        return await self._kalshi.cancel_order(order_id)
 
     # ── DB queries ────────────────────────────────────────────────
 

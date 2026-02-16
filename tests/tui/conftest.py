@@ -15,7 +15,6 @@ def trading_config(tmp_path) -> TradingConfig:
     """TradingConfig with safe test defaults (edge validation disabled)."""
     return TradingConfig(
         kalshi_max_position_usd=100.0,
-        polymarket_max_position_usd=50.0,
         recommendation_ttl_minutes=60,
         db_path=str(tmp_path / "test.db"),
         min_edge_pct=0.0,
@@ -31,26 +30,11 @@ def _mock_fill_monitor() -> MagicMock:
 
 
 @pytest.fixture
-def services(db, mock_kalshi, mock_polymarket, trading_config, session_id) -> TUIServices:
-    """TUIServices wired to real DB + mock exchange clients + mock fill monitor."""
+def services(db, mock_kalshi, trading_config, session_id) -> TUIServices:
+    """TUIServices wired to real DB + mock Kalshi client + mock fill monitor."""
     svc = TUIServices(
         db=db,
         kalshi=mock_kalshi,
-        polymarket=mock_polymarket,
-        config=trading_config,
-        session_id=session_id,
-    )
-    svc._fill_monitor = _mock_fill_monitor()
-    return svc
-
-
-@pytest.fixture
-def services_no_pm(db, mock_kalshi, trading_config, session_id) -> TUIServices:
-    """TUIServices with Polymarket disabled (None)."""
-    svc = TUIServices(
-        db=db,
-        kalshi=mock_kalshi,
-        polymarket=None,
         config=trading_config,
         session_id=session_id,
     )
@@ -65,8 +49,8 @@ def sample_group() -> dict:
         "id": 1,
         "session_id": "test1234",
         "status": "pending",
-        "thesis": "Test arb opportunity",
-        "equivalence_notes": "Same settlement source",
+        "thesis": "Test bracket arb opportunity",
+        "equivalence_notes": "Same event, mutually exclusive outcomes",
         "estimated_edge_pct": 7.5,
         "expires_at": "2027-12-31T00:00:00+00:00",
         "created_at": "2026-01-01T00:00:00+00:00",
@@ -77,11 +61,11 @@ def sample_group() -> dict:
                 "leg_index": 0,
                 "exchange": "kalshi",
                 "market_id": "K-MKT-1",
-                "market_title": "Test Market Kalshi",
+                "market_title": "Test Market A",
                 "action": "buy",
                 "side": "yes",
                 "quantity": 10,
-                "price_cents": 45,
+                "price_cents": 30,
                 "order_type": "limit",
                 "status": "pending",
                 "order_id": None,
@@ -91,13 +75,29 @@ def sample_group() -> dict:
                 "id": 2,
                 "group_id": 1,
                 "leg_index": 1,
-                "exchange": "polymarket",
-                "market_id": "PM-MKT-1",
-                "market_title": "Test Market PM",
-                "action": "sell",
+                "exchange": "kalshi",
+                "market_id": "K-MKT-2",
+                "market_title": "Test Market B",
+                "action": "buy",
                 "side": "yes",
                 "quantity": 10,
-                "price_cents": 52,
+                "price_cents": 30,
+                "order_type": "limit",
+                "status": "pending",
+                "order_id": None,
+                "executed_at": None,
+            },
+            {
+                "id": 3,
+                "group_id": 1,
+                "leg_index": 2,
+                "exchange": "kalshi",
+                "market_id": "K-MKT-3",
+                "market_title": "Test Market C",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
                 "order_type": "limit",
                 "status": "pending",
                 "order_id": None,
