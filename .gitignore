@@ -2,3 +2,12 @@ __pycache__/
 *.egg-info/
 .env
 .env.*
+
+# Workspace runtime data
+workspace/data/*.db
+workspace/data/*.db-shm
+workspace/data/*.db-wal
+workspace/data/*.jsonl
+workspace/data/*.log
+workspace/keys/
+workspace/backups/
