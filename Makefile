@@ -1,4 +1,4 @@
-.PHONY: up down shell logs lint format test test-cov collect backup startup nuke-db nuke-data
+.PHONY: up down shell logs lint format test test-cov collect backfill backup startup nuke-db nuke-data
 
 # ── Docker ───────────────────────────────────────────────────
 
@@ -38,6 +38,9 @@ test-cov:
 collect:
 	uv run python -m finance_agent.collector
 
+backfill:
+	uv run python -m finance_agent.backfill
+
 backup:
 	uv run python -c "from finance_agent.database import run_backup; run_backup()"
 
@@ -47,15 +50,13 @@ startup:
 # ── Dangerous resets ────────────────────────────────────────
 
 nuke-db:
-	@echo "This will stop containers and DELETE the database."
+	@echo "This will DELETE the database."
 	@read -p "Continue? [y/N] " c && [ "$$c" = y ] || exit 1
-	docker compose down
-	docker compose run --rm agent rm -f /workspace/data/agent.db /workspace/data/agent.db-wal /workspace/data/agent.db-shm
+	rm -f workspace/data/agent.db workspace/data/agent.db-wal workspace/data/agent.db-shm
 	@echo "Database deleted. Will be recreated on next run."
 
 nuke-data:
-	@echo "This will stop containers and DELETE ALL workspace data."
+	@echo "This will DELETE ALL workspace data."
 	@read -p "Continue? [y/N] " c && [ "$$c" = y ] || exit 1
-	docker compose down
-	docker compose run --rm agent sh -c "rm -rf /workspace/data/* /workspace/analysis/* /workspace/backups/*"
+	rm -rf workspace/data/* workspace/analysis/*
 	@echo "Workspace data cleared."

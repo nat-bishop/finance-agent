@@ -1,8 +1,8 @@
 """Kalshi historical daily data backfill.
 
 Fetches EOD market data from Kalshi's public S3 reporting bucket and stores
-it in SQLite.  Called automatically by the collector (incremental) or
-standalone via ``python -m finance_agent.backfill``.
+it in SQLite.  Standalone long-running command via ``make backfill`` or
+``python -m finance_agent.backfill``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import json
 import logging
 import ssl
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -25,14 +24,13 @@ _S3_PATH_TEMPLATE = "/reporting/market_data_{date}.json"
 FIRST_AVAILABLE_DATE = date(2021, 6, 30)
 _SSL_CTX = ssl.create_default_context()
 
-_MAX_CONCURRENT = 20
 _FLUSH_EVERY = 50
 
 
 def _fetch_daily(d: date) -> list[dict[str, Any]] | None:
     """Fetch a single day's JSON from S3. Returns None on 404/error."""
     path = _S3_PATH_TEMPLATE.format(date=d.isoformat())
-    conn = http.client.HTTPSConnection(_S3_HOST, timeout=30, context=_SSL_CTX)
+    conn = http.client.HTTPSConnection(_S3_HOST, timeout=120, context=_SSL_CTX)
     try:
         conn.request("GET", path)
         resp = conn.getresponse()
@@ -83,8 +81,8 @@ def sync_daily(db: AgentDatabase) -> int:
     missing days through yesterday.  On an empty table this backfills from
     2021-06-30.
 
-    Downloads are parallelised (up to 20 concurrent threads) and DB inserts
-    are batched for throughput.
+    Downloads sequentially (S3 files can be hundreds of MB; parallel downloads
+    saturate bandwidth).  DB inserts are batched for throughput.
 
     Returns total number of rows inserted/updated.
     """
@@ -108,42 +106,41 @@ def sync_daily(db: AgentDatabase) -> int:
         total_days,
     )
 
-    dates = [start_date + timedelta(days=i) for i in range(total_days)]
     total_rows = 0
+    pending_rows: list[dict[str, Any]] = []
+    days_in_batch = 0
 
-    for batch_start in range(0, len(dates), _FLUSH_EVERY):
-        batch_dates = dates[batch_start : batch_start + _FLUSH_EVERY]
+    for i in range(total_days):
+        current = start_date + timedelta(days=i)
+        t0 = time.time()
+        records = _fetch_daily(current)
+        elapsed = time.time() - t0
 
-        # Download batch in parallel threads
-        results: dict[date, list[dict[str, Any]] | None] = {}
-        with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT) as pool:
-            futures = {pool.submit(_fetch_daily, d): d for d in batch_dates}
-            for done_count, future in enumerate(as_completed(futures), 1):
-                d = futures[future]
-                results[d] = future.result()
-                if done_count % 10 == 0 or done_count == len(batch_dates):
-                    logger.info(
-                        "  Downloaded %d/%d days",
-                        batch_start + done_count,
-                        total_days,
-                    )
-
-        # Normalise and flush to DB in date order
-        pending_rows: list[dict[str, Any]] = []
-        for d in batch_dates:
-            records = results[d]
-            if records:
-                pending_rows.extend(_normalise_row(r) for r in records)
-
-        if pending_rows:
-            inserted = db.insert_kalshi_daily(pending_rows)
-            total_rows += inserted
+        if records:
+            pending_rows.extend(_normalise_row(r) for r in records)
+            size_mb = len(json.dumps(records).encode()) / 1_048_576
             logger.info(
-                "  Inserted %d rows (%s to %s)",
-                inserted,
-                batch_dates[0],
-                batch_dates[-1],
+                "  %s: %d records (%.0f MB, %.1fs) [%d/%d]",
+                current,
+                len(records),
+                size_mb,
+                elapsed,
+                i + 1,
+                total_days,
             )
+        else:
+            logger.info("  %s: no data (%.1fs) [%d/%d]", current, elapsed, i + 1, total_days)
+
+        days_in_batch += 1
+
+        # Flush to DB periodically
+        if days_in_batch >= _FLUSH_EVERY or i == total_days - 1:
+            if pending_rows:
+                inserted = db.insert_kalshi_daily(pending_rows)
+                total_rows += inserted
+                logger.info("  Flushed %d rows to DB", inserted)
+                pending_rows = []
+            days_in_batch = 0
 
     logger.info("Daily sync complete: %d total rows across %d days", total_rows, total_days)
     return total_rows

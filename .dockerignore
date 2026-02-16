@@ -3,6 +3,6 @@
 __pycache__
 *.pyc
 .claude/
-workspace/trade_journal/
-workspace/analysis/
 workspace/data/
+workspace/analysis/
+workspace/backups/

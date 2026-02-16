@@ -115,3 +115,8 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = true
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "types-requests>=2.32.4.20260107",
+]

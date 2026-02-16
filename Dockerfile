@@ -15,9 +15,10 @@ COPY pyproject.toml uv.lock /app/
 COPY src/ /app/src/
 RUN uv pip install --system --no-cache "/app"
 
-# Create isolated agent workspace
-RUN mkdir -p /workspace/{analysis,data,lib,backups}
-COPY workspace/lib/ /workspace/lib/
+# Create workspace dirs + app state path (outside agent sandbox)
+RUN mkdir -p /workspace/{analysis,data} /app/state
+COPY workspace/scripts/ /workspace/scripts/
+RUN chmod -R a-w /workspace/scripts/
 
 WORKDIR /workspace
 CMD ["python", "-m", "finance_agent.main"]
