@@ -50,7 +50,7 @@ def pm_client(monkeypatch):
         polymarket_key_id="test-key",
         polymarket_secret_key="test-secret",
     )
-    config = TradingConfig(polymarket_enabled=True)
+    config = TradingConfig()
     with patch("finance_agent.polymarket_client.AsyncPolymarketUS") as mock_sdk:
         client = PolymarketAPIClient(credentials, config)
         # Set up async mocks for nested SDK resources
