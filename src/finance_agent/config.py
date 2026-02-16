@@ -33,8 +33,9 @@ class TradingConfig:
     max_order_count: int = 50
     min_edge_pct: float = 7.0
 
-    db_path: str = "/workspace/data/agent.db"
-    backup_dir: str = "/workspace/backups"
+    # Paths: defaults are local (./workspace/*); Docker sets env overrides
+    db_path: str = "workspace/data/agent.db"
+    backup_dir: str = "workspace/backups"
     backup_max_age_hours: int = 24
     kalshi_rate_limit_reads_per_sec: int = 30  # Kalshi Basic tier
     kalshi_rate_limit_writes_per_sec: int = 30  # Kalshi Basic tier
@@ -63,7 +64,13 @@ class AgentConfig:
 
 def load_configs() -> tuple[AgentConfig, Credentials, TradingConfig]:
     """Build configs. Credentials from env vars, everything else from defaults."""
-    return AgentConfig(), Credentials(), TradingConfig()
+    import os
+
+    tc = TradingConfig(
+        db_path=os.environ.get("FA_DB_PATH", TradingConfig.db_path),
+        backup_dir=os.environ.get("FA_BACKUP_DIR", TradingConfig.backup_dir),
+    )
+    return AgentConfig(), Credentials(), tc
 
 
 def load_prompt(name: str) -> str:

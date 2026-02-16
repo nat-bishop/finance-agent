@@ -573,3 +573,37 @@ class AgentDatabase:
             logger.debug("Pruned %d old backups", pruned)
 
         return str(backup_path)
+
+
+def run_backup() -> None:
+    """CLI entry point: force a database backup."""
+    from .config import load_configs
+    from .logging_config import setup_logging
+
+    setup_logging()
+
+    _, _, tc = load_configs()
+    db = AgentDatabase(tc.db_path)
+    try:
+        result = db.backup_if_needed(tc.backup_dir, max_age_hours=0)
+        logger.info("Backup: %s", result)
+    finally:
+        db.close()
+
+
+def run_startup() -> None:
+    """CLI entry point: dump session state JSON."""
+    import json
+
+    from .config import load_configs
+    from .logging_config import setup_logging
+
+    setup_logging()
+
+    _, _, tc = load_configs()
+    db = AgentDatabase(tc.db_path)
+    try:
+        state = db.get_session_state()
+        print(json.dumps(state, indent=2, default=str))  # noqa: T201
+    finally:
+        db.close()

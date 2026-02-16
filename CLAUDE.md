@@ -24,9 +24,6 @@ make format         # ruff fix + format
 make test           # run all tests
 make test-cov       # run tests with coverage report
 
-# Dangerous resets
-make nuke-db        # delete database file (with confirmation)
-make nuke-data      # delete all workspace data (with confirmation)
 ```
 
 ## Architecture

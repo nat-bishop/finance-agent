@@ -6,6 +6,8 @@ services:
       - ANTHROPIC_API_KEY
       - POLYMARKET_KEY_ID
       - POLYMARKET_SECRET_KEY
+      - FA_DB_PATH=/workspace/data/agent.db
+      - FA_BACKUP_DIR=/workspace/backups
     volumes:
       - ./workspace:/workspace
       - ~/.kalshi/private_key.pem:/workspace/keys/private_key.pem:ro
