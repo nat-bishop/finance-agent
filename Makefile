@@ -1,4 +1,4 @@
-.PHONY: build run shell clean logs lint format test test-cov collect signals scan backup startup nuke-db nuke-data
+.PHONY: build run shell clean logs lint format test test-cov collect backup startup nuke-db nuke-data
 
 # ── Docker ───────────────────────────────────────────────────
 
@@ -40,11 +40,6 @@ test-cov:
 
 collect:
 	docker compose run --rm agent python -m finance_agent.collector
-
-signals:
-	docker compose run --rm agent python -m finance_agent.signals
-
-scan: collect signals
 
 backup:
 	docker compose run --rm agent python -c "from finance_agent.database import AgentDatabase; from finance_agent.config import load_configs; _, _, tc = load_configs(); db = AgentDatabase(tc.db_path); print(db.backup_if_needed(tc.backup_dir) or 'No backup needed'); db.close()"

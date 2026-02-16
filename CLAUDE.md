@@ -14,8 +14,6 @@ make logs           # tail the agent log file (workspace/data/agent.log)
 
 # Data pipeline (Docker)
 make collect        # snapshot market data to SQLite (both platforms)
-make signals        # run quantitative scans on collected data
-make scan           # collect + signals (full pipeline)
 make backup         # backup SQLite database
 make startup        # dump session state JSON (debug)
 
@@ -40,20 +38,19 @@ This is a cross-platform arbitrage system for Kalshi and Polymarket US, built on
 
 **Programmatic layer** (no LLM, runs separately):
 - `collector.py` — snapshots market data from both Kalshi and Polymarket US to SQLite, generates `/workspace/data/active_markets.md` (category-grouped market listings for agent discovery)
-- `signals.py` — runs 2 quantitative scans (arbitrage, cross-platform candidate) and writes signals to SQLite
-- Run via: `make collect && make signals` (or `make scan`)
+- Run via: `make collect`
 
 **Agent layer** (Claude REPL, runs on demand):
-- Loads signals + portfolios + pending recommendations from SQLite on startup, presents cross-platform dashboard
+- Loads portfolios + pending recommendations from SQLite on startup, presents cross-platform dashboard
 - Reads `active_markets.md` to find cross-platform connections using semantic understanding
 - Investigates opportunities: semantic market matching, price comparison, orderbook analysis
 - Records trade recommendations via `recommend_trade` tool for separate review/execution
 - All state persisted to SQLite for continuity across sessions
 
 **TUI layer** (Textual, runs the app):
-- `tui/app.py` — FinanceApp: initializes clients, DB, SDK, registers 5 screens (F1-F5)
+- `tui/app.py` — FinanceApp: initializes clients, DB, SDK, registers 4 screens (F1-F4)
 - `tui/services.py` — async wrappers bridging sync exchange clients to Textual event loop
-- `tui/screens/` — dashboard (chat+sidebar), recommendations, portfolio, signals, history
+- `tui/screens/` — dashboard (chat+sidebar), recommendations, portfolio, history
 - `tui/widgets/` — 7 widgets: agent_chat, rec_card, rec_list, portfolio_panel, status_bar, ask_modal, confirm_modal
 
 ### Source -> Runtime boundary
@@ -65,14 +62,13 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 - **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point calls TUI. Wires `setup_logging()`.
 - **logging_config.py** — `setup_logging()` configures root logger with stderr console + optional file handler. Idempotent, quiets noisy libraries (alembic, sqlalchemy, urllib3).
 - **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `polymarket_max_position_usd=50`, `min_edge_pct=7.0`, `recommendation_ttl_minutes=60`. Also loads and templates `prompts/system.md`.
-- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 9 tables. Alembic autogenerate reads these.
-- **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 8 read-only tools, `create_db_tools(db, session_id)` → 1 tool (`recommend_trade` with legs array). Exchange is a parameter, not a namespace.
-- **kalshi_client.py** — Thin wrapper around `kalshi-python` SDK with rate limiting. Auth is RSA-PSS signing. Includes batch_create/cancel, amend_order, get_events (paginated).
+- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 8 tables. Alembic autogenerate reads these.
+- **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi, polymarket)` → 7 read-only tools, `create_db_tools(db, session_id)` → 1 tool (`recommend_trade` with legs array). Exchange is a parameter, not a namespace.
+- **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Thin wrapper around `polymarket-us` SDK with rate limiting. Auth is Ed25519 signing. Includes get_trades (fixed), get_orders. Also exports `PM_INTENT_MAP`, `PM_INTENT_REVERSE`, `cents_to_usd` for frontend use.
 - **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
-- **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, pending_signals, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
+- **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
 - **collector.py** — Standalone data collector. Paginated event collection via `GET /events` (~3 API calls instead of ~500). Polymarket event collection. Generates enriched `active_markets.md` market listings (price, spread, volume, OI, DTE).
-- **signals.py** — Standalone signal generator: 1 scan type (arbitrage). No LLM. Arbitrage detects bracket mispricing where mutually exclusive YES prices don't sum to ~100%.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
 - **prompts/system.md** — System prompt template with arb-only mission, settlement equivalence verification protocol, arbitrage structures, information hierarchy, market discovery workflow, recommendation protocol, risk rules.
@@ -80,7 +76,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 ### Key patterns
 
 - **Factory + closure** for tools: `create_market_tools(kalshi, polymarket)` returns a list of `@tool`-decorated functions closed over both clients.
-- **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 9 tools total.
+- **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 8 tools total.
 - **Unified conventions**: Exchange is a param, prices in cents, action+side for both platforms.
 - **Config**: `Credentials` loads from env vars/`.env`; `TradingConfig` and `AgentConfig` are source-level defaults.
 - **Hook ordering**: catch-all auto-approve → PostToolUse rec audit → Stop session end.
@@ -94,7 +90,7 @@ Centralized via `logging_config.py`. Call `setup_logging()` once per entry point
 
 **Where logs go:**
 - **TUI app** (`make run` / `make dev`): stderr (visible in terminal) + `/workspace/data/agent.log` (persisted on host via Docker volume mount at `./workspace/data/agent.log`). View with `make logs`.
-- **Collector / Signals** (`make collect` / `make signals`): stderr only (runs locally, not in Docker). Output visible in terminal, not saved to file.
+- **Collector** (`make collect`): stderr only (runs locally, not in Docker). Output visible in terminal, not saved to file.
 - **Log levels**: INFO for normal operations, DEBUG for verbose (exception tracebacks in dashboard/portfolio refresh), WARNING for interrupts, ERROR for execution failures.
 - **TUI display vs logging**: RichLog widgets show user-facing agent conversation. Python logging is a separate developer/ops channel — they don't overlap.
 
@@ -120,3 +116,7 @@ Centralized via `logging_config.py`. Call `setup_logging()` once per entry point
 - Tests live in `tests/` (core modules) and `tests/tui/` (TUI services, widgets, messages)
 - Fixtures in `tests/conftest.py` (temp DB, mock exchange clients, sample data factories) and `tests/tui/conftest.py` (TUIServices wired to mocks)
 - TUI widget tests use Textual's `App.run_test()` / `Pilot` for headless rendering
+
+## Documentation
+
+- **README.md** — project overview, architecture, quickstart, tool reference, database schema, config guide. Keep in sync with CLAUDE.md when making architectural changes (screen counts, tool counts, table counts, removed features, etc.).

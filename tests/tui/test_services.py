@@ -294,7 +294,7 @@ async def test_reject_group(services, db, session_id):
     assert group["legs"][0]["status"] == "rejected"
 
 
-# ── cancel_order / amend_order (async) ─────────────────────────────
+# ── cancel_order (async) ──────────────────────────────────────────
 
 
 async def test_cancel_order_kalshi(services, mock_kalshi):
@@ -306,9 +306,3 @@ async def test_cancel_order_kalshi(services, mock_kalshi):
 async def test_cancel_order_unknown_exchange(services_no_pm):
     with pytest.raises(ValueError, match="Unknown exchange"):
         await services_no_pm.cancel_order("binance", "ORD-1")
-
-
-async def test_amend_order(services, mock_kalshi):
-    mock_kalshi.amend_order.return_value = {"status": "amended"}
-    await services.amend_order("ORD-1", price=50, count=5)
-    mock_kalshi.amend_order.assert_called_once_with("ORD-1", price=50, count=5)

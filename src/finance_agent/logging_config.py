@@ -1,6 +1,6 @@
 """Centralized logging configuration.
 
-Call setup_logging() once at the application entry point (main.py / collector / signals).
+Call setup_logging() once at the application entry point (main.py / collector).
 Library modules use: logger = logging.getLogger(__name__)
 """
 

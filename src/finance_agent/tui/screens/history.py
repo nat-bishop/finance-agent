@@ -14,13 +14,12 @@ from ..widgets.status_bar import StatusBar
 
 
 class HistoryScreen(Screen):
-    """F5: Session history with drill-down to trades/recs."""
+    """F4: Session history with drill-down to trades/recs."""
 
     BINDINGS: ClassVar[list] = [
         ("f1", "app.switch_screen('dashboard')", "Chat"),
         ("f2", "app.switch_screen('recommendations')", "Recs"),
         ("f3", "app.switch_screen('portfolio')", "Portfolio"),
-        ("f4", "app.switch_screen('signals')", "Signals"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
     ]
 

@@ -1,12 +1,12 @@
-"""Thin wrapper around the kalshi-python SDK."""
+"""Thin wrapper around the kalshi_python_sync SDK."""
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
-from kalshi_python import Configuration, KalshiClient
-from kalshi_python.models import CreateOrderRequest
+from kalshi_python_sync import Configuration, KalshiClient
 
 from .api_base import BaseAPIClient, _thread_safe
 from .config import Credentials, TradingConfig
@@ -51,6 +51,7 @@ class KalshiAPIClient(BaseAPIClient):
         status: str | None = None,
         series_ticker: str | None = None,
         event_ticker: str | None = None,
+        tickers: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
@@ -61,12 +62,13 @@ class KalshiAPIClient(BaseAPIClient):
                 status=status,
                 series_ticker=series_ticker,
                 event_ticker=event_ticker,
+                tickers=tickers,
                 cursor=cursor,
             ),
         }
-        # query is a keyword search — NOT the tickers param (which filters by exact ticker)
-        if query:
-            kwargs["query"] = query
+        # NOTE: Kalshi API v2 removed the keyword search `query` param from
+        # GET /markets.  The `query` param is accepted here for interface
+        # compatibility but is silently ignored.
         return self._to_dict(self._client.get_markets(**kwargs))
 
     @_thread_safe
@@ -108,13 +110,15 @@ class KalshiAPIClient(BaseAPIClient):
         period_interval: int = 60,
     ) -> dict[str, Any]:
         self._rate_read()
-        kwargs = {
-            "ticker": ticker,
-            "market_ticker": ticker,
-            "period_interval": period_interval,
-            **_optional(start_ts=start_ts, end_ts=end_ts),
-        }
-        return self._to_dict(self._client.get_market_candlesticks(**kwargs))
+        now = int(time.time())
+        return self._to_dict(
+            self._client.batch_get_market_candlesticks(
+                market_tickers=ticker,
+                start_ts=start_ts if start_ts is not None else now - 86400,
+                end_ts=end_ts if end_ts is not None else now,
+                period_interval=period_interval,
+            )
+        )
 
     # -- Portfolio (read) --
 
@@ -135,7 +139,7 @@ class KalshiAPIClient(BaseAPIClient):
         self._rate_read()
         kwargs: dict[str, Any] = {
             "limit": limit,
-            "settlement_status": "unsettled",
+            "count_filter": "position",
             **_optional(ticker=ticker, event_ticker=event_ticker, cursor=cursor),
         }
         return self._to_dict(self._client.get_positions(**kwargs))
@@ -205,39 +209,12 @@ class KalshiAPIClient(BaseAPIClient):
                 expiration_ts=expiration_ts,
             ),
         }
-        return self._to_dict(self._client.create_order(CreateOrderRequest(**kwargs)))
+        return self._to_dict(self._client.create_order(**kwargs))
 
     @_thread_safe
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         self._rate_write()
         return self._to_dict(self._client.cancel_order(order_id))
-
-    # -- Batch operations --
-
-    @_thread_safe
-    def batch_create_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
-        """Batch create up to 20 orders. Each order counts as 1 write transaction."""
-        self._rate_write(cost=len(orders))
-        reqs = [CreateOrderRequest(**o) for o in orders]
-        return self._to_dict(self._client.batch_create_orders(reqs))
-
-    @_thread_safe
-    def batch_cancel_orders(self, order_ids: list[str]) -> dict[str, Any]:
-        """Batch cancel orders. Each cancel counts as 0.2 write transactions."""
-        self._rate_write(cost=len(order_ids) * 0.2)
-        return self._to_dict(self._client.batch_cancel_orders(order_ids))
-
-    @_thread_safe
-    def amend_order(
-        self,
-        order_id: str,
-        *,
-        price: int | None = None,
-        count: int | None = None,
-    ) -> dict[str, Any]:
-        self._rate_write()
-        kwargs = _optional(price=price, count=count)
-        return self._to_dict(self._client.amend_order(order_id, **kwargs))
 
     # -- Exchange status --
 

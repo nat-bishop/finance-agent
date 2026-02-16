@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 
 import pytest
 from helpers import get_row, raw_select
 
-from finance_agent.models import Event, Session, Signal
+from finance_agent.models import Event, Session
 
 # ── Schema / Init ────────────────────────────────────────────────
 
@@ -19,7 +18,6 @@ def test_db_creates_all_tables(db):
     expected = {
         "market_snapshots",
         "events",
-        "signals",
         "trades",
         "portfolio_snapshots",
         "sessions",
@@ -377,80 +375,22 @@ def test_upsert_event_composite_pk(db, sample_event):
     assert count == 2
 
 
-# ── Signals ──────────────────────────────────────────────────────
-
-
-def test_insert_signals_empty(db):
-    assert db.insert_signals([]) == 0
-
-
-def test_insert_signals_dict_details(db, sample_signal):
-    sig = sample_signal(details_json={"spread": 10, "title": "Test"})
-    count = db.insert_signals([sig])
-    assert count == 1
-    signals = db.get_signals()
-    parsed = json.loads(signals[0]["details_json"])
-    assert parsed["spread"] == 10
-
-
-def test_insert_signals_string_details(db):
-    sig = {
-        "scan_type": "arbitrage",
-        "ticker": "T-1",
-        "signal_strength": 0.5,
-        "estimated_edge_pct": 5.0,
-        "details_json": '{"already": "serialized"}',
-    }
-    db.insert_signals([sig])
-    signals = db.get_signals()
-    matching = [s for s in signals if s["ticker"] == "T-1"]
-    assert json.loads(matching[0]["details_json"])["already"] == "serialized"
-
-
-def test_expire_old_signals(db, sample_signal):
-    db.insert_signals([sample_signal()])
-    # Backdate the signal's generated_at to make it expire-eligible
-    old_time = (datetime.now(UTC) - timedelta(hours=100)).isoformat()
-    with db._session_factory() as session:
-        from sqlalchemy import select
-
-        sig = session.scalars(select(Signal).where(Signal.ticker == "TICKER-A")).first()
-        sig.generated_at = old_time
-        session.commit()
-    count = db.expire_old_signals(max_age_hours=48)
-    assert count == 1
-    signals = db.get_signals(status="expired")
-    matching = [s for s in signals if s["ticker"] == "TICKER-A"]
-    assert matching[0]["status"] == "expired"
-
-
-def test_get_signals_with_filter(db, sample_signal):
-    db.insert_signals([sample_signal(scan_type="arbitrage")])
-    db.insert_signals([sample_signal(scan_type="cross_platform_candidate", ticker="T-2")])
-    signals = db.get_signals(scan_type="arbitrage")
-    assert len(signals) == 1
-    assert signals[0]["scan_type"] == "arbitrage"
-
-
 # ── get_session_state ────────────────────────────────────────────
 
 
 def test_get_session_state_empty_db(db):
     state = db.get_session_state()
-    expected_keys = {"last_session", "pending_signals", "unreconciled_trades"}
+    expected_keys = {"last_session", "unreconciled_trades"}
     assert set(state.keys()) == expected_keys
     assert state["last_session"] is None
-    assert state["pending_signals"] == []
     assert state["unreconciled_trades"] == []
 
 
-def test_get_session_state_populated(db, session_id, sample_signal):
+def test_get_session_state_populated(db, session_id):
     db.end_session(session_id, summary="s1")
-    db.insert_signals([sample_signal()])
     db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
     state = db.get_session_state()
     assert state["last_session"] is not None
-    assert len(state["pending_signals"]) == 1
     assert len(state["unreconciled_trades"]) == 1
 
 

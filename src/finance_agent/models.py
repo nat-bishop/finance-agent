@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -69,36 +69,6 @@ class Event(Base):
     mutually_exclusive: Mapped[int | None] = mapped_column(Integer)
     last_updated: Mapped[str | None] = mapped_column(Text)
     markets_json: Mapped[str | None] = mapped_column(Text)
-
-
-# ── Signals ───────────────────────────────────────────────────
-
-
-class Signal(Base):
-    __tablename__ = "signals"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    generated_at: Mapped[str] = mapped_column(Text, nullable=False)
-    scan_type: Mapped[str] = mapped_column(Text, nullable=False)
-    exchange: Mapped[str | None] = mapped_column(Text, server_default="kalshi")
-    ticker: Mapped[str] = mapped_column(Text, nullable=False)
-    event_ticker: Mapped[str | None] = mapped_column(Text)
-    signal_strength: Mapped[float | None] = mapped_column(Float)
-    estimated_edge_pct: Mapped[float | None] = mapped_column(Float)
-    details_json: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str | None] = mapped_column(Text, server_default="pending")
-    acted_at: Mapped[str | None] = mapped_column(Text)
-    session_id: Mapped[str | None] = mapped_column(Text)
-
-    __table_args__ = (
-        Index(
-            "idx_signals_pending",
-            "status",
-            sqlite_where=text("status = 'pending'"),
-        ),
-        Index("idx_signals_type", "scan_type"),
-        Index("idx_signals_exchange", "exchange"),
-    )
 
 
 # ── Trades ────────────────────────────────────────────────────
@@ -182,7 +152,6 @@ class RecommendationGroup(Base):
     thesis: Mapped[str | None] = mapped_column(Text)
     equivalence_notes: Mapped[str | None] = mapped_column(Text)
     estimated_edge_pct: Mapped[float | None] = mapped_column(Float)
-    signal_id: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(Text, server_default="pending")
     expires_at: Mapped[str | None] = mapped_column(Text)
     reviewed_at: Mapped[str | None] = mapped_column(Text)

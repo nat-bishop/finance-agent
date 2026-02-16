@@ -131,23 +131,6 @@ def sample_event():
     return _make
 
 
-@pytest.fixture
-def sample_signal():
-    """Factory for signal dicts matching insert_signals schema."""
-
-    def _make(scan_type="arbitrage", ticker="TICKER-A", strength=0.5, edge=5.0, **extra):
-        return {
-            "scan_type": scan_type,
-            "ticker": ticker,
-            "signal_strength": strength,
-            "estimated_edge_pct": edge,
-            "details_json": {"test": True},
-            **extra,
-        }
-
-    return _make
-
-
 # ── Mock API clients ─────────────────────────────────────────────
 
 

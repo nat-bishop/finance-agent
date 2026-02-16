@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "finance-agent"
 version = "0.1.0"
 description = "Cross-platform prediction market arbitrage agent"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "claude-agent-sdk>=0.1.33",
-    "kalshi-python>=2.1.4",
+    "kalshi-python-sync>=3.6.0",
     "python-dotenv>=1.2.0",
     "pydantic>=2.12",
     "pydantic-settings>=2.12",
@@ -36,9 +36,12 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+finance_agent = ["**/*.tcss", "**/*.md"]
+
 # ---------- Ruff ----------
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 99
 src = ["src"]
 extend-exclude = ["workspace"]
@@ -105,7 +108,7 @@ exclude_lines = [
 
 # ---------- mypy ----------
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 warn_return_any = false
 warn_unused_configs = true
 disallow_untyped_defs = false

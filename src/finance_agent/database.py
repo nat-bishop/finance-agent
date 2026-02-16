@@ -1,18 +1,17 @@
-"""SQLite database for agent state, market data, signals, and trades.
+"""SQLite database for agent state, market data, and trades.
 
 Uses SQLAlchemy ORM with Alembic autogenerate migrations.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, delete, event, func, insert, select, update
+from sqlalchemy import create_engine, event, func, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 
@@ -22,7 +21,6 @@ from finance_agent.models import (
     RecommendationGroup,
     RecommendationLeg,
     Session,
-    Signal,
     Trade,
 )
 
@@ -70,7 +68,9 @@ class AgentDatabase:
         config = Config()
         config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
         config.set_main_option("sqlalchemy.url", f"sqlite:///{self.db_path}")
-        command.upgrade(config, "head")
+        with self._engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
         logger.debug("Migrations complete")
 
     def close(self) -> None:
@@ -206,7 +206,6 @@ class AgentDatabase:
         thesis: str | None = None,
         estimated_edge_pct: float | None = None,
         equivalence_notes: str | None = None,
-        signal_id: int | None = None,
         legs: list[dict[str, Any]] | None = None,
         ttl_minutes: int = 60,
         total_exposure_usd: float | None = None,
@@ -223,7 +222,6 @@ class AgentDatabase:
             thesis=thesis,
             equivalence_notes=equivalence_notes,
             estimated_edge_pct=estimated_edge_pct,
-            signal_id=signal_id,
             expires_at=expires_at,
             total_exposure_usd=total_exposure_usd,
             computed_edge_pct=computed_edge_pct,
@@ -368,52 +366,6 @@ class AgentDatabase:
             session.execute(stmt)
             session.commit()
 
-    # ── Signals (bulk insert for signal generator) ────────────
-
-    def insert_signals(self, rows: list[dict[str, Any]]) -> int:
-        if not rows:
-            return 0
-        now = _now()
-        mapped_rows = []
-        for row in rows:
-            details = row.get("details_json")
-            if isinstance(details, dict):
-                details = json.dumps(details)
-            mapped_rows.append(
-                {
-                    "generated_at": now,
-                    "scan_type": row["scan_type"],
-                    "exchange": row.get("exchange", "kalshi"),
-                    "ticker": row["ticker"],
-                    "event_ticker": row.get("event_ticker"),
-                    "signal_strength": row.get("signal_strength"),
-                    "estimated_edge_pct": row.get("estimated_edge_pct"),
-                    "details_json": details,
-                }
-            )
-        with self._session_factory() as session:
-            session.execute(insert(Signal), mapped_rows)
-            session.commit()
-        return len(mapped_rows)
-
-    def clear_pending_signals(self) -> int:
-        """Delete all pending signals. Called before re-generating to avoid duplicates."""
-        with self._session_factory() as session:
-            result = session.execute(delete(Signal).where(Signal.status == "pending"))
-            session.commit()
-            return result.rowcount  # type: ignore[attr-defined, return-value]
-
-    def expire_old_signals(self, max_age_hours: int = 48) -> int:
-        cutoff = (datetime.now(UTC) - timedelta(hours=max_age_hours)).isoformat()
-        with self._session_factory() as session:
-            result = session.execute(
-                update(Signal)
-                .where(Signal.status == "pending", Signal.generated_at < cutoff)
-                .values(status="expired")
-            )
-            session.commit()
-            return result.rowcount  # type: ignore[attr-defined, return-value]
-
     # ── Session state (for startup) ───────────────────────────
 
     def get_session_state(self) -> dict[str, Any]:
@@ -425,13 +377,6 @@ class AgentDatabase:
                 .limit(1)
             ).first()
 
-            pending_signals = session.scalars(
-                select(Signal)
-                .where(Signal.status == "pending")
-                .order_by(Signal.signal_strength.desc())
-                .limit(10)
-            ).all()
-
             unreconciled_trades = session.scalars(
                 select(Trade)
                 .where(Trade.status == "placed")
@@ -441,7 +386,6 @@ class AgentDatabase:
 
             return {
                 "last_session": last_session_row.to_dict() if last_session_row else None,
-                "pending_signals": [s.to_dict() for s in pending_signals],
                 "unreconciled_trades": [t.to_dict() for t in unreconciled_trades],
             }
 
@@ -490,24 +434,6 @@ class AgentDatabase:
         """Session listing for history screen."""
         with self._session_factory() as session:
             stmt = select(Session).order_by(Session.started_at.desc()).limit(limit)
-            rows = session.scalars(stmt).all()
-            return [r.to_dict() for r in rows]
-
-    def get_signals(
-        self,
-        *,
-        status: str | None = None,
-        scan_type: str | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Filtered signal query for TUI screen."""
-        with self._session_factory() as session:
-            stmt = select(Signal).order_by(Signal.signal_strength.desc())
-            if status:
-                stmt = stmt.where(Signal.status == status)
-            if scan_type:
-                stmt = stmt.where(Signal.scan_type == scan_type)
-            stmt = stmt.limit(limit)
             rows = session.scalars(stmt).all()
             return [r.to_dict() for r in rows]
 

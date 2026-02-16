@@ -8,11 +8,11 @@ Finds markets that resolve to the same outcome across platforms, verifies identi
 
 **Three-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms, generates enriched `active_markets.md` (grouped by category → exchange → event, with price sums for bracket arb visibility), and runs signal generation. `signals.py` scans for bracket arbitrage with liquidity-weighted scoring.
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots market data from both platforms and generates enriched `active_markets.md` (grouped by category → exchange → event, with price sums for bracket arb visibility).
 
 2. **Agent layer** (Claude) — reads `active_markets.md` to find cross-platform connections using semantic understanding, investigates opportunities using unified market tools, and records trade recommendations via `recommend_trade` with a `legs` array. All state persists in SQLite for continuity across sessions.
 
-3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 5 navigable screens.
+3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 4 navigable screens.
 
 ### TUI Screens
 
@@ -21,8 +21,7 @@ Finds markets that resolve to the same outcome across platforms, verifies identi
 | F1 | Dashboard | Agent chat (left) + portfolio summary & pending recs sidebar (right) |
 | F2 | Recommendations | Full recommendation review with grouped execution and rejection |
 | F3 | Portfolio | Balances, positions, resting orders, recent trades across both exchanges |
-| F4 | Signals | Pending signal table |
-| F5 | History | Session list with drill-down to per-session trades and recommendations |
+| F4 | History | Session list with drill-down to per-session trades and recommendations |
 
 ## Quickstart
 
@@ -50,41 +49,30 @@ cp .env.example .env
 
 ```bash
 make build    # build Docker container
-make scan     # collect market data + generate signals
+make collect  # collect market data
 make run      # start the TUI
 ```
 
-Or locally: `make scan && uv run python -m finance_agent.main`
+Or locally: `make collect && uv run python -m finance_agent.main`
 
 ## Data Pipeline
 
 ```bash
-make collect    # snapshot markets + events to SQLite, generate active_markets.md, run signals
-make signals    # run signal scans standalone (also runs automatically at end of collect)
-make scan       # collect + signals (legacy alias, collect already runs signals)
+make collect    # snapshot markets + events to SQLite, generate active_markets.md
 make backup     # backup the database
 make startup    # print startup context JSON (debug)
 ```
 
-The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data and signals fresh. Signal generation also runs at TUI startup for freshness.
-
-### Signals
-
-| Signal | Description |
-|--------|-------------|
-| `arbitrage` | Bracket YES prices not summing to ~100% — liquidity-weighted strength, fee-adjusted edge, per-leg spread/volume data. Filters out dead markets (no volume + wide spread). |
-
-Signals are pre-computed attention flags injected into the agent at startup (top 10 by strength). The agent uses `active_markets.md` event groupings and semantic matching for cross-platform discovery — this is its core competency and better than any programmatic fuzzy matcher.
+The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data fresh. The agent uses `active_markets.md` event groupings and semantic matching for cross-platform discovery — this is its core competency and better than any programmatic fuzzy matcher.
 
 ## Agent Tools
 
-9 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
+8 unified MCP tools across 2 servers (`mcp__markets__*` and `mcp__db__*`):
 
-### Market Tools (8)
+### Market Tools (7)
 
 | Tool | Params | Notes |
 |------|--------|-------|
-| `search_markets` | `exchange?`, `query?`, `status?`, `event_id?`, `limit?` | Omit exchange = both platforms |
 | `get_market` | `exchange`, `market_id` | Full details, rules, settlement source |
 | `get_orderbook` | `exchange`, `market_id`, `depth?` | `depth=1` uses Polymarket BBO |
 | `get_event` | `exchange`, `event_id` | Event with nested markets |
@@ -121,7 +109,7 @@ Agent recommends → TUI review → Execute or Reject
 Discovery → Investigation → Verification → Sizing → Recommendation
 ```
 
-1. **Discovery** — Agent reads `active_markets.md` (event-grouped with bracket price sums), pre-filters by spread/volume/DTE, finds cross-platform connections by category; also reviews pre-computed arbitrage signals
+1. **Discovery** — Agent reads `active_markets.md` (event-grouped with bracket price sums), pre-filters by spread/volume/DTE, finds cross-platform connections by category
 2. **Investigation** — Agent follows arb-specific protocol: match markets, verify settlement equivalence (5-point checklist), check orderbooks
 3. **Verification** — Settlement equivalence verification (resolution source, timing, boundary conditions, conditional resolution, rounding), executable orderbook prices
 4. **Sizing** — `normalize_prices.py` for fee-adjusted edge, orderbook depth for position size
@@ -156,13 +144,12 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 9 tables:
+SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). 8 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
-| `market_snapshots` | collector | signals, agent | exchange, ticker, mid_price_cents, status |
-| `events` | collector | signals, agent | (event_ticker, exchange) PK, markets_json |
-| `signals` | signals | agent, TUI | scan_type, exchange, signal_strength, status |
+| `market_snapshots` | collector | agent | exchange, ticker, mid_price_cents, status |
+| `events` | collector | agent | (event_ticker, exchange) PK, markets_json |
 | `trades` | TUI executor | agent, TUI | exchange, ticker, action, side, price_cents |
 | `recommendation_groups` | agent | TUI | session_id, thesis, estimated_edge_pct, status |
 | `recommendation_legs` | agent | TUI | group_id FK, exchange, market_id, action, side, price_cents |
@@ -193,14 +180,13 @@ SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy OR
 src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
   config.py            # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
-  models.py            # SQLAlchemy ORM models (canonical schema for all 9 tables)
+  models.py            # SQLAlchemy ORM models (canonical schema for all 8 tables)
   database.py          # AgentDatabase: ORM queries, Alembic migration runner, backup
-  tools.py             # Unified MCP tool factories (8 market + 1 DB)
+  tools.py             # Unified MCP tool factories (7 market + 1 DB)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
   polymarket_client.py # Polymarket US SDK wrapper, intent maps
   hooks.py             # Recommendation counting, session lifecycle
   collector.py         # Market data collector (both platforms, market listings)
-  signals.py           # Signal generator (bracket arbitrage with liquidity scoring)
   rate_limiter.py      # Token-bucket rate limiter
   api_base.py          # Shared base class for API clients
   migrations/          # Alembic schema migrations
@@ -214,8 +200,7 @@ src/finance_agent/
       dashboard.py     # F1: agent chat + sidebar (portfolio + pending recs)
       recommendations.py # F2: full recommendation review + execution
       portfolio.py     # F3: balances, positions, orders
-      signals.py       # F4: signal table
-      history.py       # F5: session history with drill-down
+      history.py       # F4: session history with drill-down
     widgets/
       agent_chat.py    # RichLog + Input with async streaming
       rec_card.py      # Single recommendation group card

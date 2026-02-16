@@ -550,20 +550,6 @@ class TUIServices:
             )
         raise ValueError(f"Unknown exchange: {exchange}")
 
-    async def amend_order(
-        self,
-        order_id: str,
-        *,
-        price: int | None = None,
-        count: int | None = None,
-    ) -> dict[str, Any]:
-        """Amend a Kalshi order (price and/or count)."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._executor,
-            lambda: self._kalshi.amend_order(order_id, price=price, count=count),
-        )
-
     # ── DB queries ────────────────────────────────────────────────
 
     def get_trades(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -571,6 +557,3 @@ class TUIServices:
 
     def get_sessions(self, **kwargs: Any) -> list[dict[str, Any]]:
         return self.db.get_sessions(**kwargs)
-
-    def get_signals(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return self.db.get_signals(**kwargs)

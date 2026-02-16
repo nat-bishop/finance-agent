@@ -63,63 +63,40 @@ def test_require_exchange_case_insensitive():
 # ── Market tools ─────────────────────────────────────────────────
 
 
-async def test_search_markets_both(mock_kalshi, mock_polymarket):
-    tools = create_market_tools(mock_kalshi, mock_polymarket)
-    result = await _call(tools, 0)({"query": "test"})
-    parsed = json.loads(result["content"][0]["text"])
-    assert "kalshi" in parsed
-    assert "polymarket" in parsed
-
-
-async def test_search_markets_kalshi_only(mock_kalshi, mock_polymarket):
-    tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 0)({"exchange": "kalshi", "query": "test"})
-    mock_kalshi.search_markets.assert_called_once()
-    mock_polymarket.search_markets.assert_not_called()
-
-
-async def test_search_markets_no_polymarket(mock_kalshi):
-    tools = create_market_tools(mock_kalshi, None)
-    result = await _call(tools, 0)({"query": "test"})
-    parsed = json.loads(result["content"][0]["text"])
-    assert "kalshi" in parsed
-    assert "polymarket" not in parsed
-
-
 async def test_get_market_kalshi(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 1)({"exchange": "kalshi", "market_id": "K-MKT-1"})
+    await _call(tools, 0)({"exchange": "kalshi", "market_id": "K-MKT-1"})
     mock_kalshi.get_market.assert_called_once_with("K-MKT-1")
 
 
 async def test_get_market_polymarket(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 1)({"exchange": "polymarket", "market_id": "test-slug"})
+    await _call(tools, 0)({"exchange": "polymarket", "market_id": "test-slug"})
     mock_polymarket.get_market.assert_called_once_with("test-slug")
 
 
 async def test_get_orderbook_polymarket_bbo(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 2)({"exchange": "polymarket", "market_id": "slug", "depth": 1})
+    await _call(tools, 1)({"exchange": "polymarket", "market_id": "slug", "depth": 1})
     mock_polymarket.get_bbo.assert_called_once_with("slug")
     mock_polymarket.get_orderbook.assert_not_called()
 
 
 async def test_get_orderbook_polymarket_full(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 2)({"exchange": "polymarket", "market_id": "slug", "depth": 5})
+    await _call(tools, 1)({"exchange": "polymarket", "market_id": "slug", "depth": 5})
     mock_polymarket.get_orderbook.assert_called_once_with("slug")
 
 
 async def test_get_price_history_kalshi(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 4)({"market_id": "K-MKT-1"})
+    await _call(tools, 3)({"market_id": "K-MKT-1"})
     mock_kalshi.get_candlesticks.assert_called_once()
 
 
 async def test_get_portfolio_both(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    result = await _call(tools, 6)({})
+    result = await _call(tools, 5)({})
     parsed = json.loads(result["content"][0]["text"])
     assert "kalshi" in parsed
     assert "polymarket" in parsed
@@ -129,13 +106,13 @@ async def test_get_portfolio_both(mock_kalshi, mock_polymarket):
 
 async def test_get_portfolio_with_fills(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    await _call(tools, 6)({"exchange": "kalshi", "include_fills": True})
+    await _call(tools, 5)({"exchange": "kalshi", "include_fills": True})
     mock_kalshi.get_fills.assert_called_once()
 
 
 async def test_get_orders_both(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    result = await _call(tools, 7)({})
+    result = await _call(tools, 6)({})
     parsed = json.loads(result["content"][0]["text"])
     assert "kalshi" in parsed
     assert "polymarket" in parsed
@@ -280,7 +257,7 @@ async def test_recommend_trade_rejects_same_exchange(db, session_id, mock_kalshi
 
 def test_market_tools_count(mock_kalshi, mock_polymarket):
     tools = create_market_tools(mock_kalshi, mock_polymarket)
-    assert len(tools) == 8
+    assert len(tools) == 7
 
 
 def test_db_tools_count(db, session_id, mock_kalshi, mock_polymarket):

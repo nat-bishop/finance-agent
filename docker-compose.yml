@@ -9,5 +9,6 @@ services:
     volumes:
       - ./workspace:/workspace
       - ~/.kalshi/private_key.pem:/workspace/keys/private_key.pem:ro
+      - ~/.claude/.credentials.json:/root/.claude/.credentials.json:ro
     stdin_open: true
     tty: true

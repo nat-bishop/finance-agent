@@ -23,7 +23,7 @@ def test_trading_config_defaults():
     assert config.max_portfolio_usd == 1000.0
     assert config.max_order_count == 50
     assert config.min_edge_pct == 7.0
-    assert config.polymarket_enabled is False
+    assert config.polymarket_enabled is True
     assert config.execution_timeout_seconds == 300
     assert config.max_slippage_cents == 3
 

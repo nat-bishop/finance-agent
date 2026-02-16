@@ -37,67 +37,6 @@ def create_market_tools(
     """Unified market tools (read-only). Exchange param routes to correct client."""
 
     @tool(
-        "search_markets",
-        "Search markets by keyword, status, or event. Omit exchange to search both platforms.",
-        {
-            "exchange": {
-                "type": "string",
-                "description": "'kalshi' or 'polymarket'. Omit to search both.",
-                "optional": True,
-            },
-            "query": {
-                "type": "string",
-                "description": "Search keyword",
-                "optional": True,
-            },
-            "status": {
-                "type": "string",
-                "description": "Filter: open, closed, settled",
-                "optional": True,
-            },
-            "event_id": {
-                "type": "string",
-                "description": "Filter by event ticker/slug",
-                "optional": True,
-            },
-            "limit": {
-                "type": "integer",
-                "description": "Max results per exchange (default 50)",
-                "optional": True,
-            },
-        },
-    )
-    async def search_markets(args: dict) -> dict:
-        exchange = args.get("exchange", "").lower()
-        query = args.get("query")
-        status = args.get("status")
-        limit = args.get("limit", 50)
-
-        coros: list = []
-        keys: list[str] = []
-        if exchange in ("kalshi", ""):
-            coros.append(
-                asyncio.to_thread(
-                    kalshi.search_markets,
-                    query=query,
-                    status=status,
-                    event_ticker=args.get("event_id"),
-                    limit=limit,
-                )
-            )
-            keys.append("kalshi")
-        if exchange in ("polymarket", "") and polymarket:
-            coros.append(
-                asyncio.to_thread(
-                    polymarket.search_markets, query=query, status=status, limit=limit
-                )
-            )
-            keys.append("polymarket")
-
-        values = await asyncio.gather(*coros)
-        return _text(dict(zip(keys, values, strict=True)))
-
-    @tool(
         "get_market",
         "Get full details for a single market: rules, prices, volume, settlement source.",
         {
@@ -157,7 +96,7 @@ def create_market_tools(
     @tool(
         "get_price_history",
         "Get OHLC candlestick price history. Kalshi only — "
-        "use for investigating signals and checking 24-48h trends.",
+        "use for investigating opportunities and checking 24-48h trends.",
         {
             "market_id": {"type": "string", "description": "Kalshi market ticker"},
             "start_ts": {
@@ -318,7 +257,6 @@ def create_market_tools(
         return _text(dict(zip(keys, values, strict=True)))
 
     return [
-        search_markets,
         get_market,
         get_orderbook,
         get_event,
@@ -498,7 +436,6 @@ def _build_recommendation_response(
         thesis=args.get("thesis"),
         estimated_edge_pct=edge_result["net_edge_pct"],
         equivalence_notes=args.get("equivalence_notes"),
-        signal_id=args.get("signal_id"),
         legs=db_legs,
         ttl_minutes=recommendation_ttl_minutes,
         total_exposure_usd=total_exposure,
@@ -603,11 +540,6 @@ def create_db_tools(
                     "description": "Total capital to deploy across all legs (USD)",
                     "minimum": 1,
                     "maximum": 1000,
-                },
-                "signal_id": {
-                    "type": "integer",
-                    "description": "Signal ID that prompted this investigation, if any",
-                    "minimum": 1,
                 },
                 "legs": {
                     "type": "array",

@@ -2,10 +2,9 @@
 
 Standalone script, no LLM. Run via `make collect` or `python -m finance_agent.collector`.
 
-Collection schedule (all in one run):
-- All open markets (paginated) -> market_snapshots
-- Event structure (paginated) -> events
-- Recently settled markets -> market_snapshots (for settlement tracking)
+Events-first architecture: both Kalshi and Polymarket organise around Events,
+each containing one or more Markets.  We fetch events with nested markets in a
+single paginated pass, storing both event structure and market snapshots.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -82,7 +80,7 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
         "series_ticker": market.get("series_ticker"),
         "title": market.get("title"),
         "category": market.get("category"),
-        "status": market.get("status"),
+        "status": "open" if market.get("status") == "active" else market.get("status"),
         "yes_bid": yes_bid or None,
         "yes_ask": yes_ask or None,
         "no_bid": market.get("no_bid"),
@@ -149,187 +147,187 @@ def _compute_derived_polymarket(market: dict[str, Any], now: str) -> dict[str, A
     }
 
 
-def _collect_markets_by_status(
+# ── Kalshi: events-first collection ─────────────────────────────
+
+
+def _upsert_kalshi_event(db: AgentDatabase, event: dict[str, Any]) -> str | None:
+    """Store a Kalshi event row. Returns event_ticker, or None to skip."""
+    et = event.get("event_ticker")
+    if not et:
+        return None
+    nested = event.get("markets", [])
+    markets_summary = [
+        {
+            "ticker": m.get("ticker"),
+            "title": m.get("title"),
+            "yes_bid": m.get("yes_bid"),
+            "yes_ask": m.get("yes_ask"),
+            "status": m.get("status"),
+        }
+        for m in nested
+    ]
+    db.upsert_event(
+        event_ticker=et,
+        exchange="kalshi",
+        series_ticker=event.get("series_ticker"),
+        title=event.get("title"),
+        category=event.get("category"),
+        mutually_exclusive=event.get("mutually_exclusive"),
+        markets_json=json.dumps(markets_summary, default=str),
+    )
+    return et
+
+
+def collect_kalshi(
     client: KalshiAPIClient,
     db: AgentDatabase,
-    status: str,
-    label: str,
-    max_total: int | None = None,
-) -> int:
-    """Generic market collection with pagination and batching."""
-    now = _now_iso()
-    cursor = None
-    total = 0
-    batch: list[dict[str, Any]] = []
+    *,
+    status: str = "open",
+    max_pages: int | None = None,
+) -> tuple[int, int]:
+    """Collect Kalshi events with nested markets in a single pass.
 
-    logger.info("Collecting %s...", label)
-    while True:
-        try:
-            resp = client.search_markets(status=status, limit=1000, cursor=cursor)
-        except Exception:
-            logger.warning("SDK validation error during %s collection, skipping page", label)
-            break
-
-        markets = resp.get("markets", [])
-        if not markets:
-            break
-
-        batch.extend(_compute_derived(m, now) for m in markets)
-
-        if len(batch) >= 500:
-            total += db.insert_market_snapshots(batch)
-            batch.clear()
-
-        cursor = resp.get("cursor")
-        if not cursor or (max_total and total + len(batch) >= max_total):
-            break
-
-    if batch:
-        total += db.insert_market_snapshots(batch)
-
-    logger.info("  -> %d %s", total, label)
-    return total
-
-
-def collect_open_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    return _collect_markets_by_status(client, db, "open", "open market snapshots")
-
-
-def collect_settled_markets(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    return _collect_markets_by_status(client, db, "settled", "settled market snapshots", 1000)
-
-
-def _collect_and_process_events(
-    fetch_page: Callable,
-    process_event: Callable,
-    db: AgentDatabase,
-    label: str,
-) -> int:
-    """Generic paginated event collection.
-
-    fetch_page(cursor) -> (events_list, next_cursor_or_None)
-    process_event(event) -> upsert_event kwargs dict, or None to skip
+    Returns (event_count, market_count).
     """
+    label = f"Kalshi {status} events"
     logger.info("Collecting %s...", label)
-    total = 0
-    cursor: Any = None
+
+    now = _now_iso()
+    event_count = 0
+    market_count = 0
+    market_batch: list[dict[str, Any]] = []
+    cursor: str | None = None
+    pages = 0
 
     while True:
         try:
-            events, cursor = fetch_page(cursor)
-        except Exception:
-            logger.warning("SDK validation error during %s collection, skipping page", label)
+            resp = client.get_events(status=status, with_nested_markets=True, cursor=cursor)
+        except Exception as e:
+            logger.warning("Error during %s collection: %s", label, e)
             break
+
+        events = resp.get("events", [])
         if not events:
             break
+
+        page_markets = 0
         for event in events:
-            kwargs = process_event(event)
-            if kwargs:
-                db.upsert_event(**kwargs)
-                total += 1
-        if not cursor:
-            break
+            if not _upsert_kalshi_event(db, event):
+                continue
+            event_count += 1
+            nested = event.get("markets", [])
+            market_batch.extend(_compute_derived(m, now) for m in nested)
+            page_markets += len(nested)
 
-    logger.info("  -> %d %s", total, label)
-    return total
+        if len(market_batch) >= 500:
+            market_count += db.insert_market_snapshots(market_batch)
+            market_batch.clear()
 
-
-def collect_events(client: KalshiAPIClient, db: AgentDatabase) -> int:
-    """Collect event structures with nested markets via paginated GET /events."""
-
-    def fetch_page(cursor: str | None) -> tuple[list, str | None]:
-        resp = client.get_events(
-            status="open", with_nested_markets=True, limit=1000, cursor=cursor
+        pages += 1
+        logger.info(
+            "  page %d: %d events, %d markets (total: %d events, %d markets)",
+            pages,
+            len(events),
+            page_markets,
+            event_count,
+            market_count + len(market_batch),
         )
-        return resp.get("events", []), resp.get("cursor")
-
-    def process_event(event: dict[str, Any]) -> dict[str, Any] | None:
-        et = event.get("event_ticker")
-        if not et:
-            return None
-        nested = event.get("markets", [])
-        markets_summary = [
-            {
-                "ticker": m.get("ticker"),
-                "title": m.get("title"),
-                "yes_bid": m.get("yes_bid"),
-                "yes_ask": m.get("yes_ask"),
-                "status": m.get("status"),
-            }
-            for m in nested
-        ]
-        return {
-            "event_ticker": et,
-            "exchange": "kalshi",
-            "series_ticker": event.get("series_ticker"),
-            "title": event.get("title"),
-            "category": event.get("category"),
-            "mutually_exclusive": event.get("mutually_exclusive"),
-            "markets_json": json.dumps(markets_summary, default=str),
-        }
-
-    return _collect_and_process_events(fetch_page, process_event, db, "events")
-
-
-def collect_polymarket_markets(client: PolymarketAPIClient, db: AgentDatabase) -> int:
-    """Collect open markets from Polymarket US."""
-    now = _now_iso()
-    total = 0
-    batch: list[dict[str, Any]] = []
-
-    logger.info("Collecting Polymarket markets...")
-    offset = 0
-    while True:
-        resp = client.search_markets(status="open", limit=100, offset=offset)
-        markets = _as_list(resp, "markets", "data")
-        if not markets:
+        cursor = resp.get("cursor")
+        if not cursor or (max_pages and pages >= max_pages):
             break
-        batch.extend(_compute_derived_polymarket(m, now) for m in markets)
-        if len(batch) >= 500:
-            total += db.insert_market_snapshots(batch)
-            batch.clear()
-        offset += len(markets)
 
-    if batch:
-        total += db.insert_market_snapshots(batch)
-    logger.info("  -> %d Polymarket market snapshots", total)
-    return total
+    if market_batch:
+        market_count += db.insert_market_snapshots(market_batch)
+
+    logger.info("  -> %d events, %d market snapshots", event_count, market_count)
+    return event_count, market_count
 
 
-def collect_polymarket_events(client: PolymarketAPIClient, db: AgentDatabase) -> int:
-    """Collect event structures from Polymarket US."""
+# ── Polymarket: events-first collection ──────────────────────────
 
-    def fetch_page(cursor: int | None) -> tuple[list, int | None]:
-        offset = cursor or 0
-        resp = client.list_events(active=True, limit=100, offset=offset)
+
+def collect_polymarket(
+    client: PolymarketAPIClient,
+    db: AgentDatabase,
+) -> tuple[int, int]:
+    """Collect Polymarket events with nested markets in a single pass.
+
+    Returns (event_count, market_count).
+    """
+    logger.info("Collecting Polymarket events...")
+
+    now = _now_iso()
+    event_count = 0
+    market_count = 0
+    market_batch: list[dict[str, Any]] = []
+    offset = 0
+
+    while True:
+        try:
+            resp = client.list_events(active=True, limit=100, offset=offset)
+        except Exception as e:
+            logger.warning("Error during Polymarket event collection: %s", e)
+            break
+
         events = _as_list(resp, "events", "data")
-        return events, (offset + len(events)) if events else None
+        if not events:
+            break
 
-    def process_event(event: dict[str, Any]) -> dict[str, Any] | None:
-        slug = event.get("slug") or event.get("id", "")
-        if not slug:
-            return None
-        markets = event.get("markets", [])
-        markets_summary = [
-            {
-                "slug": m.get("slug"),
-                "title": m.get("title") or m.get("question"),
-                "yes_price": m.get("yes_price") or m.get("lastTradePrice"),
-                "active": m.get("active"),
-            }
-            for m in markets
-        ]
-        return {
-            "event_ticker": slug,
-            "exchange": "polymarket",
-            "title": event.get("title"),
-            "category": event.get("category"),
-            "mutually_exclusive": event.get("mutuallyExclusive")
-            or event.get("mutually_exclusive"),
-            "markets_json": json.dumps(markets_summary, default=str),
-        }
+        for event in events:
+            slug = event.get("slug") or event.get("id", "")
+            if not slug:
+                continue
 
-    return _collect_and_process_events(fetch_page, process_event, db, "Polymarket events")
+            nested = event.get("markets", [])
+
+            # Store event structure
+            markets_summary = [
+                {
+                    "slug": m.get("slug"),
+                    "title": m.get("title") or m.get("question"),
+                    "yes_price": m.get("yes_price") or m.get("lastTradePrice"),
+                    "active": m.get("active"),
+                }
+                for m in nested
+            ]
+            db.upsert_event(
+                event_ticker=slug,
+                exchange="polymarket",
+                title=event.get("title"),
+                category=event.get("category"),
+                mutually_exclusive=event.get("mutuallyExclusive")
+                or event.get("mutually_exclusive"),
+                markets_json=json.dumps(markets_summary, default=str),
+            )
+            event_count += 1
+
+            # Extract market snapshots — inject parent event slug as fallback
+            for m in nested:
+                if not m.get("eventSlug") and not m.get("event_slug"):
+                    m["eventSlug"] = slug
+                market_batch.append(_compute_derived_polymarket(m, now))
+
+        if len(market_batch) >= 500:
+            market_count += db.insert_market_snapshots(market_batch)
+            market_batch.clear()
+
+        offset += len(events)
+        logger.info(
+            "  page %d: %d events (total: %d events, %d markets)",
+            offset // 100,
+            len(events),
+            event_count,
+            market_count + len(market_batch),
+        )
+
+    if market_batch:
+        market_count += db.insert_market_snapshots(market_batch)
+
+    logger.info("  -> %d events, %d market snapshots", event_count, market_count)
+    return event_count, market_count
+
+
+# ── Market listings (for agent discovery) ────────────────────────
 
 
 def _fmt_volume(n: int | float | None) -> str:
@@ -429,6 +427,9 @@ def _generate_market_listings(db: AgentDatabase, output_path: str) -> None:
     logger.info("  -> Market listings written to %s", output_path)
 
 
+# ── Entry point ──────────────────────────────────────────────────
+
+
 def run_collector() -> None:
     """Main entry point for the collector."""
     from .logging_config import setup_logging
@@ -445,33 +446,24 @@ def run_collector() -> None:
     logger.info("DB: %s", trading_config.db_path)
 
     try:
-        open_count = collect_open_markets(client, db)
-        settled_count = collect_settled_markets(client, db)
-        event_count = collect_events(client, db)
+        # Kalshi: open events + nested markets
+        k_events, k_markets = collect_kalshi(client, db, status="open")
 
-        pm_count = 0
-        pm_event_count = 0
+        # Polymarket
+        pm_events = 0
+        pm_markets = 0
         if trading_config.polymarket_enabled and credentials.polymarket_key_id:
             pm_client = PolymarketAPIClient(credentials, trading_config)
-            pm_count = collect_polymarket_markets(pm_client, db)
-            pm_event_count = collect_polymarket_events(pm_client, db)
+            pm_events, pm_markets = collect_polymarket(pm_client, db)
 
         # Generate market listings for agent semantic discovery
         listings_path = str(Path(trading_config.db_path).parent / "active_markets.md")
         _generate_market_listings(db, listings_path)
 
-        # Run signal generation on freshly collected data
-        from .signals import generate_signals
-
-        sig_count = generate_signals(db)
-        logger.info("  -> %d signals generated", sig_count)
-
         elapsed = time.time() - start
         logger.info("Collection complete in %.1fs", elapsed)
-        logger.info(
-            "  Open: %d | Settled: %d | Events: %d", open_count, settled_count, event_count
-        )
-        logger.info("  Polymarket: %d markets, %d events", pm_count, pm_event_count)
+        logger.info("  Kalshi: %d events (%d markets)", k_events, k_markets)
+        logger.info("  Polymarket: %d events (%d markets)", pm_events, pm_markets)
     except KeyboardInterrupt:
         logger.warning("Interrupted")
     finally:

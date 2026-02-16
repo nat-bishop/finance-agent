@@ -15,7 +15,7 @@ from finance_agent.models import Session
 async def test_auto_approve_allows_regular_tool(db, session_id):
     hooks = create_audit_hooks(db, session_id)
     pre_hook = hooks["PreToolUse"][0].hooks[0]
-    result = await pre_hook({"tool_name": "mcp__markets__search_markets"}, "tid-1", None)
+    result = await pre_hook({"tool_name": "mcp__markets__get_market"}, "tid-1", None)
     assert result != {}
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 

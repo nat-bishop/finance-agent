@@ -28,7 +28,6 @@ from .screens.dashboard import DashboardScreen
 from .screens.history import HistoryScreen
 from .screens.portfolio import PortfolioScreen
 from .screens.recommendations import RecommendationsScreen
-from .screens.signals import SignalsScreen
 from .services import TUIServices
 
 _WATCHLIST_PATH = Path("/workspace/data/watchlist.md")
@@ -65,11 +64,6 @@ class FinanceApp(App):
             self.log(f"DB backup: {backup_result}")
 
         session_id = db.create_session()
-
-        # Regenerate signals from latest DB data (idempotent, <1s)
-        from ..signals import generate_signals
-
-        generate_signals(db)
 
         # Build startup context
         startup_state = db.get_session_state()
@@ -182,7 +176,6 @@ class FinanceApp(App):
             ),
             "recommendations": RecommendationsScreen(services=services),
             "portfolio": PortfolioScreen(services=services),
-            "signals": SignalsScreen(services=services),
             "history": HistoryScreen(services=services),
         }
         for name, screen in screens.items():

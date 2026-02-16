@@ -33,8 +33,7 @@ class DashboardScreen(Screen):
     BINDINGS: ClassVar[list] = [
         ("f2", "app.switch_screen('recommendations')", "Recs"),
         ("f3", "app.switch_screen('portfolio')", "Portfolio"),
-        ("f4", "app.switch_screen('signals')", "Signals"),
-        ("f5", "app.switch_screen('history')", "History"),
+        ("f4", "app.switch_screen('history')", "History"),
     ]
 
     def __init__(

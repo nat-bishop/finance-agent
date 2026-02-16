@@ -60,28 +60,8 @@ def test_search_markets_calls_rate_read(kalshi_client):
 def test_create_order_calls_rate_write(kalshi_client):
     kalshi_client._client.create_order.return_value = MagicMock()
     with patch.object(kalshi_client, "_rate_write") as mock_rate:
-        with patch("finance_agent.kalshi_client.CreateOrderRequest"):
-            kalshi_client.create_order(ticker="T-1", action="buy", side="yes", count=1)
+        kalshi_client.create_order(ticker="T-1", action="buy", side="yes", count=1)
         mock_rate.assert_called_once()
-
-
-def test_batch_create_orders_consumes_n_tokens(kalshi_client):
-    kalshi_client._client.batch_create_orders.return_value = MagicMock()
-    orders = [{"ticker": f"T-{i}", "action": "buy", "side": "yes", "count": 1} for i in range(3)]
-    with (
-        patch.object(kalshi_client, "_rate_write") as mock_rate,
-        patch("finance_agent.kalshi_client.CreateOrderRequest"),
-    ):
-        kalshi_client.batch_create_orders(orders)
-        mock_rate.assert_called_once_with(cost=3)
-
-
-def test_batch_cancel_orders_consumes_fractional_tokens(kalshi_client):
-    kalshi_client._client.batch_cancel_orders.return_value = MagicMock()
-    order_ids = [f"order-{i}" for i in range(5)]
-    with patch.object(kalshi_client, "_rate_write") as mock_rate:
-        kalshi_client.batch_cancel_orders(order_ids)
-        mock_rate.assert_called_once_with(cost=1.0)  # 5 * 0.2 = 1.0
 
 
 # ── Argument forwarding ──────────────────────────────────────────

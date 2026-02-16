@@ -8,14 +8,12 @@ import pytest
 
 from finance_agent.collector import (
     _as_list,
-    _collect_markets_by_status,
     _compute_derived,
     _compute_derived_polymarket,
     _generate_market_listings,
     _parse_days_to_expiry,
-    collect_events,
-    collect_polymarket_events,
-    collect_polymarket_markets,
+    collect_kalshi,
+    collect_polymarket,
 )
 
 # ── _parse_days_to_expiry ────────────────────────────────────────
@@ -187,62 +185,45 @@ def test_as_list_no_matching_key():
     assert _as_list({"other": [1]}, "markets") == []
 
 
-# ── _collect_markets_by_status ───────────────────────────────────
+# ── collect_kalshi (events-first) ────────────────────────────────
 
 
-def test_collect_markets_pagination(db, mock_kalshi):
-    # First call returns cursor, second returns no cursor
-    mock_kalshi.search_markets.side_effect = [
-        {
-            "markets": [
-                {"ticker": f"T-{i}", "yes_bid": 45, "yes_ask": 55, "status": "open"}
-                for i in range(3)
-            ],
-            "cursor": "page2",
-        },
-        {
-            "markets": [
-                {"ticker": f"T-{i + 3}", "yes_bid": 45, "yes_ask": 55, "status": "open"}
-                for i in range(2)
-            ],
-            "cursor": None,
-        },
-    ]
-    total = _collect_markets_by_status(mock_kalshi, db, "open", "test")
-    assert total == 5
-    assert mock_kalshi.search_markets.call_count == 2
-
-
-def test_collect_markets_max_total(db, mock_kalshi):
-    mock_kalshi.search_markets.return_value = {
-        "markets": [
-            {"ticker": f"T-{i}", "yes_bid": 45, "yes_ask": 55, "status": "settled"}
-            for i in range(200)
-        ],
-        "cursor": "more",
-    }
-    total = _collect_markets_by_status(mock_kalshi, db, "settled", "test", max_total=200)
-    assert total <= 200
-
-
-# ── collect_events ───────────────────────────────────────────────
-
-
-def test_collect_events(db, mock_kalshi):
+def test_collect_kalshi_pagination(db, mock_kalshi):
+    """Events with nested markets are collected in a single pass."""
     mock_kalshi.get_events.side_effect = [
         {
             "events": [
                 {
                     "event_ticker": "EVT-1",
-                    "title": "Test Event",
+                    "title": "Event 1",
                     "category": "Politics",
                     "mutually_exclusive": True,
                     "markets": [
                         {
-                            "ticker": "M-1",
-                            "title": "Market 1",
+                            "ticker": f"M-{i}",
+                            "title": f"Market {i}",
                             "yes_bid": 45,
                             "yes_ask": 55,
+                            "status": "open",
+                        }
+                        for i in range(3)
+                    ],
+                },
+            ],
+            "cursor": "page2",
+        },
+        {
+            "events": [
+                {
+                    "event_ticker": "EVT-2",
+                    "title": "Event 2",
+                    "category": "Sports",
+                    "markets": [
+                        {
+                            "ticker": "M-3",
+                            "title": "Market 3",
+                            "yes_bid": 40,
+                            "yes_ask": 60,
                             "status": "open",
                         },
                     ],
@@ -251,33 +232,42 @@ def test_collect_events(db, mock_kalshi):
             "cursor": None,
         },
     ]
-    total = collect_events(mock_kalshi, db)
-    assert total == 1
+    event_count, market_count = collect_kalshi(mock_kalshi, db, status="open")
+    assert event_count == 2
+    assert market_count == 4
+    assert mock_kalshi.get_events.call_count == 2
+
     events = db.get_all_events()
-    matching = [e for e in events if e["event_ticker"] == "EVT-1"]
-    assert matching[0]["title"] == "Test Event"
+    tickers = {e["event_ticker"] for e in events}
+    assert "EVT-1" in tickers
+    assert "EVT-2" in tickers
 
 
-# ── collect_polymarket_markets ───────────────────────────────────
+def test_collect_kalshi_max_pages(db, mock_kalshi):
+    """max_pages limits how many pages are fetched."""
+    mock_kalshi.get_events.return_value = {
+        "events": [
+            {
+                "event_ticker": "EVT-1",
+                "title": "Event",
+                "markets": [
+                    {"ticker": "M-1", "yes_bid": 45, "yes_ask": 55, "status": "open"},
+                ],
+            },
+        ],
+        "cursor": "more",
+    }
+    event_count, market_count = collect_kalshi(mock_kalshi, db, status="settled", max_pages=1)
+    assert event_count == 1
+    assert market_count == 1
+    assert mock_kalshi.get_events.call_count == 1
 
 
-def test_collect_polymarket_markets(db, mock_polymarket):
-    mock_polymarket.search_markets.side_effect = [
-        {
-            "markets": [
-                {"slug": "pm-1", "title": "PM Market", "yes_price": 0.55, "active": True},
-            ],
-        },
-        {"markets": []},
-    ]
-    total = collect_polymarket_markets(mock_polymarket, db)
-    assert total == 1
+# ── collect_polymarket (events-first) ────────────────────────────
 
 
-# ── collect_polymarket_events ────────────────────────────────────
-
-
-def test_collect_polymarket_events(db, mock_polymarket):
+def test_collect_polymarket(db, mock_polymarket):
+    """Polymarket events with nested markets collected in a single pass."""
     mock_polymarket.list_events.side_effect = [
         {
             "events": [
@@ -287,14 +277,20 @@ def test_collect_polymarket_events(db, mock_polymarket):
                     "category": "Sports",
                     "markets": [
                         {"slug": "m-1", "title": "Market 1", "yes_price": 0.50, "active": True},
+                        {"slug": "m-2", "title": "Market 2", "yes_price": 0.60, "active": True},
                     ],
                 },
             ],
         },
         {"events": []},
     ]
-    total = collect_polymarket_events(mock_polymarket, db)
-    assert total == 1
+    event_count, market_count = collect_polymarket(mock_polymarket, db)
+    assert event_count == 1
+    assert market_count == 2
+
+    events = db.get_all_events()
+    matching = [e for e in events if e["event_ticker"] == "evt-1"]
+    assert matching[0]["title"] == "PM Event"
 
 
 # ── _generate_market_listings ────────────────────────────────────

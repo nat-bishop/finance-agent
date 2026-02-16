@@ -40,7 +40,8 @@
       "WebFetch(domain:kalshi.com)",
       "Bash(git show:*)",
       "Bash(make:*)",
-      "Bash(make lint:*)"
+      "Bash(make lint:*)",
+      "Bash(sqlite3:*)"
     ]
   },
   "hooks": {
