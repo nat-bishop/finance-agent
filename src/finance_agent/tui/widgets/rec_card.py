@@ -10,6 +10,8 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static
 
+from ...constants import EXCHANGE_KALSHI, STATUS_PENDING
+
 
 class RecCard(Vertical):
     """Displays a recommendation group with its legs."""
@@ -46,7 +48,7 @@ class RecCard(Vertical):
 
     def _compose_legs(self) -> Iterable[Static]:
         for leg in self.group.get("legs", []):
-            exch = "K" if leg.get("exchange") == "kalshi" else "PM"
+            exch = "K" if leg.get("exchange") == EXCHANGE_KALSHI else "PM"
             action = (leg.get("action") or "?").upper()
             side = (leg.get("side") or "?").upper()
             price = leg.get("price_cents")
@@ -107,7 +109,7 @@ class RecCard(Vertical):
     def compose(self) -> ComposeResult:
         legs = self.group.get("legs", [])
         group_id = self.group["id"]
-        status = self.group.get("status", "pending")
+        status = self.group.get("status", STATUS_PENDING)
 
         yield Static(
             f"Group #{group_id} ({len(legs)} legs) [{status}]",
@@ -117,7 +119,7 @@ class RecCard(Vertical):
         yield from self._compose_metrics()
         yield from self._compose_staleness()
 
-        if status == "pending":
+        if status == STATUS_PENDING:
             with Horizontal(classes="rec-actions"):
                 yield Button(
                     "Execute All",

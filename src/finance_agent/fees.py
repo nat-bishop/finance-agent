@@ -8,6 +8,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .constants import BINARY_PAYOUT_CENTS, EXCHANGE_KALSHI, SIDE_YES
+
 
 def kalshi_fee(contracts: int, price_cents: int, *, maker: bool = False) -> float:
     """Kalshi fee using P(1-P) formula. Returns fee in USD.
@@ -30,7 +32,7 @@ def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | No
     Handles Kalshi format ({yes: [[price, qty], ...], no: [...]}).
     """
     ob = orderbook.get("orderbook", orderbook)
-    asks = ob.get("yes", []) if side == "yes" else ob.get("no", [])
+    asks = ob.get("yes", []) if side == SIDE_YES else ob.get("no", [])
 
     if not asks:
         return None, 0
@@ -67,8 +69,8 @@ def compute_arb_edge(
 
     # Bracket: selling all outcomes at sum > 100c, guaranteed cost = 100c per set
     payout_per_pair_cents = cost_per_pair_cents
-    cost_per_pair_cents = 100  # you collect the sum, pay out $1
-    total_cost_usd = contracts * 100 / 100.0
+    cost_per_pair_cents = BINARY_PAYOUT_CENTS  # you collect the sum, pay out $1
+    total_cost_usd = contracts * BINARY_PAYOUT_CENTS / 100.0
 
     gross_edge_per_pair = abs(payout_per_pair_cents - cost_per_pair_cents) / 100.0
     gross_edge_usd = contracts * gross_edge_per_pair
@@ -79,7 +81,7 @@ def compute_arb_edge(
         fee = kalshi_fee(contracts, leg["price_cents"], maker=leg.get("maker", False))
         fee_breakdown.append(
             {
-                "exchange": leg.get("exchange", "kalshi"),
+                "exchange": leg.get("exchange", EXCHANGE_KALSHI),
                 "price_cents": leg["price_cents"],
                 "maker": leg.get("maker", False),
                 "fee_usd": round(fee, 4),

@@ -7,6 +7,8 @@ from typing import Any
 from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from .constants import EXCHANGE_KALSHI, STATUS_PENDING, STRATEGY_BRACKET
+
 
 class Base(DeclarativeBase):
     def to_dict(self) -> dict[str, Any]:
@@ -22,7 +24,7 @@ class MarketSnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     captured_at: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="collector")
-    exchange: Mapped[str] = mapped_column(Text, nullable=False, server_default="kalshi")
+    exchange: Mapped[str] = mapped_column(Text, nullable=False, server_default=EXCHANGE_KALSHI)
     ticker: Mapped[str] = mapped_column(Text, nullable=False)
     event_ticker: Mapped[str | None] = mapped_column(Text)
     series_ticker: Mapped[str | None] = mapped_column(Text)
@@ -61,7 +63,7 @@ class Event(Base):
     __tablename__ = "events"
 
     event_ticker: Mapped[str] = mapped_column(Text, primary_key=True)
-    exchange: Mapped[str] = mapped_column(Text, primary_key=True, server_default="kalshi")
+    exchange: Mapped[str] = mapped_column(Text, primary_key=True, server_default=EXCHANGE_KALSHI)
     series_ticker: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(Text)
@@ -127,14 +129,14 @@ class RecommendationGroup(Base):
     thesis: Mapped[str | None] = mapped_column(Text)
     equivalence_notes: Mapped[str | None] = mapped_column(Text)
     estimated_edge_pct: Mapped[float | None] = mapped_column(Float)
-    status: Mapped[str | None] = mapped_column(Text, server_default="pending")
+    status: Mapped[str | None] = mapped_column(Text, server_default=STATUS_PENDING)
     expires_at: Mapped[str | None] = mapped_column(Text)
     reviewed_at: Mapped[str | None] = mapped_column(Text)
     executed_at: Mapped[str | None] = mapped_column(Text)
     total_exposure_usd: Mapped[float | None] = mapped_column(Float)
     computed_edge_pct: Mapped[float | None] = mapped_column(Float)
     computed_fees_usd: Mapped[float | None] = mapped_column(Float)
-    strategy: Mapped[str | None] = mapped_column(Text, server_default="bracket")
+    strategy: Mapped[str | None] = mapped_column(Text, server_default=STRATEGY_BRACKET)
 
     legs: Mapped[list[RecommendationLeg]] = relationship(
         back_populates="group",
@@ -174,7 +176,7 @@ class RecommendationLeg(Base):
     quantity: Mapped[int | None] = mapped_column(Integer)
     price_cents: Mapped[int | None] = mapped_column(Integer)
     order_type: Mapped[str | None] = mapped_column(Text, server_default="limit")
-    status: Mapped[str | None] = mapped_column(Text, server_default="pending")
+    status: Mapped[str | None] = mapped_column(Text, server_default=STATUS_PENDING)
     order_id: Mapped[str | None] = mapped_column(Text)
     executed_at: Mapped[str | None] = mapped_column(Text)
     is_maker: Mapped[bool | None] = mapped_column(Boolean)

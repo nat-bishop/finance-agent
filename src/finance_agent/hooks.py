@@ -15,6 +15,8 @@ from .database import AgentDatabase
 logger = logging.getLogger(__name__)
 
 _EMPTY: HookJSONOutput = {}  # type: ignore[assignment]
+# Container filesystem contract — agent cannot write to these (kernel-enforced :ro mount)
+_PROTECTED_PREFIXES = ("/workspace/data/", "/workspace/scripts/")
 
 
 def create_audit_hooks(
@@ -28,10 +30,29 @@ def create_audit_hooks(
     async def auto_approve(
         input_data: HookInput, _tool_use_id: str | None, _context: HookContext
     ) -> HookJSONOutput:
-        """Auto-approve all tools except AskUserQuestion (handled by canUseTool)."""
+        """Auto-approve tools, deny Write/Edit to read-only paths."""
         data: dict[str, Any] = input_data  # type: ignore[assignment]
-        if data.get("tool_name") == "AskUserQuestion":
+        tool_name = data.get("tool_name", "")
+
+        if tool_name == "AskUserQuestion":
             return _EMPTY
+
+        # Block Write/Edit to read-only paths with helpful message
+        if tool_name in ("Write", "Edit"):
+            file_path = data.get("file_path", "")
+            if any(file_path.startswith(p) for p in _PROTECTED_PREFIXES):
+                return {  # type: ignore[return-value]
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"{file_path} is read-only. "
+                            "Write files to /workspace/analysis/ instead. "
+                            "Use MCP tools to interact with the database."
+                        ),
+                    }
+                }
+
         return {  # type: ignore[return-value]
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -62,7 +83,7 @@ def create_audit_hooks(
         )
         return {  # type: ignore[return-value]
             "systemMessage": (
-                "Update /workspace/data/watchlist.md with any markets "
+                "Update /workspace/analysis/watchlist.md with any markets "
                 "to track next session before stopping."
             )
         }

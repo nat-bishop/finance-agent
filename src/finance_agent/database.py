@@ -15,6 +15,14 @@ from sqlalchemy import create_engine, delete, event, func, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 
+from finance_agent.constants import (
+    EXCHANGE_KALSHI,
+    STATUS_EXECUTED,
+    STATUS_OPEN,
+    STATUS_PENDING,
+    STATUS_PLACED,
+    STRATEGY_BRACKET,
+)
 from finance_agent.models import (
     Event,
     KalshiDaily,
@@ -85,7 +93,7 @@ class AgentDatabase:
         self,
         *,
         exchange: str | None = None,
-        status: str = "open",
+        status: str = STATUS_OPEN,
         require_mid_price: bool = False,
     ) -> list[dict[str, Any]]:
         """Get the most recent snapshot per (exchange, ticker). Returns list of dicts."""
@@ -179,7 +187,7 @@ class AgentDatabase:
         order_id: str | None = None,
         status: str | None = None,
         result_json: str | None = None,
-        exchange: str = "kalshi",
+        exchange: str = EXCHANGE_KALSHI,
         leg_id: int | None = None,
     ) -> int:
         trade = Trade(
@@ -215,7 +223,7 @@ class AgentDatabase:
         total_exposure_usd: float | None = None,
         computed_edge_pct: float | None = None,
         computed_fees_usd: float | None = None,
-        strategy: str = "bracket",
+        strategy: str = STRATEGY_BRACKET,
     ) -> tuple[int, str]:
         """Insert a recommendation group + legs atomically. Returns (group_id, expires_at)."""
         now = _now()
@@ -261,7 +269,7 @@ class AgentDatabase:
         with self._session_factory() as session:
             stmt = (
                 select(RecommendationGroup)
-                .where(RecommendationGroup.status == "pending")
+                .where(RecommendationGroup.status == STATUS_PENDING)
                 .order_by(RecommendationGroup.created_at.desc())
             )
             groups = session.scalars(stmt).all()
@@ -282,7 +290,7 @@ class AgentDatabase:
             if leg:
                 leg.status = status
                 leg.order_id = order_id
-                leg.executed_at = _now() if status == "executed" else None
+                leg.executed_at = _now() if status == STATUS_EXECUTED else None
                 session.commit()
 
     def update_group_status(self, group_id: int, status: str) -> None:
@@ -291,7 +299,7 @@ class AgentDatabase:
             group = session.get(RecommendationGroup, group_id)
             if group:
                 group.status = status
-                ts_col = "executed_at" if status == "executed" else "reviewed_at"
+                ts_col = "executed_at" if status == STATUS_EXECUTED else "reviewed_at"
                 setattr(group, ts_col, _now())
                 session.commit()
 
@@ -424,7 +432,7 @@ class AgentDatabase:
     def upsert_event(
         self,
         event_ticker: str,
-        exchange: str = "kalshi",
+        exchange: str = EXCHANGE_KALSHI,
         series_ticker: str | None = None,
         title: str | None = None,
         category: str | None = None,
@@ -470,7 +478,7 @@ class AgentDatabase:
 
             unreconciled_trades = session.scalars(
                 select(Trade)
-                .where(Trade.status == "placed")
+                .where(Trade.status == STATUS_PLACED)
                 .order_by(Trade.timestamp.desc())
                 .limit(10)
             ).all()

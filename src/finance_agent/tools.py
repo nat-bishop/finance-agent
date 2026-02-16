@@ -8,6 +8,17 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from .config import TradingConfig
+from .constants import (
+    ACTION_BUY,
+    ACTION_SELL,
+    BINARY_PAYOUT_CENTS,
+    EXCHANGE_KALSHI,
+    SIDE_NO,
+    SIDE_YES,
+    STATUS_PENDING,
+    STRATEGY_BRACKET,
+    STRATEGY_MANUAL,
+)
 from .database import AgentDatabase
 from .fees import best_price_and_depth, compute_arb_edge, kalshi_fee
 from .kalshi_client import KalshiAPIClient
@@ -150,23 +161,23 @@ def _determine_direction_bracket(enriched_legs: list[dict[str, Any]]) -> str | N
         return f"Empty YES orderbook for: {', '.join(missing)}"
 
     yes_cost = sum(yes_prices)  # type: ignore[arg-type]
-    buy_yes_edge = 100 - yes_cost
+    buy_yes_edge = BINARY_PAYOUT_CENTS - yes_cost
 
     if all(p is not None for p in no_prices):
         no_cost = sum(no_prices)  # type: ignore[arg-type]
-        buy_no_edge = 100 - no_cost
+        buy_no_edge = BINARY_PAYOUT_CENTS - no_cost
     else:
         no_cost = None
         buy_no_edge = -999
 
     if buy_yes_edge > 0 and buy_yes_edge >= buy_no_edge:
         for leg in enriched_legs:
-            leg["action"], leg["side"] = "buy", "yes"
+            leg["action"], leg["side"] = ACTION_BUY, SIDE_YES
             leg["price_cents"] = leg["yes_ask"]
             leg["depth"] = leg["yes_depth"]
     elif buy_no_edge > 0:
         for leg in enriched_legs:
-            leg["action"], leg["side"] = "buy", "no"
+            leg["action"], leg["side"] = ACTION_BUY, SIDE_NO
             leg["price_cents"] = leg["no_ask"]
             leg["depth"] = leg["no_depth"]
     else:
@@ -206,7 +217,7 @@ def _apply_manual_direction(
         enriched["quantity"] = quantity
         # For buys: use ask price on the specified side
         # For sells: use bid price on the specified side
-        if action == "buy":
+        if action == ACTION_BUY:
             enriched["price_cents"] = enriched.get(f"{side}_ask")
         else:
             enriched["price_cents"] = enriched.get(f"{side}_bid")
@@ -341,7 +352,7 @@ def create_db_tools(
                 },
                 "strategy": {
                     "type": "string",
-                    "enum": ["bracket", "manual"],
+                    "enum": [STRATEGY_BRACKET, STRATEGY_MANUAL],
                     "description": (
                         "'bracket' for mutually exclusive events (auto-computed), "
                         "'manual' for correlated/calendar trades (agent-specified)"
@@ -368,12 +379,12 @@ def create_db_tools(
                             },
                             "action": {
                                 "type": "string",
-                                "enum": ["buy", "sell"],
+                                "enum": [ACTION_BUY, ACTION_SELL],
                                 "description": "Required for manual strategy",
                             },
                             "side": {
                                 "type": "string",
-                                "enum": ["yes", "no"],
+                                "enum": [SIDE_YES, SIDE_NO],
                                 "description": "Required for manual strategy",
                             },
                             "quantity": {
@@ -389,14 +400,14 @@ def create_db_tools(
     )
     async def recommend_trade(args: dict) -> dict:
         legs_input = args.get("legs", [])
-        strategy = args.get("strategy", "bracket")
+        strategy = args.get("strategy", STRATEGY_BRACKET)
         total_exposure = args.get("total_exposure_usd", 0)
 
         # ── Validation ──────────────────────────────────────────
         errors: list[str] = []
         if len(legs_input) < 2:
             errors.append("Requires 2+ legs")
-        if strategy == "bracket" and not total_exposure:
+        if strategy == STRATEGY_BRACKET and not total_exposure:
             errors.append("Bracket strategy requires total_exposure_usd")
         if errors:
             return _text({"error": "; ".join(errors)})
@@ -420,12 +431,12 @@ def create_db_tools(
             except Exception:
                 title = market_id
 
-            yes_price, yes_depth = best_price_and_depth(ob, "yes")
-            no_price, no_depth = best_price_and_depth(ob, "no")
+            yes_price, yes_depth = best_price_and_depth(ob, SIDE_YES)
+            no_price, no_depth = best_price_and_depth(ob, SIDE_NO)
 
             enriched_legs.append(
                 {
-                    "exchange": "kalshi",
+                    "exchange": EXCHANGE_KALSHI,
                     "market_id": market_id,
                     "market_title": title,
                     "orderbook": ob,
@@ -434,14 +445,14 @@ def create_db_tools(
                     "yes_depth": yes_depth,
                     "no_ask": no_price,
                     "no_depth": no_depth,
-                    # Derive bid prices from opposite side (binary market: bid = 100 - opposite ask)
-                    "yes_bid": (100 - no_price) if no_price else None,
-                    "no_bid": (100 - yes_price) if yes_price else None,
+                    # Derive bid prices from opposite side (binary: bid = payout - opposite ask)
+                    "yes_bid": (BINARY_PAYOUT_CENTS - no_price) if no_price else None,
+                    "no_bid": (BINARY_PAYOUT_CENTS - yes_price) if yes_price else None,
                 }
             )
 
         # ── Strategy routing ──────────────────────────────────────
-        if strategy == "bracket":
+        if strategy == STRATEGY_BRACKET:
             return await _handle_bracket(enriched_legs, args, total_exposure)
         return await _handle_manual(enriched_legs, legs_input, args)
 
@@ -484,7 +495,7 @@ def create_db_tools(
         _assign_maker_taker(enriched_legs)
         fee_legs = [
             {
-                "exchange": "kalshi",
+                "exchange": EXCHANGE_KALSHI,
                 "price_cents": leg["price_cents"],
                 "maker": leg["is_maker"],
             }
@@ -517,13 +528,13 @@ def create_db_tools(
             total_exposure_usd=total_exposure,
             computed_edge_pct=edge_result["net_edge_pct"],
             computed_fees_usd=edge_result["total_fees_usd"],
-            strategy="bracket",
+            strategy=STRATEGY_BRACKET,
         )
 
         return _text(
             {
                 "group_id": group_id,
-                "status": "pending",
+                "status": STATUS_PENDING,
                 "expires_at": expires_at,
                 "computed": {
                     "contracts_per_leg": contracts,
@@ -578,15 +589,15 @@ def create_db_tools(
             total_exposure_usd=total_cost,
             computed_edge_pct=0.0,
             computed_fees_usd=round(total_fees, 4),
-            strategy="manual",
+            strategy=STRATEGY_MANUAL,
         )
 
         return _text(
             {
                 "group_id": group_id,
-                "status": "pending",
+                "status": STATUS_PENDING,
                 "expires_at": expires_at,
-                "strategy": "manual",
+                "strategy": STRATEGY_MANUAL,
                 "computed": {
                     "total_cost_usd": round(total_cost, 2),
                     "total_fees_usd": round(total_fees, 4),

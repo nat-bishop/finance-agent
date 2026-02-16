@@ -7,10 +7,11 @@ standalone via ``python -m finance_agent.backfill``.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
+import ssl
 import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -19,8 +20,10 @@ from .database import AgentDatabase
 
 logger = logging.getLogger(__name__)
 
-S3_URL_TEMPLATE = "https://kalshi-public-docs.s3.amazonaws.com/reporting/market_data_{date}.json"
+_S3_HOST = "kalshi-public-docs.s3.amazonaws.com"
+_S3_PATH_TEMPLATE = "/reporting/market_data_{date}.json"
 FIRST_AVAILABLE_DATE = date(2021, 6, 30)
+_SSL_CTX = ssl.create_default_context()
 
 _MAX_CONCURRENT = 20
 _FLUSH_EVERY = 50
@@ -28,19 +31,23 @@ _FLUSH_EVERY = 50
 
 def _fetch_daily(d: date) -> list[dict[str, Any]] | None:
     """Fetch a single day's JSON from S3. Returns None on 404/error."""
-    url = S3_URL_TEMPLATE.format(date=d.isoformat())
+    path = _S3_PATH_TEMPLATE.format(date=d.isoformat())
+    conn = http.client.HTTPSConnection(_S3_HOST, timeout=30, context=_SSL_CTX)
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        if resp.status == 404:
             logger.debug("No data for %s (404)", d)
             return None
-        logger.warning("HTTP %d fetching %s", e.code, url)
-        return None
+        if resp.status != 200:
+            logger.warning("HTTP %d fetching %s%s", resp.status, _S3_HOST, path)
+            return None
+        return json.loads(resp.read())
     except Exception:
-        logger.exception("Error fetching %s", url)
+        logger.exception("Error fetching %s%s", _S3_HOST, path)
         return None
+    finally:
+        conn.close()
 
 
 def _coerce_int(val: Any) -> int | None:

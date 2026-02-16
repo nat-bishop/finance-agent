@@ -9,6 +9,7 @@ from textual.containers import VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Static
 
+from ...constants import STATUS_EXECUTED, STATUS_PENDING
 from ..messages import RecommendationExecuted
 from ..services import TUIServices
 from ..widgets.confirm_modal import ConfirmModal
@@ -53,7 +54,7 @@ class RecommendationsScreen(Screen):
 
         # Recent non-pending
         recent = self._services.get_recommendations(limit=20)
-        non_pending = [g for g in recent if g.get("status") != "pending"]
+        non_pending = [g for g in recent if g.get("status") != STATUS_PENDING]
         if non_pending:
             await container.mount(Static("\n[bold]Recent[/]", classes="rec-status-msg"))
             for group in non_pending[:10]:
@@ -92,7 +93,7 @@ class RecommendationsScreen(Screen):
         # Show results
         container = self.query_one("#recs-container", VerticalScroll)
         for r in results:
-            if r["status"] == "executed":
+            if r["status"] == STATUS_EXECUTED:
                 container.mount(
                     Static(
                         f"  [green]Executed leg #{r['leg_id']}: "

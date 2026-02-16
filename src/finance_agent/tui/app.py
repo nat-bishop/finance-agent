@@ -28,7 +28,8 @@ from .screens.portfolio import PortfolioScreen
 from .screens.recommendations import RecommendationsScreen
 from .services import TUIServices
 
-_WATCHLIST_PATH = Path("/workspace/data/watchlist.md")
+# Container filesystem contract — defined by Dockerfile + docker-compose mounts
+_WATCHLIST_PATH = Path("/workspace/analysis/watchlist.md")
 
 
 class FinanceApp(App):
@@ -46,6 +47,7 @@ class FinanceApp(App):
         self._client: ClaudeSDKClient | None = None
         self._db: AgentDatabase | None = None
         self._services: TUIServices | None = None
+        self._session_id: str | None = None
 
     async def on_mount(self) -> None:
         """Initialize clients, DB, session, SDK client, then push dashboard."""
@@ -62,6 +64,7 @@ class FinanceApp(App):
             self.log(f"DB backup: {backup_result}")
 
         session_id = db.create_session()
+        self._session_id = session_id
 
         # Build startup context
         startup_state = db.get_session_state()
@@ -70,7 +73,7 @@ class FinanceApp(App):
         )
 
         # Clear session scratch file
-        session_log = Path("/workspace/data/session.log")
+        session_log = Path("/workspace/analysis/session.log")
         session_log.parent.mkdir(parents=True, exist_ok=True)
         session_log.write_text("", encoding="utf-8")
 
@@ -165,9 +168,26 @@ class FinanceApp(App):
         self.push_screen("dashboard")
 
     async def on_unmount(self) -> None:
-        """Clean up SDK client and database."""
+        """Clean up SDK client, session state, and database."""
         if self._client:
             with contextlib.suppress(Exception):
                 await self._client.__aexit__(None, None, None)
+        monitor = getattr(self._services, "_fill_monitor", None) if self._services else None
+        if monitor is not None:
+            with contextlib.suppress(Exception):
+                await monitor.close()
+        if self._db and self._session_id:
+            with contextlib.suppress(Exception):
+                # Only end session if not already ended by the Stop hook
+                from ..models import Session
+
+                with self._db._session_factory() as sess:
+                    row = sess.get(Session, self._session_id)
+                    if row and row.ended_at is None:
+                        self._db.end_session(
+                            self._session_id,
+                            summary="App closed",
+                            recommendations_made=0,
+                        )
         if self._db:
             self._db.close()

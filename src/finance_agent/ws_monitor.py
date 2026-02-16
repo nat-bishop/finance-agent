@@ -18,6 +18,7 @@ from typing import Any
 import websockets
 
 from .config import Credentials, TradingConfig
+from .constants import EXCHANGE_KALSHI
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ class FillMonitor:
         market_slug: str | None = None,
     ) -> dict[str, Any] | None:
         """Wait for a fill on the specified exchange. Returns fill info or None."""
-        if exchange != "kalshi":
+        if exchange != EXCHANGE_KALSHI:
             raise ValueError(f"Unknown exchange: {exchange}")
         if not self._kalshi:
             self._kalshi = KalshiFillMonitor(self._credentials, self._config)

@@ -8,6 +8,19 @@ from collections.abc import Callable
 from typing import Any
 
 from ..config import Credentials, TradingConfig
+from ..constants import (
+    ACTION_BUY,
+    ACTION_SELL,
+    BINARY_PAYOUT_CENTS,
+    EXCHANGE_KALSHI,
+    SIDE_NO,
+    SIDE_YES,
+    STATUS_EXECUTED,
+    STATUS_PARTIAL,
+    STATUS_PLACED,
+    STATUS_REJECTED,
+    STRATEGY_MANUAL,
+)
 from ..database import AgentDatabase
 from ..fees import best_price_and_depth, compute_arb_edge, kalshi_fee
 from ..kalshi_client import KalshiAPIClient
@@ -114,7 +127,7 @@ class TUIServices:
             leg.get("is_maker", False),
         )
 
-        price_key = "yes_price" if leg["side"] == "yes" else "no_price"
+        price_key = "yes_price" if leg["side"] == SIDE_YES else "no_price"
         params = {
             "ticker": leg["market_id"],
             "action": leg["action"],
@@ -131,8 +144,8 @@ class TUIServices:
         self, group_id: int, legs: list[dict[str, Any]], error: str
     ) -> list[dict[str, Any]]:
         """Mark group rejected and return rejection results for all legs."""
-        self.db.update_group_status(group_id, "rejected")
-        return [{"leg_id": lg["id"], "status": "rejected", "error": error} for lg in legs]
+        self.db.update_group_status(group_id, STATUS_REJECTED)
+        return [{"leg_id": lg["id"], "status": STATUS_REJECTED, "error": error} for lg in legs]
 
     @staticmethod
     def _parse_fill(fill: dict[str, Any], leg: dict[str, Any]) -> tuple[int, int]:
@@ -156,13 +169,13 @@ class TUIServices:
             price_cents=leg["price_cents"],
             order_type="limit",
             order_id=order_id,
-            status="placed",
+            status=STATUS_PLACED,
             result_json=json.dumps(result, default=str),
-            exchange=leg.get("exchange", "kalshi"),
+            exchange=leg.get("exchange", EXCHANGE_KALSHI),
             leg_id=leg["id"],
         )
-        self.db.update_leg_status(leg["id"], "executed", order_id)
-        return {"leg_id": leg["id"], "status": "executed", "order_id": order_id}
+        self.db.update_leg_status(leg["id"], STATUS_EXECUTED, order_id)
+        return {"leg_id": leg["id"], "status": STATUS_EXECUTED, "order_id": order_id}
 
     async def _refresh_legs_and_validate(
         self,
@@ -181,15 +194,15 @@ class TUIServices:
             except Exception as e:
                 return None, self._reject_all_legs(group_id, legs, f"Orderbook fetch failed: {e}")
 
-            side = leg.get("side", "yes")
-            action = leg.get("action", "buy")
-            if action == "buy":
+            side = leg.get("side", SIDE_YES)
+            action = leg.get("action", ACTION_BUY)
+            if action == ACTION_BUY:
                 price, depth = best_price_and_depth(ob, side)
             else:
                 # For sells, derive bid from opposite side's ask
-                opposite = "no" if side == "yes" else "yes"
+                opposite = SIDE_NO if side == SIDE_YES else SIDE_YES
                 opp_ask, _ = best_price_and_depth(ob, opposite)
-                price = (100 - opp_ask) if opp_ask else None
+                price = (BINARY_PAYOUT_CENTS - opp_ask) if opp_ask else None
                 _, depth = best_price_and_depth(ob, side)
 
             rec_price = leg.get("price_cents")
@@ -214,10 +227,10 @@ class TUIServices:
 
         # Recompute edge with fresh prices (only for bracket strategy)
         contracts = refreshed_legs[0].get("quantity", 0) if refreshed_legs else 0
-        if group.get("strategy") != "manual" and contracts > 0:
+        if group.get("strategy") != STRATEGY_MANUAL and contracts > 0:
             fee_legs = [
                 {
-                    "exchange": lg.get("exchange", "kalshi"),
+                    "exchange": lg.get("exchange", EXCHANGE_KALSHI),
                     "price_cents": lg["price_cents"],
                     "maker": lg.get("is_maker", False),
                 }
@@ -247,10 +260,10 @@ class TUIServices:
     @staticmethod
     def _derive_group_status(results: list[dict[str, Any]], total_legs: int) -> str:
         """Derive group status from per-leg execution results."""
-        executed = sum(1 for r in results if r["status"] == "executed")
+        executed = sum(1 for r in results if r["status"] == STATUS_EXECUTED)
         if executed == total_legs:
-            return "executed"
-        return "rejected" if executed == 0 else "partial"
+            return STATUS_EXECUTED
+        return STATUS_REJECTED if executed == 0 else STATUS_PARTIAL
 
     # ── Group execution orchestrator ───────────────────────────
 
@@ -315,7 +328,7 @@ class TUIServices:
             order_id = maker_result["order_id"]
         except Exception as e:
             logger.error("Maker leg %d failed: %s", maker_leg["id"], e)
-            self.db.update_leg_status(maker_leg["id"], "rejected")
+            self.db.update_leg_status(maker_leg["id"], STATUS_REJECTED)
             return self._reject_all_legs(group_id, legs, str(e))
 
         # Wait for maker fill
@@ -326,7 +339,7 @@ class TUIServices:
             self._config.execution_timeout_seconds,
         )
         fill = await fill_monitor.wait_for_fill(
-            maker_leg.get("exchange", "kalshi"),
+            maker_leg.get("exchange", EXCHANGE_KALSHI),
             order_id,
             self._config.execution_timeout_seconds,
             market_slug=maker_leg["market_id"],
@@ -334,14 +347,14 @@ class TUIServices:
         if not fill:
             logger.warning("Maker leg timed out, cancelling order %s", order_id)
             try:
-                await self.cancel_order("kalshi", order_id)
+                await self.cancel_order(EXCHANGE_KALSHI, order_id)
             except Exception as cancel_err:
                 logger.error("Failed to cancel maker leg: %s", cancel_err)
-            self.db.update_group_status(group_id, "rejected")
+            self.db.update_group_status(group_id, STATUS_REJECTED)
             return [
                 {
                     "leg_id": maker_leg["id"],
-                    "status": "rejected",
+                    "status": STATUS_REJECTED,
                     "error": f"Maker leg timed out after {self._config.execution_timeout_seconds}s",
                 }
             ]
@@ -349,7 +362,11 @@ class TUIServices:
         fill_price, fill_qty = self._parse_fill(fill, maker_leg)
         self.db.update_leg_fill(maker_leg["id"], fill_price, fill_qty)
         logger.info("Maker fill confirmed: %d contracts @ %dc", fill_qty, fill_price)
-        _emit(FillReceived(order_id, fill_price, fill_qty, maker_leg.get("exchange", "kalshi")))
+        _emit(
+            FillReceived(
+                order_id, fill_price, fill_qty, maker_leg.get("exchange", EXCHANGE_KALSHI)
+            )
+        )
         _emit(ExecutionProgress(group_id, "maker_filled", maker_leg.get("id")))
 
         # Place taker legs
@@ -361,7 +378,7 @@ class TUIServices:
                 taker_order_id = taker_result["order_id"]
 
                 taker_fill = await fill_monitor.wait_for_fill(
-                    taker_leg.get("exchange", "kalshi"),
+                    taker_leg.get("exchange", EXCHANGE_KALSHI),
                     taker_order_id,
                     30,
                     market_slug=taker_leg["market_id"],
@@ -370,24 +387,26 @@ class TUIServices:
                     tp, tq = self._parse_fill(taker_fill, taker_leg)
                     self.db.update_leg_fill(taker_leg["id"], tp, tq)
                     _emit(
-                        FillReceived(taker_order_id, tp, tq, taker_leg.get("exchange", "kalshi"))
+                        FillReceived(
+                            taker_order_id, tp, tq, taker_leg.get("exchange", EXCHANGE_KALSHI)
+                        )
                     )
                 else:
                     logger.warning("Taker leg didn't fill within 30s — attempting unwind")
                     await self._attempt_unwind(maker_leg, results)
-                    self.db.update_group_status(group_id, "partial")
+                    self.db.update_group_status(group_id, STATUS_PARTIAL)
                     return results
 
             except Exception as e:
                 logger.error("Taker leg %d failed: %s", taker_leg["id"], e)
-                self.db.update_leg_status(taker_leg["id"], "rejected")
+                self.db.update_leg_status(taker_leg["id"], STATUS_REJECTED)
                 results.append({"leg_id": taker_leg["id"], "status": "failed", "error": str(e)})
                 await self._attempt_unwind(maker_leg, results)
 
         # Finalize
         group_status = self._derive_group_status(results, len(legs))
         self.db.update_group_status(group_id, group_status)
-        executed = sum(1 for r in results if r["status"] == "executed")
+        executed = sum(1 for r in results if r["status"] == STATUS_EXECUTED)
         logger.info(
             "Group %d result: %s (%d/%d executed)",
             group_id,
@@ -409,10 +428,10 @@ class TUIServices:
         logger.warning(
             "Attempting to unwind filled leg %d on %s",
             filled_leg["id"],
-            filled_leg.get("exchange", "kalshi"),
+            filled_leg.get("exchange", EXCHANGE_KALSHI),
         )
         # Reverse: if we bought YES, now sell YES
-        reverse_action = "sell" if filled_leg["action"] == "buy" else "buy"
+        reverse_action = ACTION_SELL if filled_leg["action"] == ACTION_BUY else ACTION_BUY
         unwind_leg = {
             **filled_leg,
             "action": reverse_action,
@@ -453,8 +472,8 @@ class TUIServices:
         group = self.db.get_group(group_id)
         if group:
             for leg in group.get("legs", []):
-                self.db.update_leg_status(leg["id"], "rejected")
-        self.db.update_group_status(group_id, "rejected")
+                self.db.update_leg_status(leg["id"], STATUS_REJECTED)
+        self.db.update_group_status(group_id, STATUS_REJECTED)
 
     # ── Order management ──────────────────────────────────────────
 

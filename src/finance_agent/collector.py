@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_configs
+from .constants import EXCHANGE_KALSHI, STATUS_OPEN
 from .database import AgentDatabase
 from .kalshi_client import KalshiAPIClient
 
@@ -79,13 +80,13 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
     close_time = market.get("close_time") or market.get("expected_expiration_time")
 
     return {
-        **_base_snapshot(now, "kalshi", market),
+        **_base_snapshot(now, EXCHANGE_KALSHI, market),
         "ticker": market.get("ticker", ""),
         "event_ticker": market.get("event_ticker"),
         "series_ticker": market.get("series_ticker"),
         "title": market.get("title"),
         "category": market.get("category"),
-        "status": "open" if market.get("status") == "active" else market.get("status"),
+        "status": STATUS_OPEN if market.get("status") == "active" else market.get("status"),
         "yes_bid": yes_bid or None,
         "yes_ask": yes_ask or None,
         "no_bid": market.get("no_bid"),
@@ -125,7 +126,7 @@ def _upsert_kalshi_event(db: AgentDatabase, event: dict[str, Any]) -> str | None
     ]
     db.upsert_event(
         event_ticker=et,
-        exchange="kalshi",
+        exchange=EXCHANGE_KALSHI,
         series_ticker=event.get("series_ticker"),
         title=event.get("title"),
         category=event.get("category"),
@@ -139,7 +140,7 @@ async def collect_kalshi(
     client: KalshiAPIClient,
     db: AgentDatabase,
     *,
-    status: str = "open",
+    status: str = STATUS_OPEN,
     max_pages: int | None = None,
 ) -> tuple[int, int]:
     """Collect Kalshi events with nested markets in a single pass.
@@ -221,7 +222,7 @@ async def collect_kalshi(
 
 def _generate_markets_jsonl(db: AgentDatabase, output_path: str) -> None:
     """Write one JSON object per line for agent programmatic discovery."""
-    markets = db.get_latest_snapshots(status="open", require_mid_price=False)
+    markets = db.get_latest_snapshots(status=STATUS_OPEN, require_mid_price=False)
 
     event_rows = db.get_all_events()
     event_map: dict[tuple[str, str], dict[str, Any]] = {
@@ -285,7 +286,7 @@ async def _run_collector_async() -> None:
     logger.info("DB: %s", trading_config.db_path)
 
     try:
-        k_events, k_markets = await collect_kalshi(kalshi, db, status="open")
+        k_events, k_markets = await collect_kalshi(kalshi, db, status=STATUS_OPEN)
 
         # Generate JSONL market data for agent programmatic discovery
         jsonl_path = str(Path(trading_config.db_path).parent / "markets.jsonl")

@@ -11,7 +11,7 @@ make down           # stop containers (workspace data preserved)
 make shell          # bash into container
 make logs           # tail the agent log file (workspace/data/agent.log)
 
-# Data pipeline (Docker)
+# Data pipeline (local)
 make collect        # snapshot market data + sync Kalshi daily history
 make backup         # backup SQLite database
 make startup        # dump session state JSON (debug)
@@ -51,19 +51,27 @@ Kalshi market analysis system built on `claude-agent-sdk`. The agent runs as an 
 
 ### Source -> Runtime boundary
 
-Source code (`src/finance_agent/`) is installed into the Docker image at `/app` and is **not visible to the agent at runtime**. The agent only sees `/workspace`, which contains analysis scripts, data, and outputs.
+Source code (`src/finance_agent/`) is installed into the Docker image at `/app` and is **not visible to the agent at runtime**. The agent only sees `/workspace`.
+
+**Workspace isolation** (dual-mount pattern):
+- `workspace/scripts/` → COPY'd into image at `/workspace/scripts/` (read-only, immutable)
+- `workspace/data/` → mounted `:ro` at `/workspace/data/` (kernel-enforced read-only for agent) + `:rw` at `/app/state/` (app code writes DB/logs here, outside agent sandbox)
+- `workspace/analysis/` → mounted `:rw` at `/workspace/analysis/` (agent's writable scratch space)
+
+The PreToolUse hook denies Write/Edit to protected paths with helpful messages. Bash writes to `:ro` paths fail at the kernel level.
 
 ### Module roles
 
-- **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point calls TUI. Wires `setup_logging()`.
+- **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point loads config, wires `setup_logging()`, launches TUI.
 - **logging_config.py** — `setup_logging()` configures root logger with stderr console + optional file handler. Idempotent, quiets noisy libraries (alembic, sqlalchemy, urllib3).
-- **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `min_edge_pct=7.0`, `recommendation_ttl_minutes=60`. Also loads and templates `prompts/system.md`.
+- **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `min_edge_pct=7.0`, `recommendation_ttl_minutes=60`. Path fields (`db_path`, `backup_dir`, `log_file`) have env var overrides (`FA_DB_PATH`, `FA_BACKUP_DIR`, `FA_LOG_FILE`) set in `docker-compose.yml`. Also loads and templates `prompts/system.md`.
+- **constants.py** — Shared string constants: exchange names (`EXCHANGE_KALSHI`), statuses (`STATUS_PENDING`, `STATUS_EXECUTED`, etc.), sides (`SIDE_YES`/`SIDE_NO`), actions (`ACTION_BUY`/`ACTION_SELL`), strategies (`STRATEGY_BRACKET`/`STRATEGY_MANUAL`), `BINARY_PAYOUT_CENTS`. Imported across 11 modules to avoid scattered magic strings.
 - **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`). Canonical schema definition for all 8 tables. Alembic autogenerate reads these.
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi)` → 5 read-only tools, `create_db_tools(db, session_id, kalshi)` → 1 tool (`recommend_trade` with strategy + legs array). 6 tools total.
 - **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Dormant module. Thin wrapper around `polymarket-us` SDK. Preserved for future re-enablement but not imported by active code.
 - **fees.py** — Kalshi fee calculations: P(1-P) parabolic formula, `kalshi_fee()`, `best_price_and_depth()`, `compute_arb_edge()`.
-- **hooks.py** — Hooks using `HookMatcher`. Auto-approve reads, recommendation counting via PostToolUse, session end with watchlist reminder.
+- **hooks.py** — Hooks using `HookMatcher`. Auto-approve with file protection (denies Write/Edit to read-only paths), recommendation counting via PostToolUse, session end with watchlist reminder.
 - **database.py** — `AgentDatabase` class wrapping SQLite (WAL mode). Alembic migrations auto-run on startup. Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend.
 - **collector.py** — Standalone Kalshi data collector. Paginated event collection via `GET /events`. Generates `markets.jsonl` (one JSON object per market with denormalized event metadata). Also triggers incremental Kalshi daily history sync and upserts market metadata to `kalshi_market_meta`.
 - **backfill.py** — Kalshi historical daily data sync from public S3 bucket. Dynamic: fetches only missing days (full backfill on empty DB, incremental on subsequent runs). Called by collector or standalone via `python -m finance_agent.backfill`.
@@ -75,11 +83,11 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 
 - **Factory + closure** for tools: `create_market_tools(kalshi)` returns a list of `@tool`-decorated functions closed over the Kalshi client.
 - **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 6 tools total.
-- **Conventions**: Prices in cents, action+side, exchange column always "kalshi" in active code.
-- **Config**: `Credentials` loads from env vars/`.env`; `TradingConfig` and `AgentConfig` are source-level defaults.
-- **Hook ordering**: catch-all auto-approve → PostToolUse rec audit → Stop session end.
+- **Conventions**: Prices in cents, action+side, exchange column always "kalshi" in active code. Domain strings (`"kalshi"`, `"pending"`, `"yes"`, `"buy"`, `"bracket"`, etc.) defined in `constants.py` — import from there, don't hardcode.
+- **Config**: `Credentials` loads from env vars/`.env`; `TradingConfig` and `AgentConfig` are source-level defaults. Path fields on TradingConfig have `FA_*` env var overrides for Docker.
+- **Hook ordering**: PreToolUse (auto-approve + file protection) → PostToolUse rec audit → Stop session end.
 - **Startup context injection**: `main.py` calls `db.get_session_state()` and injects result into `BEGIN_SESSION` message. Agent starts with full context — no tool call needed.
-- **Watchlist**: `/workspace/data/watchlist.md` — markdown file the agent reads/writes directly (replaces former DB watchlist tools).
+- **Watchlist**: `/workspace/analysis/watchlist.md` — markdown file the agent reads/writes directly (replaces former DB watchlist tools).
 - **Analyst-only**: Agent recommends trades via `recommend_trade` DB tool. Exchange client methods remain for TUI executor.
 
 ### Logging
@@ -87,7 +95,7 @@ Source code (`src/finance_agent/`) is installed into the Docker image at `/app` 
 Centralized via `logging_config.py`. Call `setup_logging()` once per entry point; all other modules use `logger = logging.getLogger(__name__)` at module level.
 
 **Where logs go:**
-- **TUI app** (`make run` / `make dev`): stderr (visible in terminal) + `/workspace/data/agent.log` (persisted on host via Docker volume mount at `./workspace/data/agent.log`). View with `make logs`.
+- **TUI app** (`make up`): stderr (visible in terminal) + log file path from `FA_LOG_FILE` env var (Docker sets `/app/state/agent.log`, persisted on host at `./workspace/data/agent.log` via dual-mount). View with `make logs`.
 - **Collector** (`make collect`): stderr only (runs locally, not in Docker). Output visible in terminal, not saved to file.
 - **Log levels**: INFO for normal operations, DEBUG for verbose (exception tracebacks in dashboard/portfolio refresh), WARNING for interrupts, ERROR for execution failures.
 - **TUI display vs logging**: RichLog widgets show user-facing agent conversation. Python logging is a separate developer/ops channel — they don't overlap.
@@ -102,9 +110,6 @@ Centralized via `logging_config.py`. Call `setup_logging()` once per entry point
 - `market_info.py` — Full market lookup across all tables
 - `category_overview.py` — Category summary: market count, spreads, volume
 - `schema_reference.md` — Database schema reference for the agent
-
-`workspace/lib/` contains legacy reference scripts:
-- `kelly_size.py` — Kelly criterion position sizing (legacy reference)
 
 ## Code style
 

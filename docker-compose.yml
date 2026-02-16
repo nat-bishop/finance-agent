@@ -3,14 +3,15 @@ services:
     build: .
     env_file: .env
     environment:
-      - ANTHROPIC_API_KEY
-      - POLYMARKET_KEY_ID
-      - POLYMARKET_SECRET_KEY
-      - FA_DB_PATH=/workspace/data/agent.db
-      - FA_BACKUP_DIR=/workspace/backups
+      - FA_DB_PATH=/app/state/agent.db
+      - FA_BACKUP_DIR=/app/state/backups
+      - FA_LOG_FILE=/app/state/agent.log
     volumes:
-      - ./workspace:/workspace
+      - ./workspace/data:/workspace/data:ro
+      - ./workspace/data:/app/state
+      - ./workspace/analysis:/workspace/analysis
       - ~/.kalshi/private_key.pem:/workspace/keys/private_key.pem:ro
       - ~/.claude/.credentials.json:/root/.claude/.credentials.json:ro
     stdin_open: true
     tty: true
+    stop_grace_period: 15s
