@@ -82,8 +82,15 @@ def _fetch_and_normalise(d: date) -> tuple[date, list[dict[str, Any]], float]:
     fetch_elapsed = time.time() - t0
     if not records:
         return d, [], fetch_elapsed
-    rows = [_normalise_row(r) for r in records]
+    rows = [_normalise_row(r) for r in records if _has_activity(r)]
     return d, rows, fetch_elapsed
+
+
+def _has_activity(row: dict[str, Any]) -> bool:
+    """Return True if the record has any trading activity (volume or open interest)."""
+    vol = row.get("daily_volume") or 0
+    oi = row.get("open_interest") or 0
+    return vol > 0 or oi > 0
 
 
 def _coerce_int(val: Any) -> int | None:

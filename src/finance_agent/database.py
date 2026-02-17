@@ -454,6 +454,26 @@ class AgentDatabase:
             )
         return deleted
 
+    def purge_inactive_daily(self) -> int:
+        """Delete kalshi_daily rows with zero volume AND zero open interest.
+
+        These are micro-markets with no trading activity — typically 94%+ of
+        recent daily records.  Returns total number of rows deleted.
+        """
+        with self._session_factory() as session:
+            result = session.execute(
+                delete(KalshiDaily).where(
+                    (KalshiDaily.daily_volume == 0) | (KalshiDaily.daily_volume.is_(None)),
+                    (KalshiDaily.open_interest == 0) | (KalshiDaily.open_interest.is_(None)),
+                )
+            )
+            session.commit()
+            deleted: int = result.rowcount  # type: ignore[attr-defined]
+
+        if deleted:
+            logger.info("Purged %d inactive daily rows (zero volume and OI)", deleted)
+        return deleted
+
     def insert_kalshi_daily(self, rows: list[dict[str, Any]]) -> int:
         """Bulk upsert daily Kalshi data. Returns count inserted/updated."""
         if not rows:
