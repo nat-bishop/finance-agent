@@ -45,6 +45,8 @@ class TradingConfig:
     execution_timeout_seconds: int = 300  # 5 min fill timeout for leg-in
     max_slippage_cents: int = 3  # reject execution if orderbook moved >N cents
     snapshot_retention_days: int = 7  # purge market snapshots older than this
+    daily_retention_days: int = 365  # purge daily rows for short-lived tickers older than this
+    daily_min_ticker_days: int = 5  # only purge tickers with fewer than this many days of data
 
     @property
     def kalshi_base_url(self) -> str:

@@ -7,37 +7,48 @@ Usage:
 """
 import argparse
 import json
-from db_utils import query
+from collections import defaultdict
+from db_utils import query, latest_snapshot_ids
 
 
 def scan(min_edge_cents=5, min_volume=100):
     """Find bracket arb candidates from latest market snapshots."""
-    events = query(
-        """
-        SELECT event_ticker, title, category
-        FROM events
-        WHERE exchange = 'kalshi' AND mutually_exclusive = 1
+    events = {
+        e["event_ticker"]: e
+        for e in query(
+            """
+            SELECT event_ticker, title, category
+            FROM events
+            WHERE exchange = 'kalshi' AND mutually_exclusive = 1
+            """
+        )
+    }
+
+    all_markets = query(
+        f"""
+        SELECT ticker, event_ticker, title, yes_ask, yes_bid, no_ask, no_bid,
+               volume_24h, open_interest, spread_cents
+        FROM market_snapshots
+        WHERE exchange = 'kalshi' AND status = 'open'
+          AND id IN ({latest_snapshot_ids()})
+          AND event_ticker IN (
+              SELECT event_ticker FROM events
+              WHERE exchange = 'kalshi' AND mutually_exclusive = 1
+          )
         """
     )
 
-    results = []
-    for evt in events:
-        markets = query(
-            """
-            SELECT ticker, title, yes_ask, yes_bid, no_ask, no_bid,
-                   volume_24h, open_interest, spread_cents
-            FROM market_snapshots
-            WHERE event_ticker = ? AND exchange = 'kalshi' AND status = 'open'
-              AND id IN (
-                SELECT MAX(id) FROM market_snapshots
-                WHERE event_ticker = ? AND exchange = 'kalshi' AND status = 'open'
-                GROUP BY ticker
-              )
-            """,
-            (evt["event_ticker"], evt["event_ticker"]),
-        )
+    by_event = defaultdict(list)
+    for m in all_markets:
+        by_event[m["event_ticker"]].append(m)
 
+    results = []
+    for event_ticker, markets in by_event.items():
         if len(markets) < 2:
+            continue
+
+        evt = events.get(event_ticker)
+        if not evt:
             continue
 
         yes_prices = [m["yes_ask"] for m in markets if m["yes_ask"]]
@@ -48,7 +59,7 @@ def scan(min_edge_cents=5, min_volume=100):
                 avg_volume = sum(m.get("volume_24h") or 0 for m in markets) / len(markets)
                 if avg_volume >= min_volume:
                     results.append({
-                        "event_ticker": evt["event_ticker"],
+                        "event_ticker": event_ticker,
                         "event_title": evt["title"],
                         "category": evt["category"],
                         "n_markets": len(markets),

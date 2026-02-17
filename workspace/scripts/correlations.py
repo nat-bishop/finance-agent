@@ -8,6 +8,7 @@ Usage:
 import argparse
 import json
 import math
+from collections import defaultdict
 from db_utils import query
 
 
@@ -25,8 +26,11 @@ def pearson(x, y):
     return sum((xi - mx) * (yi - my) for xi, yi in zip(x, y)) / (n * sx * sy)
 
 
-def get_correlations(category, min_days=30, min_corr=0.5):
-    """Find correlated market pairs within a category."""
+def get_correlations(category, min_days=30, min_corr=0.5, max_tickers=200):
+    """Find correlated market pairs within a category.
+
+    Limits to top max_tickers by data points to keep O(N^2) tractable.
+    """
     tickers = query(
         """
         SELECT m.ticker, m.title, COUNT(d.id) as days
@@ -36,22 +40,30 @@ def get_correlations(category, min_days=30, min_corr=0.5):
         GROUP BY m.ticker
         HAVING days >= ?
         ORDER BY days DESC
+        LIMIT ?
         """,
-        (category, min_days),
+        (category, min_days, max_tickers),
     )
 
-    series = {}
-    for t in tickers:
-        rows = query(
-            """
-            SELECT date, (high + low) / 2 as mid
-            FROM kalshi_daily
-            WHERE ticker_name = ? AND high IS NOT NULL AND low IS NOT NULL
-            ORDER BY date
-            """,
-            (t["ticker"],),
-        )
-        series[t["ticker"]] = {r["date"]: r["mid"] for r in rows}
+    if not tickers:
+        return []
+
+    ticker_names = [t["ticker"] for t in tickers]
+    placeholders = ",".join("?" * len(ticker_names))
+    all_daily = query(
+        f"""
+        SELECT ticker_name, date, (high + low) / 2 as mid
+        FROM kalshi_daily
+        WHERE ticker_name IN ({placeholders})
+          AND high IS NOT NULL AND low IS NOT NULL
+        ORDER BY ticker_name, date
+        """,
+        tuple(ticker_names),
+    )
+
+    series = defaultdict(dict)
+    for r in all_daily:
+        series[r["ticker_name"]][r["date"]] = r["mid"]
 
     results = []
     ticker_list = list(series.keys())
@@ -85,9 +97,10 @@ if __name__ == "__main__":
     parser.add_argument("category", help="Market category to analyze")
     parser.add_argument("--min-days", type=int, default=30, help="Min overlapping days")
     parser.add_argument("--min-corr", type=float, default=0.5, help="Min absolute correlation")
+    parser.add_argument("--max-tickers", type=int, default=200, help="Max tickers to compare")
     args = parser.parse_args()
 
-    results = get_correlations(args.category, args.min_days, args.min_corr)
+    results = get_correlations(args.category, args.min_days, args.min_corr, args.max_tickers)
     for r in results:
         print(json.dumps(r))
     print(f"\n{len(results)} correlated pairs found")

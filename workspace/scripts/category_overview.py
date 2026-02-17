@@ -5,7 +5,7 @@ Usage:
 """
 import argparse
 import json
-from db_utils import query
+from db_utils import connect, materialize_latest_ids
 
 
 def overview(category=None):
@@ -15,29 +15,31 @@ def overview(category=None):
     )
     params = (category,) if category else ()
 
-    cats = query(
+    conn = connect()
+    materialize_latest_ids(conn)
+
+    rows = conn.execute(
         f"""
         SELECT e.category,
                COUNT(DISTINCT e.event_ticker) as events,
                COUNT(DISTINCT s.ticker) as markets,
-               SUM(CASE WHEN e.mutually_exclusive = 1 THEN 1 ELSE 0 END) as me_events,
+               COUNT(DISTINCT CASE WHEN e.mutually_exclusive = 1
+                   THEN e.event_ticker END) as me_events,
                AVG(s.spread_cents) as avg_spread,
                AVG(s.volume_24h) as avg_volume_24h,
                SUM(s.open_interest) as total_oi
         FROM events e
-        LEFT JOIN market_snapshots s ON s.event_ticker = e.event_ticker
-            AND s.exchange = 'kalshi' AND s.status = 'open'
-            AND s.id IN (
-                SELECT MAX(id) FROM market_snapshots
-                WHERE exchange = 'kalshi' AND status = 'open'
-                GROUP BY ticker
-            )
+        LEFT JOIN (
+            SELECT ms.* FROM market_snapshots ms
+            JOIN _latest_ids li ON ms.id = li.id
+        ) s ON s.event_ticker = e.event_ticker
         {where}
         GROUP BY e.category
         ORDER BY markets DESC
         """,
         params,
-    )
+    ).fetchall()
+    conn.close()
 
     return [
         {
@@ -49,7 +51,7 @@ def overview(category=None):
             "avg_volume_24h": round(c["avg_volume_24h"]) if c["avg_volume_24h"] else None,
             "total_open_interest": c["total_oi"],
         }
-        for c in cats
+        for c in rows
     ]
 
 

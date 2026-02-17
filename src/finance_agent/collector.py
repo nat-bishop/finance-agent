@@ -297,8 +297,12 @@ async def _run_collector_async() -> None:
 
         await backfill_missing_meta(kalshi, db)
 
-        # Purge old snapshots
+        # Purge old snapshots and stale daily data
         db.purge_old_snapshots(trading_config.snapshot_retention_days)
+        db.purge_old_daily(
+            trading_config.daily_retention_days,
+            trading_config.daily_min_ticker_days,
+        )
 
         # Checkpoint WAL and update query planner statistics
         db.maintenance()

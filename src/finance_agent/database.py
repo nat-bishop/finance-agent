@@ -415,6 +415,45 @@ class AgentDatabase:
         with self._session_factory() as session:
             return session.scalar(select(func.max(KalshiDaily.date)))
 
+    def purge_old_daily(self, retention_days: int = 365, min_ticker_days: int = 5) -> int:
+        """Purge old kalshi_daily rows for short-lived tickers.
+
+        Deletes rows for tickers that:
+        - Have no data newer than ``retention_days`` ago, AND
+        - Have fewer than ``min_ticker_days`` total days of data
+
+        This targets expired micro-market strike tickers (avg 12 day lifespan)
+        while preserving long-running markets with rich history.
+        Returns total number of rows deleted.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+
+        # Find short-lived tickers with no recent data
+        stale_tickers = (
+            select(KalshiDaily.ticker_name)
+            .group_by(KalshiDaily.ticker_name)
+            .having(
+                func.max(KalshiDaily.date) < cutoff,
+                func.count(KalshiDaily.id) < min_ticker_days,
+            )
+        )
+
+        with self._session_factory() as session:
+            result = session.execute(
+                delete(KalshiDaily).where(KalshiDaily.ticker_name.in_(stale_tickers))
+            )
+            session.commit()
+            deleted: int = result.rowcount  # type: ignore[attr-defined]
+
+        if deleted:
+            logger.info(
+                "Purged %d daily rows (tickers with <%d days, no data since %s)",
+                deleted,
+                min_ticker_days,
+                cutoff,
+            )
+        return deleted
+
     def insert_kalshi_daily(self, rows: list[dict[str, Any]]) -> int:
         """Bulk upsert daily Kalshi data. Returns count inserted/updated."""
         if not rows:
@@ -517,17 +556,23 @@ class AgentDatabase:
             session.commit()
         return len(rows)
 
-    def get_missing_meta_tickers(self, limit: int = 200) -> list[str]:
-        """Return tickers in kalshi_daily that have no kalshi_market_meta row."""
+    def get_missing_meta_tickers(self, limit: int = 200, recency_days: int = 90) -> list[str]:
+        """Return tickers in kalshi_daily that have no kalshi_market_meta row.
+
+        Prioritizes recently-seen tickers (more likely to still exist in API).
+        Filters to tickers with daily data within the last ``recency_days``.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=recency_days)).strftime("%Y-%m-%d")
+        meta_tickers = select(KalshiMarketMeta.ticker)
         with self._session_factory() as session:
             stmt = (
                 select(KalshiDaily.ticker_name)
-                .distinct()
-                .outerjoin(
-                    KalshiMarketMeta,
-                    KalshiDaily.ticker_name == KalshiMarketMeta.ticker,
+                .where(
+                    KalshiDaily.ticker_name.notin_(meta_tickers),
+                    KalshiDaily.date >= cutoff,
                 )
-                .where(KalshiMarketMeta.ticker.is_(None))
+                .group_by(KalshiDaily.ticker_name)
+                .order_by(func.max(KalshiDaily.date).desc())
                 .limit(limit)
             )
             return list(session.scalars(stmt).all())

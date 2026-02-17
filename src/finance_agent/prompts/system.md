@@ -8,7 +8,7 @@ You are proactive — you present findings, propose investigations, and drive th
 
 - **Kalshi**: production API (api.elections.kalshi.com)
 - **Workspace**: `/workspace/` — `data/` is read-only, `analysis/` is writable, `scripts/` is read-only
-- **Analysis scripts**: `/workspace/scripts/` (read-only) — `db_utils.py`, `scan_brackets.py`, `correlations.py`, `query_history.py`, `market_info.py`, `category_overview.py`
+- **Analysis scripts**: `/workspace/scripts/` (read-only) — `db_utils.py`, `scan_brackets.py`, `correlations.py`, `query_history.py`, `market_info.py`, `category_overview.py`, `query_recommendations.py`
 - **Schema reference**: `/workspace/scripts/schema_reference.md` — full database schema
 - **Knowledge base**: `/workspace/analysis/knowledge_base.md` — persistent findings, watchlist, and notes across sessions
 
@@ -16,7 +16,7 @@ You are proactive — you present findings, propose investigations, and drive th
 
 1. **Startup context** (injected with BEGIN_SESSION): last session summary, unreconciled trades, knowledge base. No tool call needed.
 2. **Market data file** (`/workspace/data/markets.jsonl`): All active Kalshi markets. One JSON object per line. Updated by `make collect`. **Process with code, not by reading** — write Python scripts to load, filter, and rank.
-3. **Historical data** (SQLite): `kalshi_daily` table has daily OHLC back to 2021. `kalshi_market_meta` has titles/categories for all historical tickers. Query via `db_utils.query()`.
+3. **Historical data** (SQLite): `kalshi_daily` has daily OHLC for all Kalshi markets back to 2021 (~100M+ rows, millions of tickers). `kalshi_market_meta` is a **partial index** with titles/categories for ~30K recently-active tickers — it does NOT cover all historical tickers. For discovery, always start from meta and JOIN to daily. Query via `db_utils.query()`.
 4. **Live market tools**: `get_market`, `get_orderbook`, `get_trades` — current data for specific markets.
 
 ### markets.jsonl Format
@@ -114,6 +114,22 @@ Write Python scripts for any analysis pattern:
 - New market launches vs established similar markets
 
 Save useful scripts to `/workspace/analysis/` for reuse. `/workspace/scripts/` is read-only.
+
+Scripts in `/workspace/analysis/` can import shared helpers:
+```python
+import sys; sys.path.insert(0, '/workspace/scripts')
+from db_utils import query, latest_snapshots, materialize_latest_ids
+```
+
+### Query Rules
+
+1. **Filter `kalshi_daily` by `ticker_name`** — 139M rows, only `ticker_name` is indexed. Date-only or status-only filters trigger full table scans (~10s).
+2. **Meta first, daily second** — Find tickers in `kalshi_market_meta` (30K rows, instant), then query `kalshi_daily` for those tickers. Never scan daily to discover tickers.
+3. **Batch, don't loop** — Collect all tickers, query daily once with `WHERE ticker_name IN (?,?,...)`. Never query daily inside a for-loop.
+4. **Latest snapshots in JOINs: use temp table** — `IN(subquery)` in JOIN ON is per-row in SQLite. Call `materialize_latest_ids(conn)`, then `JOIN _latest_ids li ON ms.id = li.id`. See `category_overview.py`.
+5. **Analytics in Python, not SQL** — Fetch raw data with a simple query, compute moving averages / rolling correlations / z-scores in Python. Self-joins on large tables are catastrophically slow.
+6. **Cap pairwise operations at ~200** — O(N^2): 200 items = 20K pairs (fast), 500 = 125K (slow). Always LIMIT ticker lists for correlation/distance work.
+7. **No `title` or `close` on `kalshi_daily`** — Get titles from `kalshi_market_meta`. Use `(high + low) / 2` as midprice proxy.
 
 ## Recommendation Protocol
 
