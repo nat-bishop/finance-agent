@@ -20,12 +20,16 @@ def build_options(
     can_use_tool: Callable[..., Any],
     hooks: dict[HookEvent, list[HookMatcher]],
     workspace: str = "/workspace",
+    session_context: str = "",
 ) -> ClaudeAgentOptions:
+    prompt = build_system_prompt(trading_config)
+    if session_context:
+        prompt += "\n\n" + session_context
     return ClaudeAgentOptions(
         system_prompt={
             "type": "preset",
             "preset": "claude_code",
-            "append": build_system_prompt(trading_config),
+            "append": prompt,
         },
         model=agent_config.model,
         cwd=workspace,

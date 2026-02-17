@@ -39,7 +39,8 @@ def create_audit_hooks(
 
         # Block Write/Edit to read-only paths with helpful message
         if tool_name in ("Write", "Edit"):
-            file_path = data.get("file_path", "")
+            tool_input = data.get("tool_input", {})
+            file_path = tool_input.get("file_path", "")
             if any(file_path.startswith(p) for p in _PROTECTED_PREFIXES):
                 return {  # type: ignore[return-value]
                     "hookSpecificOutput": {
@@ -57,7 +58,6 @@ def create_audit_hooks(
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "updatedInput": input_data,  # type: ignore[typeddict-item]
             }
         }
 

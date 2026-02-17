@@ -35,25 +35,24 @@ class DashboardScreen(Screen):
         ("f2", "app.switch_screen('recommendations')", "Recs"),
         ("f3", "app.switch_screen('portfolio')", "Portfolio"),
         ("f4", "app.switch_screen('history')", "History"),
+        ("ctrl+l", "app.reset_session", "Reset"),
     ]
 
     def __init__(
         self,
         client: ClaudeSDKClient,
         services: TUIServices,
-        startup_msg: str,
         session_id: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._client = client
         self._services = services
-        self._startup_msg = startup_msg
         self._session_id = session_id
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main-content"):
-            yield AgentChat(self._client, self._startup_msg, id="agent-chat")
+            yield AgentChat(self._client, id="agent-chat")
             with Vertical(id="sidebar"):
                 yield PortfolioPanel(id="portfolio-panel")
                 yield KBPanel(id="kb-panel")

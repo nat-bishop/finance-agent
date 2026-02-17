@@ -20,21 +20,24 @@ def _hook(hooks, event, idx=0):
 
 async def test_auto_approve_allows_regular_tool(db, session_id):
     pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
-    result = await pre({"tool_name": "mcp__markets__get_market"}, "tid-1", None)
+    result = await pre({"tool_name": "mcp__markets__get_market", "tool_input": {}}, "tid-1", None)
     assert result != {}
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert "updatedInput" not in result["hookSpecificOutput"]
 
 
 async def test_auto_approve_skips_ask_user(db, session_id):
     pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
-    result = await pre({"tool_name": "AskUserQuestion"}, "tid-1", None)
+    result = await pre({"tool_name": "AskUserQuestion", "tool_input": {}}, "tid-1", None)
     assert result == {}
 
 
 async def test_auto_approve_denies_write_to_protected_path(db, session_id):
     pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
     result = await pre(
-        {"tool_name": "Write", "file_path": "/workspace/data/agent.db"}, "tid-1", None
+        {"tool_name": "Write", "tool_input": {"file_path": "/workspace/data/agent.db"}},
+        "tid-1",
+        None,
     )
     assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "/workspace/analysis/" in result["hookSpecificOutput"]["permissionDecisionReason"]
@@ -43,7 +46,9 @@ async def test_auto_approve_denies_write_to_protected_path(db, session_id):
 async def test_auto_approve_allows_write_to_analysis(db, session_id):
     pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
     result = await pre(
-        {"tool_name": "Write", "file_path": "/workspace/analysis/notes.md"}, "tid-1", None
+        {"tool_name": "Write", "tool_input": {"file_path": "/workspace/analysis/notes.md"}},
+        "tid-1",
+        None,
     )
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
@@ -51,7 +56,9 @@ async def test_auto_approve_allows_write_to_analysis(db, session_id):
 async def test_auto_approve_denies_edit_to_scripts(db, session_id):
     pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
     result = await pre(
-        {"tool_name": "Edit", "file_path": "/workspace/scripts/db_utils.py"}, "tid-1", None
+        {"tool_name": "Edit", "tool_input": {"file_path": "/workspace/scripts/db_utils.py"}},
+        "tid-1",
+        None,
     )
     assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
