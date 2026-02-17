@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, delete, event, func, insert, select
+from sqlalchemy import create_engine, delete, event, func, insert, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
 
@@ -64,9 +66,13 @@ class AgentDatabase:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA mmap_size=268435456")  # 256 MB mmap window
+            cursor.execute("PRAGMA cache_size=-131072")  # 128 MB page cache
+            cursor.execute("PRAGMA temp_store=MEMORY")
             cursor.close()
 
         self._session_factory = sessionmaker(bind=self._engine)
+        self._bulk_mode = False
         self._run_migrations()
 
     def _run_migrations(self) -> None:
@@ -86,6 +92,51 @@ class AgentDatabase:
     def close(self) -> None:
         logger.debug("Closing database connection")
         self._engine.dispose()
+
+    def maintenance(self, *, vacuum: bool = False) -> None:
+        """Run database maintenance: update statistics, checkpoint WAL.
+
+        Safe to call while other connections are open (uses PASSIVE checkpoint).
+        Set ``vacuum=True`` only when no other connections are active and
+        sufficient disk space is available (~1x DB size).
+        """
+        import time
+
+        t0 = time.time()
+        conn = self._engine.raw_connection()
+        try:
+            cursor = conn.cursor()
+            # Bound ANALYZE work so first run finishes in seconds, not minutes
+            cursor.execute("PRAGMA analysis_limit=1000")
+            cursor.execute("PRAGMA optimize")
+            # PASSIVE: checkpoint as much as possible without blocking readers
+            cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            row = cursor.fetchone()
+            busy, log_pages, checkpointed = row or (0, 0, 0)
+            cursor.close()
+            conn.commit()
+        finally:
+            conn.close()
+
+        elapsed = time.time() - t0
+        logger.info(
+            "Maintenance: optimize + checkpoint in %.1fs (wal_pages=%d, checkpointed=%d, busy=%d)",
+            elapsed,
+            log_pages,
+            checkpointed,
+            busy,
+        )
+
+        if vacuum:
+            logger.info("Running VACUUM (this may take several minutes)...")
+            t0 = time.time()
+            conn = self._engine.raw_connection()
+            try:
+                conn.execute("VACUUM")
+                conn.commit()
+            finally:
+                conn.close()
+            logger.info("VACUUM completed in %.1fs", time.time() - t0)
 
     # ── Market snapshot queries ─────────────────────────────────
 
@@ -388,6 +439,57 @@ class AgentDatabase:
             session.commit()
         return len(filtered)
 
+    _BULK_CHUNK_SIZE = 50_000
+
+    def insert_kalshi_daily_bulk(self, rows: list[dict[str, Any]]) -> int:
+        """Bulk insert daily Kalshi data, skipping existing rows.
+
+        Uses ``ON CONFLICT DO NOTHING`` — faster than upsert for immutable
+        historical data.  Chunks inserts to keep WAL size bounded.
+
+        When called inside ``bulk_import_mode()``, applies aggressive PRAGMAs
+        directly on the session connection (synchronous=OFF, larger cache).
+        """
+        if not rows:
+            return 0
+        filtered = [{k: v for k, v in row.items() if k in self._DAILY_COLS} for row in rows]
+        stmt = sqlite_insert(KalshiDaily).on_conflict_do_nothing(
+            index_elements=["date", "ticker_name"],
+        )
+        total = 0
+        with self._session_factory() as session:
+            if self._bulk_mode:
+                session.execute(text("PRAGMA synchronous=OFF"))
+                session.execute(text("PRAGMA cache_size=-256000"))
+            try:
+                for i in range(0, len(filtered), self._BULK_CHUNK_SIZE):
+                    chunk = filtered[i : i + self._BULK_CHUNK_SIZE]
+                    session.execute(stmt, chunk)
+                    session.commit()
+                    total += len(chunk)
+            finally:
+                if self._bulk_mode:
+                    session.execute(text("PRAGMA synchronous=FULL"))
+                    session.execute(text("PRAGMA cache_size=-131072"))
+        return total
+
+    @contextmanager
+    def bulk_import_mode(self) -> Generator[None]:
+        """Temporarily enable aggressive PRAGMAs for bulk data import.
+
+        Sets a flag checked by ``insert_kalshi_daily_bulk()`` to apply
+        performance PRAGMAs (synchronous=OFF, larger cache) on the actual
+        session connection doing the work.  Safe for data that can be
+        re-fetched (e.g. S3 backfill).
+        """
+        self._bulk_mode = True
+        logger.info("Bulk import mode enabled")
+        try:
+            yield
+        finally:
+            self._bulk_mode = False
+            logger.info("Bulk import mode disabled")
+
     # ── Kalshi market metadata ───────────────────────────────
 
     def upsert_market_meta(self, rows: list[dict[str, Any]]) -> int:
@@ -418,11 +520,14 @@ class AgentDatabase:
     def get_missing_meta_tickers(self, limit: int = 200) -> list[str]:
         """Return tickers in kalshi_daily that have no kalshi_market_meta row."""
         with self._session_factory() as session:
-            meta_tickers = select(KalshiMarketMeta.ticker)
             stmt = (
                 select(KalshiDaily.ticker_name)
-                .where(KalshiDaily.ticker_name.notin_(meta_tickers))
                 .distinct()
+                .outerjoin(
+                    KalshiMarketMeta,
+                    KalshiDaily.ticker_name == KalshiMarketMeta.ticker,
+                )
+                .where(KalshiMarketMeta.ticker.is_(None))
                 .limit(limit)
             )
             return list(session.scalars(stmt).all())

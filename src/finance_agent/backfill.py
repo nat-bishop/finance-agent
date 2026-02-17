@@ -11,7 +11,9 @@ import http.client
 import json
 import logging
 import ssl
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -24,11 +26,19 @@ _S3_PATH_TEMPLATE = "/reporting/market_data_{date}.json"
 FIRST_AVAILABLE_DATE = date(2021, 6, 30)
 _SSL_CTX = ssl.create_default_context()
 
-_FLUSH_EVERY = 50
+_DEFAULT_MAX_WORKERS = 8
+
+# Set by sync_daily on KeyboardInterrupt; checked by worker threads.
+_shutdown_event = threading.Event()
+
+
+_READ_CHUNK = 4 * 1024 * 1024  # 4 MB per read; check shutdown between chunks
 
 
 def _fetch_daily(d: date) -> list[dict[str, Any]] | None:
-    """Fetch a single day's JSON from S3. Returns None on 404/error."""
+    """Fetch a single day's JSON from S3. Returns None on 404/error/shutdown."""
+    if _shutdown_event.is_set():
+        return None
     path = _S3_PATH_TEMPLATE.format(date=d.isoformat())
     conn = http.client.HTTPSConnection(_S3_HOST, timeout=120, context=_SSL_CTX)
     try:
@@ -40,12 +50,40 @@ def _fetch_daily(d: date) -> list[dict[str, Any]] | None:
         if resp.status != 200:
             logger.warning("HTTP %d fetching %s%s", resp.status, _S3_HOST, path)
             return None
-        return json.loads(resp.read())
+        # Read in chunks so we can bail on shutdown
+        chunks: list[bytes] = []
+        while True:
+            if _shutdown_event.is_set():
+                return None
+            chunk = resp.read(_READ_CHUNK)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks))
     except Exception:
+        if _shutdown_event.is_set():
+            return None
         logger.exception("Error fetching %s%s", _S3_HOST, path)
         return None
     finally:
         conn.close()
+
+
+def _fetch_and_normalise(d: date) -> tuple[date, list[dict[str, Any]], float]:
+    """Fetch a day from S3 and normalise rows. Thread-safe.
+
+    Returns (date, normalised_rows, fetch_seconds).
+    """
+    if _shutdown_event.is_set():
+        return d, [], 0.0
+    logger.info("  Fetching %s ...", d)
+    t0 = time.time()
+    records = _fetch_daily(d)
+    fetch_elapsed = time.time() - t0
+    if not records:
+        return d, [], fetch_elapsed
+    rows = [_normalise_row(r) for r in records]
+    return d, rows, fetch_elapsed
 
 
 def _coerce_int(val: Any) -> int | None:
@@ -74,18 +112,20 @@ def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def sync_daily(db: AgentDatabase) -> int:
+def sync_daily(db: AgentDatabase, max_workers: int = _DEFAULT_MAX_WORKERS) -> int:
     """Sync Kalshi daily data from S3 to SQLite.
 
     Fully dynamic: queries ``MAX(date)`` from the table and fetches only
     missing days through yesterday.  On an empty table this backfills from
     2021-06-30.
 
-    Downloads sequentially (S3 files can be hundreds of MB; parallel downloads
-    saturate bandwidth).  DB inserts are batched for throughput.
+    Downloads in parallel (up to ``max_workers`` concurrent S3 fetches).
+    Results are processed in date order so cancellation always leaves a
+    contiguous prefix — ``MAX(date)`` is correct on the next run.
 
-    Returns total number of rows inserted/updated.
+    Returns total number of rows inserted.
     """
+    _shutdown_event.clear()
     max_date_str = db.get_kalshi_daily_max_date()
     if max_date_str:
         start_date = date.fromisoformat(max_date_str) + timedelta(days=1)
@@ -99,49 +139,62 @@ def sync_daily(db: AgentDatabase) -> int:
         return 0
 
     total_days = (yesterday - start_date).days + 1
+    dates = [start_date + timedelta(days=i) for i in range(total_days)]
     logger.info(
-        "Syncing Kalshi daily data: %s to %s (%d days)",
+        "Syncing Kalshi daily data: %s to %s (%d days, %d workers)",
         start_date,
         yesterday,
         total_days,
+        max_workers,
     )
 
     total_rows = 0
-    pending_rows: list[dict[str, Any]] = []
-    days_in_batch = 0
+    completed = 0
 
-    for i in range(total_days):
-        current = start_date + timedelta(days=i)
-        logger.info("  Fetching %s [%d/%d]...", current, i + 1, total_days)
-        t0 = time.time()
-        records = _fetch_daily(current)
-        elapsed = time.time() - t0
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    with db.bulk_import_mode():
+        # Submit all days; iterate in date order so cancellation leaves
+        # a contiguous prefix (workers still fetch in parallel).
+        futures = [pool.submit(_fetch_and_normalise, d) for d in dates]
 
-        if records:
-            pending_rows.extend(_normalise_row(r) for r in records)
-            size_mb = len(json.dumps(records).encode()) / 1_048_576
-            logger.info(
-                "  %s: %d records (%.0f MB, %.1fs) [%d/%d]",
-                current,
-                len(records),
-                size_mb,
-                elapsed,
-                i + 1,
-                total_days,
-            )
+        try:
+            for future in futures:
+                d, rows, fetch_elapsed = future.result()
+                completed += 1
+
+                if rows:
+                    t0 = time.time()
+                    inserted = db.insert_kalshi_daily_bulk(rows)
+                    insert_elapsed = time.time() - t0
+                    total_rows += inserted
+                    logger.info(
+                        "  %s: %d records, fetch=%.1fs insert=%.1fs [%d/%d]",
+                        d,
+                        len(rows),
+                        fetch_elapsed,
+                        insert_elapsed,
+                        completed,
+                        total_days,
+                    )
+                else:
+                    logger.info(
+                        "  %s: no data, fetch=%.1fs [%d/%d]",
+                        d,
+                        fetch_elapsed,
+                        completed,
+                        total_days,
+                    )
+        except KeyboardInterrupt:
+            logger.info("Interrupted — stopping workers...")
+            _shutdown_event.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+            logger.info("Saved %d rows across %d days before interruption", total_rows, completed)
+            return total_rows
         else:
-            logger.info("  %s: no data (%.1fs) [%d/%d]", current, elapsed, i + 1, total_days)
+            pool.shutdown(wait=False)
 
-        days_in_batch += 1
-
-        # Flush to DB periodically
-        if days_in_batch >= _FLUSH_EVERY or i == total_days - 1:
-            if pending_rows:
-                inserted = db.insert_kalshi_daily(pending_rows)
-                total_rows += inserted
-                logger.info("  Flushed %d rows to DB", inserted)
-                pending_rows = []
-            days_in_batch = 0
+    # Checkpoint WAL and update query planner statistics
+    db.maintenance()
 
     logger.info("Daily sync complete: %d total rows across %d days", total_rows, total_days)
     return total_rows

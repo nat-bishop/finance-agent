@@ -300,6 +300,9 @@ async def _run_collector_async() -> None:
         # Purge old snapshots
         db.purge_old_snapshots(trading_config.snapshot_retention_days)
 
+        # Checkpoint WAL and update query planner statistics
+        db.maintenance()
+
         elapsed = time.time() - start
         logger.info("Collection complete in %.1fs", elapsed)
         logger.info("  Kalshi: %d events (%d markets)", k_events, k_markets)
