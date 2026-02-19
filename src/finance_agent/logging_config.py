@@ -17,6 +17,7 @@ def setup_logging(
     log_file: str | Path | None = None,
     fmt: str = "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     datefmt: str = "%Y-%m-%d %H:%M:%S",
+    console: bool = True,
 ) -> None:
     """Configure the root logger with console and optional file handlers.
 
@@ -25,6 +26,8 @@ def setup_logging(
         log_file: Optional path to a log file. Parent dirs are created.
         fmt: Log format string.
         datefmt: Date format for timestamps.
+        console: If True, add stderr handler. Set False for TUI mode
+            (stderr writes corrupt Textual's alternate screen buffer).
     """
     root = logging.getLogger()
 
@@ -35,11 +38,11 @@ def setup_logging(
     root.setLevel(level)
     formatter = logging.Formatter(fmt, datefmt=datefmt)
 
-    # Console handler (stderr so it doesn't mix with stdout data output)
-    console = logging.StreamHandler(sys.stderr)
-    console.setLevel(level)
-    console.setFormatter(formatter)
-    root.addHandler(console)
+    if console:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setLevel(level)
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
 
     # Optional file handler
     if log_file:

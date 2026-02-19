@@ -18,8 +18,9 @@ class HistoryScreen(Screen):
 
     BINDINGS: ClassVar[list] = [
         ("f1", "app.switch_screen('dashboard')", "Chat"),
-        ("f2", "app.switch_screen('recommendations')", "Recs"),
-        ("f3", "app.switch_screen('portfolio')", "Portfolio"),
+        ("f2", "app.switch_screen('knowledge_base')", "KB"),
+        ("f3", "app.switch_screen('recommendations')", "Recs"),
+        ("f4", "app.switch_screen('portfolio')", "Portfolio"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
     ]
 

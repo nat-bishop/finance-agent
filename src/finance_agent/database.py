@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,10 +63,22 @@ class AgentDatabase:
         @event.listens_for(self._engine, "connect")
         def _set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
+            # EXCLUSIVE locking stores WAL index in heap memory instead of
+            # a shared-memory file, avoiding mmap — required for Docker
+            # bind mounts on Windows/Mac where POSIX locking is unsupported.
+            cursor.execute("PRAGMA locking_mode=EXCLUSIVE")
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                logger.warning("WAL mode unavailable, falling back to DELETE journal")
+                try:
+                    cursor.execute("PRAGMA journal_mode=DELETE")
+                except Exception:
+                    logger.warning("Could not set journal mode, using database default")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=30000")
-            cursor.execute("PRAGMA mmap_size=268435456")  # 256 MB mmap window
+            with suppress(Exception):
+                cursor.execute("PRAGMA mmap_size=268435456")  # 256 MB mmap window
             cursor.execute("PRAGMA cache_size=-131072")  # 128 MB page cache
             cursor.execute("PRAGMA temp_store=MEMORY")
             cursor.close()

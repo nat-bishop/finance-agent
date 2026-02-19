@@ -48,7 +48,7 @@ def main() -> None:
     from .tui.app import FinanceApp
 
     _, _, trading_config = load_configs()
-    setup_logging(log_file=trading_config.log_file or None)
+    setup_logging(log_file=trading_config.log_file or None, console=False)
     app = FinanceApp()
     app.run()
 

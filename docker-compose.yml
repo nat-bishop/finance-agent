@@ -6,10 +6,13 @@ services:
       - FA_DB_PATH=/app/state/agent.db
       - FA_BACKUP_DIR=/app/state/backups
       - FA_LOG_FILE=/app/state/agent.log
+      - KALSHI_PRIVATE_KEY_PATH=/workspace/keys/private_key.pem
     volumes:
       - ./workspace/data:/workspace/data:ro
       - ./workspace/data:/app/state
       - ./workspace/analysis:/workspace/analysis
+      - ./.git:/app/repo/.git
+      - ./workspace/analysis:/app/repo/workspace/analysis
       - ~/.kalshi/private_key.pem:/workspace/keys/private_key.pem:ro
       - ~/.claude/.credentials.json:/root/.claude/.credentials.json:ro
     stdin_open: true

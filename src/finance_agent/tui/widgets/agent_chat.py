@@ -15,28 +15,59 @@ from claude_agent_sdk import (
 )
 from rich.markdown import Markdown
 from textual.app import ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Input, RichLog
+from textual.containers import Horizontal, Vertical
+from textual.reactive import reactive
+from textual.timer import Timer
+from textual.widgets import Button, Input, RichLog
 
 from ..messages import AgentCostUpdate, AgentResponseComplete
 
 logger = logging.getLogger(__name__)
 
+_THINKING_FRAMES = ["Working .", "Working ..", "Working ..."]
+
 
 class AgentChat(Vertical):
-    """Agent chat pane: RichLog for output + Input for user messages."""
+    """Agent chat pane: RichLog for output + Input/buttons for user messages."""
 
-    def __init__(
-        self,
-        client: ClaudeSDKClient,
-        **kwargs: Any,
-    ) -> None:
+    _streaming: reactive[bool] = reactive(False)
+
+    def __init__(self, client: ClaudeSDKClient, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._client = client
+        self._tick_timer: Timer | None = None
+        self._frame_idx: int = 0
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=True, highlight=True)
-        yield Input(placeholder="Type a message...", id="chat-input")
+        with Horizontal(id="chat-input-row"):
+            yield Input(placeholder="Type a message...", id="chat-input")
+            yield Button("Stop", id="stop-btn", variant="error")
+            yield Button("Reset", id="reset-btn", variant="warning")
+
+    # ── Reactive watcher ──────────────────────────────────────────
+
+    def watch__streaming(self, streaming: bool) -> None:
+        inp = self.query_one("#chat-input", Input)
+        stop_btn = self.query_one("#stop-btn", Button)
+        inp.disabled = streaming
+        stop_btn.display = streaming
+        if streaming:
+            self._frame_idx = 0
+            self._tick_timer = self.set_interval(0.5, self._tick_placeholder)
+        else:
+            if self._tick_timer:
+                self._tick_timer.stop()
+                self._tick_timer = None
+            inp.placeholder = "Type a message..."
+            inp.focus()
+
+    def _tick_placeholder(self) -> None:
+        inp = self.query_one("#chat-input", Input)
+        inp.placeholder = _THINKING_FRAMES[self._frame_idx % len(_THINKING_FRAMES)]
+        self._frame_idx += 1
+
+    # ── Input handler ─────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -48,19 +79,39 @@ class AgentChat(Vertical):
         logger.info("User: %s", text)
         self.run_worker(self._send_and_stream(text), exclusive=True)
 
+    # ── Button handlers ───────────────────────────────────────────
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "stop-btn":
+            event.stop()
+            log = self.query_one("#chat-log", RichLog)
+            log.write("[bold yellow]Interrupting agent...[/]")
+            try:
+                await self._client.interrupt()
+            except Exception as exc:
+                log.write(f"[bold red]Could not interrupt: {exc}[/]")
+
+        elif event.button.id == "reset-btn":
+            event.stop()
+            await self.app.run_action("reset_session")
+
+    # ── Reset ─────────────────────────────────────────────────────
+
     def reset(self, client: ClaudeSDKClient) -> None:
         """Reset chat state for a new session."""
         self._client = client
+        self._streaming = False
         self.query_one("#chat-log", RichLog).clear()
         self.query_one("#chat-input", Input).clear()
 
-    async def _send_and_stream(self, message: str) -> None:
-        chat_input = self.query_one("#chat-input", Input)
-        chat_input.disabled = True
+    # ── Streaming ─────────────────────────────────────────────────
 
+    async def _send_and_stream(self, message: str) -> None:
+        self._streaming = True
         log = self.query_one("#chat-log", RichLog)
         try:
             await self._client.query(message)
+            got_result = False
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
@@ -88,16 +139,20 @@ class AgentChat(Vertical):
                                     preview,
                                 )
                 elif isinstance(msg, ResultMessage):
+                    got_result = True
                     if msg.total_cost_usd is not None:
                         logger.info("Session cost: $%.4f", msg.total_cost_usd)
                         self.post_message(AgentCostUpdate(msg.total_cost_usd))
                     if msg.is_error:
                         logger.error("Agent result error: %s", msg.result)
                         log.write(f"[bold red]Error: {msg.result}[/]")
+            if not got_result:
+                log.write(
+                    "[bold yellow]Warning: agent response ended without a result — try again.[/]"
+                )
         except Exception as exc:
             logger.exception("Agent streaming error")
             log.write(f"[bold red]Agent error: {exc}[/]")
         finally:
-            chat_input.disabled = False
-            chat_input.focus()
+            self._streaming = False
             self.post_message(AgentResponseComplete())

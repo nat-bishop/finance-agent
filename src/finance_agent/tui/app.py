@@ -25,6 +25,7 @@ from ..tools import create_db_tools, create_market_tools
 from .messages import AskUserQuestionRequest, RecommendationCreated
 from .screens.dashboard import DashboardScreen
 from .screens.history import HistoryScreen
+from .screens.knowledge_base import KnowledgeBaseScreen
 from .screens.portfolio import PortfolioScreen
 from .screens.recommendations import RecommendationsScreen
 from .services import TUIServices
@@ -132,6 +133,7 @@ class FinanceApp(App):
                 services=services,
                 session_id=session_id,
             ),
+            "knowledge_base": KnowledgeBaseScreen(),
             "recommendations": RecommendationsScreen(services=services),
             "portfolio": PortfolioScreen(services=services),
             "history": HistoryScreen(services=services),

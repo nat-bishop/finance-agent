@@ -29,10 +29,25 @@ Screen {
     scrollbar-size: 1 1;
 }
 
-#chat-input {
+#chat-input-row {
     dock: bottom;
     height: 3;
     border-top: solid $accent;
+}
+
+#chat-input {
+    width: 1fr;
+}
+
+#stop-btn {
+    width: auto;
+    min-width: 8;
+    display: none;
+}
+
+#reset-btn {
+    width: auto;
+    min-width: 10;
 }
 
 /* Status bar */
@@ -57,13 +72,32 @@ PortfolioPanel .portfolio-title {
     margin-bottom: 1;
 }
 
-/* Knowledge base panel */
-KBPanel {
-    height: auto;
-    max-height: 20;
+/* Knowledge base screen */
+KnowledgeBaseScreen {
+    layout: vertical;
+}
+
+#kb-version-banner {
+    display: none;
+    height: 1;
+    background: $warning;
+    color: $text;
+    padding: 0 1;
+}
+
+#kb-content-scroll {
+    height: 1fr;
     padding: 1;
-    border: solid $success;
-    margin: 0 0 1 0;
+}
+
+#kb-versions-title {
+    padding: 0 1;
+    text-style: bold;
+}
+
+#kb-versions-table {
+    height: auto;
+    max-height: 12;
 }
 
 /* Rec cards */

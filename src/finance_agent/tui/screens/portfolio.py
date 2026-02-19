@@ -21,8 +21,9 @@ class PortfolioScreen(Screen):
 
     BINDINGS: ClassVar[list] = [
         ("f1", "app.switch_screen('dashboard')", "Chat"),
-        ("f2", "app.switch_screen('recommendations')", "Recs"),
-        ("f4", "app.switch_screen('history')", "History"),
+        ("f2", "app.switch_screen('knowledge_base')", "KB"),
+        ("f3", "app.switch_screen('recommendations')", "Recs"),
+        ("f5", "app.switch_screen('history')", "History"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
         ("r", "refresh", "Refresh"),
     ]

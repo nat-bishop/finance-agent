@@ -4,7 +4,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # System deps for scipy/numpy wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ && \
+    gcc g++ git && \
     rm -rf /var/lib/apt/lists/*
 
 # Install claude-code CLI (bundled by SDK)

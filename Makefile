@@ -3,6 +3,7 @@
 # ── Docker ───────────────────────────────────────────────────
 
 up:
+	@uv run python -c "import sqlite3, pathlib; p='workspace/data/agent.db'; pathlib.Path(p).exists() and (c:=sqlite3.connect(p)) and (c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close())" 2>/dev/null || true
 	docker compose run --build --rm agent
 
 down:

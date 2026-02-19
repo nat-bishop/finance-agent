@@ -20,7 +20,6 @@ from ..messages import (
 )
 from ..services import TUIServices
 from ..widgets.agent_chat import AgentChat
-from ..widgets.kb_panel import KBPanel
 from ..widgets.portfolio_panel import PortfolioPanel
 from ..widgets.rec_list import RecList
 from ..widgets.status_bar import StatusBar
@@ -32,9 +31,10 @@ class DashboardScreen(Screen):
     """Primary screen: agent chat + portfolio/recs sidebar."""
 
     BINDINGS: ClassVar[list] = [
-        ("f2", "app.switch_screen('recommendations')", "Recs"),
-        ("f3", "app.switch_screen('portfolio')", "Portfolio"),
-        ("f4", "app.switch_screen('history')", "History"),
+        ("f2", "app.switch_screen('knowledge_base')", "KB"),
+        ("f3", "app.switch_screen('recommendations')", "Recs"),
+        ("f4", "app.switch_screen('portfolio')", "Portfolio"),
+        ("f5", "app.switch_screen('history')", "History"),
         ("ctrl+l", "app.reset_session", "Reset"),
     ]
 
@@ -55,7 +55,6 @@ class DashboardScreen(Screen):
             yield AgentChat(self._client, id="agent-chat")
             with Vertical(id="sidebar"):
                 yield PortfolioPanel(id="portfolio-panel")
-                yield KBPanel(id="kb-panel")
                 yield RecList(id="rec-list")
         yield StatusBar(id="status-bar")
 
@@ -76,11 +75,6 @@ class DashboardScreen(Screen):
             logger.debug("Failed to refresh portfolio", exc_info=True)
 
         try:
-            self.query_one("#kb-panel", KBPanel).refresh_content()
-        except Exception:
-            logger.debug("Failed to refresh knowledge base", exc_info=True)
-
-        try:
             groups = self._services.get_pending_groups()
             self.query_one("#rec-list", RecList).update_recs(groups)
         except Exception:
@@ -98,8 +92,7 @@ class DashboardScreen(Screen):
     def on_recommendation_created(self, event: RecommendationCreated) -> None:
         bar = self.query_one("#status-bar", StatusBar)
         bar.rec_count += 1
-        groups = self._services.get_pending_groups()
-        self.query_one("#rec-list", RecList).update_recs(groups)
+        self.run_worker(self._refresh_sidebar())
 
     def on_recommendation_executed(self, event: RecommendationExecuted) -> None:
         self.run_worker(self._refresh_sidebar())

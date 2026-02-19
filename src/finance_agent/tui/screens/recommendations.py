@@ -22,8 +22,9 @@ class RecommendationsScreen(Screen):
 
     BINDINGS: ClassVar[list] = [
         ("f1", "app.switch_screen('dashboard')", "Chat"),
-        ("f3", "app.switch_screen('portfolio')", "Portfolio"),
-        ("f4", "app.switch_screen('history')", "History"),
+        ("f2", "app.switch_screen('knowledge_base')", "KB"),
+        ("f4", "app.switch_screen('portfolio')", "Portfolio"),
+        ("f5", "app.switch_screen('history')", "History"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
     ]
 
