@@ -108,13 +108,6 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     started_at: Mapped[str] = mapped_column(Text, nullable=False)
-    ended_at: Mapped[str | None] = mapped_column(Text)
-    summary: Mapped[str | None] = mapped_column(Text)
-    trades_placed: Mapped[int] = mapped_column(Integer, server_default="0")
-    recommendations_made: Mapped[int] = mapped_column(Integer, server_default="0")
-    pnl_usd: Mapped[float | None] = mapped_column(Float)
-
-    __table_args__ = (Index("idx_sessions_ended_at", "ended_at"),)
 
 
 # ── Recommendation Groups ────────────────────────────────────
@@ -137,6 +130,7 @@ class RecommendationGroup(Base):
     computed_edge_pct: Mapped[float | None] = mapped_column(Float)
     computed_fees_usd: Mapped[float | None] = mapped_column(Float)
     strategy: Mapped[str | None] = mapped_column(Text, server_default=STRATEGY_BRACKET)
+    hypothetical_pnl_usd: Mapped[float | None] = mapped_column(Float)
 
     legs: Mapped[list[RecommendationLeg]] = relationship(
         back_populates="group",
@@ -183,6 +177,8 @@ class RecommendationLeg(Base):
     fill_price_cents: Mapped[int | None] = mapped_column(Integer)
     fill_quantity: Mapped[int | None] = mapped_column(Integer)
     orderbook_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    settlement_value: Mapped[int | None] = mapped_column(Integer)
+    settled_at: Mapped[str | None] = mapped_column(Text)
 
     group: Mapped[RecommendationGroup] = relationship(back_populates="legs")
 

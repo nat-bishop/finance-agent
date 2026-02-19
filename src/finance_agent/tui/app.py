@@ -26,6 +26,7 @@ from .messages import AskUserQuestionRequest, RecommendationCreated
 from .screens.dashboard import DashboardScreen
 from .screens.history import HistoryScreen
 from .screens.knowledge_base import KnowledgeBaseScreen
+from .screens.performance import PerformanceScreen
 from .screens.portfolio import PortfolioScreen
 from .screens.recommendations import RecommendationsScreen
 from .services import TUIServices
@@ -44,6 +45,7 @@ class FinanceApp(App):
 
     BINDINGS: ClassVar[list] = [
         ("f1", "switch_screen('dashboard')", "Chat"),
+        ("f6", "switch_screen('performance')", "P&L"),
     ]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -137,6 +139,7 @@ class FinanceApp(App):
             "recommendations": RecommendationsScreen(services=services),
             "portfolio": PortfolioScreen(services=services),
             "history": HistoryScreen(services=services),
+            "performance": PerformanceScreen(services=services),
         }
         for name, screen in screens.items():
             self.install_screen(screen, name=name)
@@ -148,7 +151,7 @@ class FinanceApp(App):
         if not db:
             return ""
 
-        session_state = db.get_session_state()
+        session_state = db.get_session_state(current_session_id=self._session_id)
         kb = _KB_PATH.read_text(encoding="utf-8") if _KB_PATH.exists() else ""
 
         portfolio: dict[str, Any] | None = None
@@ -202,8 +205,6 @@ class FinanceApp(App):
             for key, tools in mcp_tools.items()
         }
         hooks = create_audit_hooks(
-            db=db,
-            session_id=session_id,
             on_recommendation=lambda: self.post_message(RecommendationCreated()) or None,  # type: ignore[arg-type]
         )
         options = build_options(
@@ -216,69 +217,43 @@ class FinanceApp(App):
         )
         return ClaudeSDKClient(options=options)
 
-    async def action_reset_session(self) -> None:
-        """Reset the agent session: new client, new DB session, clear UI."""
-        if not self._db:
+    async def action_clear_chat(self) -> None:
+        """Clear the chat UI and reset the SDK conversation (same DB session)."""
+        if not self._db or not self._session_id:
             return
-
-        # End current session
-        if self._session_id:
-            with contextlib.suppress(Exception):
-                self._db.end_session(
-                    self._session_id,
-                    summary="Reset by user",
-                    recommendations_made=0,
-                )
 
         # Disconnect old client
         if self._client:
             with contextlib.suppress(Exception):
                 await self._client.__aexit__(None, None, None)
+            self._client = None
 
-        # New DB session
-        session_id = self._db.create_session()
-        self._session_id = session_id
-        if self._services:
-            self._services._session_id = session_id
-
-        # New SDK client with fresh session context
+        # New SDK client with fresh conversation (same session)
         session_context = await self._build_session_context()
-        client = self._build_client(session_id, session_context=session_context)
+        client = self._build_client(self._session_id, session_context=session_context)
         await client.__aenter__()
         self._client = client
 
-        # Reset widgets in-place
+        # Clear chat widget, point it at new client
         dashboard: DashboardScreen = self.get_screen("dashboard")  # type: ignore[assignment]
         dashboard._client = client
-        dashboard._session_id = session_id
         dashboard.query_one("#agent-chat", AgentChat).reset(client)
         bar = dashboard.query_one("#status-bar", StatusBar)
-        bar.session_id = session_id
         bar.total_cost = 0.0
-        bar.rec_count = 0
 
-        logger.info("Session reset — new session: %s", session_id)
+        logger.info("Chat cleared — conversation reset for session %s", self._session_id)
 
     async def on_unmount(self) -> None:
         """Clean up SDK client, session state, and database."""
         if self._client:
-            with contextlib.suppress(Exception):
-                await self._client.__aexit__(None, None, None)
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(
+                    self._client.__aexit__(None, None, None),
+                    timeout=5.0,
+                )
         if self._services and self._services._fill_monitor:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(BaseException):
                 await self._services._fill_monitor.close()
-        if self._db and self._session_id:
-            with contextlib.suppress(Exception):
-                # Only end session if not already ended by the Stop hook
-                from ..models import Session
-
-                with self._db._session_factory() as sess:
-                    row = sess.get(Session, self._session_id)
-                    if row and row.ended_at is None:
-                        self._db.end_session(
-                            self._session_id,
-                            summary="App closed",
-                            recommendations_made=0,
-                        )
         if self._db:
-            self._db.close()
+            with contextlib.suppress(BaseException):
+                self._db.close()

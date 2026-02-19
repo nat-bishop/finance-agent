@@ -22,7 +22,7 @@ def test_trading_config_defaults():
     assert config.kalshi_max_position_usd == 100.0
     assert config.max_portfolio_usd == 1000.0
     assert config.max_order_count == 50
-    assert config.min_edge_pct == 7.0
+    assert config.min_edge_pct == 1.0
     assert config.execution_timeout_seconds == 300
     assert config.max_slippage_cents == 3
 
@@ -75,7 +75,7 @@ def test_build_system_prompt_substitutes():
     config = TradingConfig()
     prompt = build_system_prompt(config)
     assert "100.0" in prompt  # KALSHI_MAX_POSITION_USD
-    assert "7.0" in prompt  # MIN_EDGE_PCT
+    assert "1.0" in prompt  # MIN_EDGE_PCT
 
 
 def test_build_system_prompt_no_unresolved_placeholders():

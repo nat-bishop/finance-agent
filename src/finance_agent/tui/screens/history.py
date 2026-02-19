@@ -21,6 +21,7 @@ class HistoryScreen(Screen):
         ("f2", "app.switch_screen('knowledge_base')", "KB"),
         ("f3", "app.switch_screen('recommendations')", "Recs"),
         ("f4", "app.switch_screen('portfolio')", "Portfolio"),
+        ("f6", "app.switch_screen('performance')", "P&L"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
     ]
 
@@ -42,7 +43,7 @@ class HistoryScreen(Screen):
 
     async def on_mount(self) -> None:
         sess_table = self.query_one("#sessions-table", DataTable)
-        sess_table.add_columns("ID", "Started", "Ended", "Trades", "Recs", "PnL", "Summary")
+        sess_table.add_columns("ID", "Started", "Recs", "Trades")
         sess_table.cursor_type = "row"
 
         # Detail tables
@@ -63,17 +64,11 @@ class HistoryScreen(Screen):
 
         for sess in sessions:
             started = str(sess.get("started_at", ""))[:16]
-            ended = str(sess.get("ended_at", ""))[:16] if sess.get("ended_at") else "running"
-            pnl = f"${sess['pnl_usd']:.2f}" if sess.get("pnl_usd") is not None else ""
-            summary = str(sess.get("summary", ""))[:30]
             table.add_row(
                 str(sess.get("id", "")),
                 started,
-                ended,
-                str(sess.get("trades_placed", 0)),
                 str(sess.get("recommendations_made", 0)),
-                pnl,
-                summary,
+                str(sess.get("trades_placed", 0)),
             )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:

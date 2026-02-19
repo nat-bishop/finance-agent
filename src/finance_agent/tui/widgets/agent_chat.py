@@ -43,7 +43,7 @@ class AgentChat(Vertical):
         with Horizontal(id="chat-input-row"):
             yield Input(placeholder="Type a message...", id="chat-input")
             yield Button("Stop", id="stop-btn", variant="error")
-            yield Button("Reset", id="reset-btn", variant="warning")
+            yield Button("Clear", id="clear-btn", variant="warning")
 
     # ── Reactive watcher ──────────────────────────────────────────
 
@@ -91,9 +91,9 @@ class AgentChat(Vertical):
             except Exception as exc:
                 log.write(f"[bold red]Could not interrupt: {exc}[/]")
 
-        elif event.button.id == "reset-btn":
+        elif event.button.id == "clear-btn":
             event.stop()
-            await self.app.run_action("reset_session")
+            await self.app.run_action("clear_chat")
 
     # ── Reset ─────────────────────────────────────────────────────
 

@@ -31,7 +31,7 @@ class TradingConfig:
     kalshi_max_position_usd: float = 100.0
     max_portfolio_usd: float = 1000.0
     max_order_count: int = 50
-    min_edge_pct: float = 7.0
+    min_edge_pct: float = 1.0
 
     # Paths: defaults are local (./workspace/*); Docker sets env overrides via FA_* env vars
     db_path: str = "workspace/data/agent.db"

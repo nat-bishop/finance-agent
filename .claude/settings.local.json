@@ -46,7 +46,8 @@
       "Bash(find:*)",
       "Bash(uv sync:*)",
       "Bash(uv add:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git status:*)"
     ]
   },
   "hooks": {

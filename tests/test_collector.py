@@ -14,6 +14,7 @@ from finance_agent.collector import (
     _generate_markets_jsonl,
     _parse_days_to_expiry,
     collect_kalshi,
+    resolve_settlements,
 )
 
 # ── _parse_days_to_expiry ────────────────────────────────────────
@@ -282,3 +283,130 @@ def test_generate_markets_jsonl(db, sample_market_snapshot, tmp_path):
     assert kalshi_rec["event_title"] == "Test Event Title"
     assert kalshi_rec["mutually_exclusive"] is True
     assert kalshi_rec["description"] == "Resolves Yes if X happens."
+
+
+# ── resolve_settlements ─────────────────────────────────────────
+
+
+async def test_resolve_settlements_settles_leg(db, session_id, mock_kalshi):
+    """Settled market updates recommendation leg."""
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test bracket",
+        estimated_edge_pct=8.0,
+        strategy="bracket",
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-SETTLED",
+                "market_title": "Test",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-PENDING",
+                "market_title": "Test 2",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 50,
+            },
+        ],
+    )
+
+    async def mock_get_market(ticker):
+        if ticker == "K-SETTLED":
+            return {"market": {"ticker": ticker, "settlement_value": 100}}
+        return {"market": {"ticker": ticker}}
+
+    mock_kalshi.get_market = AsyncMock(side_effect=mock_get_market)
+
+    count = await resolve_settlements(mock_kalshi, db)
+    assert count == 1  # Only K-SETTLED resolved
+
+
+async def test_resolve_settlements_computes_pnl(db, session_id, mock_kalshi):
+    """When all legs settle, P&L is computed automatically."""
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test bracket",
+        estimated_edge_pct=8.0,
+        strategy="bracket",
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "market_title": "Leg 1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-2",
+                "market_title": "Leg 2",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-3",
+                "market_title": "Leg 3",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
+            },
+        ],
+    )
+
+    async def mock_get_market(ticker):
+        return {"market": {"ticker": ticker, "settlement_value": 100}}
+
+    mock_kalshi.get_market = AsyncMock(side_effect=mock_get_market)
+
+    await resolve_settlements(mock_kalshi, db)
+
+    group = db.get_group(group_id)
+    assert group["hypothetical_pnl_usd"] is not None
+    assert group["hypothetical_pnl_usd"] > 0  # 90c cost for 100c payout
+
+
+async def test_resolve_settlements_handles_404(db, session_id, mock_kalshi):
+    """Markets that error are skipped gracefully."""
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-GONE",
+                "market_title": "Delisted",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+        ],
+    )
+    mock_kalshi.get_market = AsyncMock(side_effect=Exception("404 Not Found"))
+
+    count = await resolve_settlements(mock_kalshi, db)
+    assert count == 0  # No legs settled
+
+    tickers = db.get_unresolved_leg_tickers()
+    assert "K-GONE" in tickers  # Still unresolved
+
+
+async def test_resolve_settlements_no_tickers(db, mock_kalshi):
+    """No unresolved tickers → no API calls."""
+    count = await resolve_settlements(mock_kalshi, db)
+    assert count == 0
+    mock_kalshi.get_market.assert_not_called()

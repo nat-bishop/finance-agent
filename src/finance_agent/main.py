@@ -5,10 +5,31 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+# TODO(nat): remove once claude-agent-sdk handles rate_limit_event natively  # noqa: TD003
+# SDK 0.1.38 parser crashes on unknown message types from the bundled CLI.
+import claude_agent_sdk._internal.message_parser as _mp
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk.types import HookEvent, HookMatcher
 
-from .config import build_system_prompt
+_original_parse = _mp.parse_message
+
+
+def _tolerant_parse(data):  # type: ignore[no-untyped-def]
+    try:
+        return _original_parse(data)
+    except _mp.MessageParseError as e:
+        if "Unknown message type" in str(e):
+            return None
+        raise
+
+
+_mp.parse_message = _tolerant_parse
+import claude_agent_sdk.client as _client_mod  # noqa: E402
+
+if hasattr(_client_mod, "parse_message"):
+    _client_mod.parse_message = _tolerant_parse
+
+from .config import build_system_prompt  # noqa: E402
 
 # ── Build SDK options ─────────────────────────────────────────────
 

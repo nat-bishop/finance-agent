@@ -52,27 +52,20 @@ def test_create_session_stores_started_at(db):
     assert row["started_at"] is not None
 
 
-def test_end_session_sets_fields(db, session_id):
-    db.end_session(
-        session_id,
-        summary="Test summary",
-        trades_placed=5,
-        recommendations_made=3,
-        pnl_usd=12.50,
-    )
-    r = get_row(db, Session, session_id)
-    assert r["ended_at"] is not None
-    assert r["summary"] == "Test summary"
-    assert r["trades_placed"] == 5
-    assert r["recommendations_made"] == 3
-    assert r["pnl_usd"] == 12.50
-
-
 def test_get_sessions(db):
     db.create_session()
     db.create_session()
     sessions = db.get_sessions()
     assert len(sessions) == 2
+
+
+def test_get_sessions_derived_counts(db, session_id):
+    """get_sessions returns rec and trade counts derived from related tables."""
+    db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
+    sessions = db.get_sessions()
+    sess = next(s for s in sessions if s["id"] == session_id)
+    assert sess["trades_placed"] == 1
+    assert sess["recommendations_made"] == 0
 
 
 # ── Trades ───────────────────────────────────────────────────────
@@ -331,6 +324,233 @@ def test_get_recommendations_with_filter(db, session_id):
     assert len(recs_empty) == 0
 
 
+# ── Settlement tracking ──────────────────────────────────────────
+
+
+def test_get_unresolved_leg_tickers_empty(db):
+    assert db.get_unresolved_leg_tickers() == []
+
+
+def test_get_unresolved_leg_tickers(db, session_id):
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-2",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 50,
+            },
+        ],
+    )
+    tickers = db.get_unresolved_leg_tickers()
+    assert set(tickers) == {"K-1", "K-2"}
+
+
+def test_get_unresolved_deduplicates(db, session_id):
+    """Same ticker in multiple groups returns only once."""
+    for _ in range(2):
+        db.log_recommendation_group(
+            session_id=session_id,
+            thesis="Test",
+            estimated_edge_pct=5.0,
+            legs=[
+                {
+                    "exchange": "kalshi",
+                    "market_id": "K-SAME",
+                    "action": "buy",
+                    "side": "yes",
+                    "quantity": 10,
+                    "price_cents": 45,
+                },
+            ],
+        )
+    tickers = db.get_unresolved_leg_tickers()
+    assert tickers.count("K-SAME") == 1
+
+
+def test_settle_legs(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+        ],
+    )
+    count = db.settle_legs("K-1", 100)
+    assert count == 1
+    group = db.get_group(group_id)
+    assert group["legs"][0]["settlement_value"] == 100
+    assert group["legs"][0]["settled_at"] is not None
+
+
+def test_settle_legs_idempotent(db, session_id):
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+        ],
+    )
+    assert db.settle_legs("K-1", 100) == 1
+    assert db.settle_legs("K-1", 100) == 0  # Already settled
+
+
+def test_get_groups_pending_pnl_not_ready(db, session_id):
+    """Group with unsettled legs should not appear."""
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-2",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 50,
+            },
+        ],
+    )
+    db.settle_legs("K-1", 100)  # Only one leg settled
+    assert len(db.get_groups_pending_pnl()) == 0
+
+
+def test_get_groups_pending_pnl_ready(db, session_id):
+    """Group with all legs settled and no P&L computed should appear."""
+    db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-2",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 50,
+            },
+        ],
+    )
+    db.settle_legs("K-1", 100)
+    db.settle_legs("K-2", 0)
+    groups = db.get_groups_pending_pnl()
+    assert len(groups) == 1
+
+
+def test_update_group_pnl(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test",
+        estimated_edge_pct=5.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 45,
+            },
+        ],
+    )
+    db.update_group_pnl(group_id, 1.5)
+    group = db.get_group(group_id)
+    assert group["hypothetical_pnl_usd"] == 1.5
+
+
+def test_get_performance_summary_empty(db):
+    perf = db.get_performance_summary()
+    assert perf["total_pnl_usd"] == 0
+    assert perf["total_settled"] == 0
+    assert perf["wins"] == 0
+    assert perf["losses"] == 0
+    assert perf["settled_groups"] == []
+    assert perf["pending_groups"] == []
+
+
+def test_get_performance_summary_with_data(db, session_id):
+    group_id, _ = db.log_recommendation_group(
+        session_id=session_id,
+        thesis="Test bracket",
+        estimated_edge_pct=8.0,
+        total_exposure_usd=50.0,
+        legs=[
+            {
+                "exchange": "kalshi",
+                "market_id": "K-1",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
+            },
+            {
+                "exchange": "kalshi",
+                "market_id": "K-2",
+                "action": "buy",
+                "side": "yes",
+                "quantity": 10,
+                "price_cents": 30,
+            },
+        ],
+    )
+    db.settle_legs("K-1", 100)
+    db.settle_legs("K-2", 0)
+    db.update_group_pnl(group_id, 0.85)
+    perf = db.get_performance_summary()
+    assert perf["total_settled"] == 1
+    assert perf["wins"] == 1
+    assert perf["total_pnl_usd"] == 0.85
+    assert len(perf["settled_groups"]) == 1
+    assert len(perf["pending_groups"]) == 0
+
+
 # ── Market snapshots ─────────────────────────────────────────────
 
 
@@ -390,11 +610,20 @@ def test_get_session_state_empty_db(db):
     assert state["unreconciled_trades"] == []
 
 
-def test_get_session_state_populated(db, session_id):
-    db.end_session(session_id, summary="s1")
-    db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
-    state = db.get_session_state()
+def test_get_session_state_excludes_current(db, session_id):
+    """get_session_state with current_session_id excludes the current session."""
+    second_id = db.create_session()
+    state = db.get_session_state(current_session_id=second_id)
     assert state["last_session"] is not None
+    assert state["last_session"]["id"] == session_id
+
+
+def test_get_session_state_populated(db, session_id):
+    current_id = db.create_session()
+    db.log_trade(session_id, "T-1", "buy", "yes", 10, status="placed")
+    state = db.get_session_state(current_session_id=current_id)
+    assert state["last_session"] is not None
+    assert state["last_session"]["id"] == session_id
     assert len(state["unreconciled_trades"]) == 1
 
 

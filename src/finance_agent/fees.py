@@ -5,10 +5,17 @@ Kalshi uses a P(1-P) parabolic formula — highest fees at 50c, near-zero at ext
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
-from .constants import BINARY_PAYOUT_CENTS, EXCHANGE_KALSHI, SIDE_YES
+from .constants import (
+    ACTION_BUY,
+    BINARY_PAYOUT_CENTS,
+    EXCHANGE_KALSHI,
+    SIDE_YES,
+    STRATEGY_BRACKET,
+)
 
 
 def kalshi_fee(contracts: int, price_cents: int, *, maker: bool = False) -> float:
@@ -101,3 +108,92 @@ def compute_arb_edge(
         "profitable": net_edge_usd > 0,
         "fee_breakdown": fee_breakdown,
     }
+
+
+# ── Hypothetical P&L ─────────────────────────────────────────────
+
+
+def compute_hypothetical_pnl(group: dict[str, Any]) -> float:
+    """Compute hypothetical P&L in USD for a fully-settled recommendation group."""
+    strategy = group.get("strategy", STRATEGY_BRACKET)
+    legs = group.get("legs", [])
+    if strategy == STRATEGY_BRACKET:
+        return _pnl_bracket(legs)
+    return _pnl_manual(legs)
+
+
+def _pnl_bracket(legs: list[dict[str, Any]]) -> float:
+    """P&L for bracket arb: guaranteed payout minus cost minus fees.
+
+    Buy all N outcomes at combined cost < $1 per set. One settles at 100c, rest at 0c.
+    Payout is always 100c x quantity regardless of which outcome wins.
+    """
+    if not legs:
+        return 0.0
+
+    quantity = legs[0].get("quantity", 0)
+    total_cost_cents = sum(
+        leg.get("price_cents", 0) * leg.get("quantity", quantity) for leg in legs
+    )
+    payout_cents = BINARY_PAYOUT_CENTS * quantity
+
+    total_fees = sum(
+        kalshi_fee(
+            leg.get("quantity", quantity),
+            leg.get("price_cents", 0),
+            maker=leg.get("is_maker", False),
+        )
+        for leg in legs
+    )
+
+    return round((payout_cents - total_cost_cents) / 100.0 - total_fees, 4)
+
+
+def _pnl_manual(legs: list[dict[str, Any]]) -> float:
+    """P&L for manual strategy: per-leg directional P&L minus fees."""
+    total_pnl_cents = 0
+    total_fees = 0.0
+
+    for leg in legs:
+        settlement = leg.get("settlement_value")
+        price = leg.get("price_cents", 0)
+        quantity = leg.get("quantity", 0)
+        action = leg.get("action", ACTION_BUY)
+        side = leg.get("side", SIDE_YES)
+
+        if settlement is None:
+            continue
+
+        # For NO-side: invert settlement (YES=100 means NO=0 and vice versa)
+        effective_settlement = (
+            settlement if side == SIDE_YES else (BINARY_PAYOUT_CENTS - settlement)
+        )
+
+        if action == ACTION_BUY:
+            leg_pnl = (effective_settlement - price) * quantity
+        else:
+            leg_pnl = (price - effective_settlement) * quantity
+
+        total_pnl_cents += leg_pnl
+        total_fees += kalshi_fee(quantity, price, maker=leg.get("is_maker", False))
+
+    return round(total_pnl_cents / 100.0 - total_fees, 4)
+
+
+def assess_depth_concern(leg: dict[str, Any]) -> str | None:
+    """Return a warning if orderbook depth was less than quantity, or None."""
+    snapshot_json = leg.get("orderbook_snapshot_json")
+    if not snapshot_json:
+        return None
+    try:
+        snapshot = json.loads(snapshot_json) if isinstance(snapshot_json, str) else snapshot_json
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    quantity = leg.get("quantity", 0)
+    side = leg.get("side", SIDE_YES)
+    depth = snapshot.get(f"{side}_depth", 0) or 0
+
+    if quantity > 0 and depth < quantity:
+        return f"Depth {depth} < qty {quantity} on {side} side"
+    return None

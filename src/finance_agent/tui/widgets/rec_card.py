@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -51,6 +52,41 @@ class RecCard(Vertical):
                 classes="rec-detail",
             )
 
+    def _compose_close_time(self) -> Iterable[Static]:
+        """Show earliest market close time across all legs."""
+        earliest: datetime | None = None
+        for leg in self.group.get("legs", []):
+            snap_json = leg.get("orderbook_snapshot_json")
+            if not snap_json:
+                continue
+            try:
+                snap = json.loads(snap_json) if isinstance(snap_json, str) else snap_json
+                ct = snap.get("close_time")
+                if not ct:
+                    continue
+                close_dt = datetime.fromisoformat(str(ct))
+                if earliest is None or close_dt < earliest:
+                    earliest = close_dt
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+
+        if earliest is None:
+            return
+
+        now = datetime.now(UTC)
+        delta = earliest - now
+        hours = delta.total_seconds() / 3600
+        if hours <= 0:
+            yield Static("[bold red]Market closed[/]", classes="rec-stale")
+        elif hours < 24:
+            yield Static(f"[red]Market closes in {int(hours)}h[/]", classes="rec-stale")
+        elif hours < 24 * 7:
+            days = int(hours / 24)
+            yield Static(f"[yellow]Market closes in {days}d[/]", classes="rec-detail")
+        else:
+            days = int(hours / 24)
+            yield Static(f"Market closes in {days}d", classes="rec-detail")
+
     def _compose_staleness(self) -> Iterable[Static]:
         if expires_at := self.group.get("expires_at"):
             try:
@@ -90,6 +126,7 @@ class RecCard(Vertical):
         )
         yield from self._compose_legs()
         yield from self._compose_metrics()
+        yield from self._compose_close_time()
         yield from self._compose_staleness()
 
         if status == STATUS_PENDING:

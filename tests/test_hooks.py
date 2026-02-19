@@ -1,13 +1,8 @@
-"""Tests for finance_agent.hooks -- audit hooks and session lifecycle."""
+"""Tests for finance_agent.hooks -- audit hooks and KB versioning."""
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-from helpers import get_row
-
 from finance_agent.hooks import create_audit_hooks
-from finance_agent.models import Session
 
 
 def _hook(hooks, event, idx=0):
@@ -18,22 +13,22 @@ def _hook(hooks, event, idx=0):
 # ── auto_approve ─────────────────────────────────────────────────
 
 
-async def test_auto_approve_allows_regular_tool(db, session_id):
-    pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
+async def test_auto_approve_allows_regular_tool():
+    pre = _hook(create_audit_hooks(), "PreToolUse")
     result = await pre({"tool_name": "mcp__markets__get_market", "tool_input": {}}, "tid-1", None)
     assert result != {}
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
     assert "updatedInput" not in result["hookSpecificOutput"]
 
 
-async def test_auto_approve_skips_ask_user(db, session_id):
-    pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
+async def test_auto_approve_skips_ask_user():
+    pre = _hook(create_audit_hooks(), "PreToolUse")
     result = await pre({"tool_name": "AskUserQuestion", "tool_input": {}}, "tid-1", None)
     assert result == {}
 
 
-async def test_auto_approve_denies_write_to_protected_path(db, session_id):
-    pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
+async def test_auto_approve_denies_write_to_protected_path():
+    pre = _hook(create_audit_hooks(), "PreToolUse")
     result = await pre(
         {"tool_name": "Write", "tool_input": {"file_path": "/workspace/data/agent.db"}},
         "tid-1",
@@ -43,8 +38,8 @@ async def test_auto_approve_denies_write_to_protected_path(db, session_id):
     assert "/workspace/analysis/" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-async def test_auto_approve_allows_write_to_analysis(db, session_id):
-    pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
+async def test_auto_approve_allows_write_to_analysis():
+    pre = _hook(create_audit_hooks(), "PreToolUse")
     result = await pre(
         {"tool_name": "Write", "tool_input": {"file_path": "/workspace/analysis/notes.md"}},
         "tid-1",
@@ -53,8 +48,8 @@ async def test_auto_approve_allows_write_to_analysis(db, session_id):
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
-async def test_auto_approve_denies_edit_to_scripts(db, session_id):
-    pre = _hook(create_audit_hooks(db, session_id), "PreToolUse")
+async def test_auto_approve_denies_edit_to_scripts():
+    pre = _hook(create_audit_hooks(), "PreToolUse")
     result = await pre(
         {"tool_name": "Edit", "tool_input": {"file_path": "/workspace/scripts/db_utils.py"}},
         "tid-1",
@@ -66,67 +61,36 @@ async def test_auto_approve_denies_edit_to_scripts(db, session_id):
 # ── audit_recommendation ─────────────────────────────────────────
 
 
-async def test_audit_recommendation_increments_count(db, session_id):
-    hooks = create_audit_hooks(db, session_id)
+async def test_audit_recommendation_calls_callback():
+    calls = []
+    hooks = create_audit_hooks(on_recommendation=lambda: calls.append(1))
     post = _hook(hooks, "PostToolUse")
     for _ in range(3):
         await post({}, None, None)
-
-    # Verify via session_end which writes rec_count to DB
-    await _hook(hooks, "Stop")({}, None, None)
-
-    row = get_row(db, Session, session_id)
-    assert row["recommendations_made"] == 3
-
-
-# ── session_end ──────────────────────────────────────────────────
-
-
-async def test_session_end_writes_db(db, session_id):
-    await _hook(create_audit_hooks(db, session_id), "Stop")({}, None, None)
-
-    row = get_row(db, Session, session_id)
-    assert row["ended_at"] is not None
-    assert "Duration:" in row["summary"]
-    assert "Recommendations:" in row["summary"]
-
-
-async def test_session_end_returns_empty(db, session_id):
-    result = await _hook(create_audit_hooks(db, session_id), "Stop")({}, None, None)
-    assert result == {}
-
-
-async def test_session_end_duration_in_summary(db, session_id):
-    with patch("finance_agent.hooks.time") as mock_time:
-        mock_time.time.side_effect = [1000.0, 1060.0]
-        hooks = create_audit_hooks(db, session_id)
-        await _hook(hooks, "Stop")({}, None, None)
-
-    row = get_row(db, Session, session_id)
-    assert "60s" in row["summary"]
+    assert len(calls) == 3
 
 
 # ── Hook structure ───────────────────────────────────────────────
 
 
-def test_hook_structure_keys(db, session_id):
-    hooks = create_audit_hooks(db, session_id)
+def test_hook_structure_keys():
+    hooks = create_audit_hooks()
     assert "PreToolUse" in hooks
     assert "PostToolUse" in hooks
-    assert "Stop" in hooks
+    assert "Stop" not in hooks
 
 
-def test_post_tool_use_matcher(db, session_id):
-    hooks = create_audit_hooks(db, session_id)
+def test_post_tool_use_matcher():
+    hooks = create_audit_hooks()
     assert hooks["PostToolUse"][0].matcher == "mcp__db__recommend_trade"
 
 
 # ── on_recommendation callback ───────────────────────────────────
 
 
-async def test_on_recommendation_callback(db, session_id):
+async def test_on_recommendation_callback():
     calls = []
-    hooks = create_audit_hooks(db, session_id, on_recommendation=lambda: calls.append(1))
+    hooks = create_audit_hooks(on_recommendation=lambda: calls.append(1))
     post = _hook(hooks, "PostToolUse")
     await post({}, None, None)
     await post({}, None, None)

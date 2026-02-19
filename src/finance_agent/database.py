@@ -218,24 +218,6 @@ class AgentDatabase:
             session.commit()
         return session_id
 
-    def end_session(
-        self,
-        session_id: str,
-        summary: str | None = None,
-        trades_placed: int = 0,
-        recommendations_made: int = 0,
-        pnl_usd: float | None = None,
-    ) -> None:
-        with self._session_factory() as session:
-            row = session.get(Session, session_id)
-            if row:
-                row.ended_at = _now()
-                row.summary = summary
-                row.trades_placed = trades_placed
-                row.recommendations_made = recommendations_made
-                row.pnl_usd = pnl_usd
-                session.commit()
-
     # ── Trades (lean schema) ──────────────────────────────────
 
     def log_trade(
@@ -390,6 +372,105 @@ class AgentDatabase:
                 if computed_fees_usd is not None:
                     group.computed_fees_usd = computed_fees_usd
                 session.commit()
+
+    # ── Settlement tracking ────────────────────────────────────
+
+    def get_unresolved_leg_tickers(self) -> list[str]:
+        """Return distinct market tickers from recommendation legs not yet settled."""
+        with self._session_factory() as session:
+            stmt = (
+                select(RecommendationLeg.market_id)
+                .where(RecommendationLeg.settlement_value.is_(None))
+                .distinct()
+            )
+            return list(session.scalars(stmt).all())
+
+    def settle_legs(self, ticker: str, settlement_value: int) -> int:
+        """Mark all unresolved legs for a ticker as settled. Returns count updated."""
+        now = _now()
+        with self._session_factory() as session:
+            legs = session.scalars(
+                select(RecommendationLeg).where(
+                    RecommendationLeg.market_id == ticker,
+                    RecommendationLeg.settlement_value.is_(None),
+                )
+            ).all()
+            for leg in legs:
+                leg.settlement_value = settlement_value
+                leg.settled_at = now
+            session.commit()
+            return len(legs)
+
+    def get_groups_pending_pnl(self) -> list[dict[str, Any]]:
+        """Return groups where all legs are settled but P&L hasn't been computed."""
+        with self._session_factory() as session:
+            unsettled_groups = (
+                select(RecommendationLeg.group_id)
+                .where(RecommendationLeg.settlement_value.is_(None))
+                .distinct()
+                .subquery()
+            )
+            stmt = select(RecommendationGroup).where(
+                RecommendationGroup.hypothetical_pnl_usd.is_(None),
+                RecommendationGroup.id.notin_(select(unsettled_groups.c.group_id)),
+            )
+            groups = session.scalars(stmt).all()
+            return [g.to_dict() for g in groups if g.legs]
+
+    def update_group_pnl(self, group_id: int, pnl_usd: float) -> None:
+        """Set the hypothetical P&L for a recommendation group."""
+        with self._session_factory() as session:
+            group = session.get(RecommendationGroup, group_id)
+            if group:
+                group.hypothetical_pnl_usd = pnl_usd
+                session.commit()
+
+    def get_performance_summary(self) -> dict[str, Any]:
+        """Return aggregate and per-group performance data for the P&L screen."""
+        with self._session_factory() as session:
+            settled_groups = session.scalars(
+                select(RecommendationGroup)
+                .where(RecommendationGroup.hypothetical_pnl_usd.isnot(None))
+                .order_by(RecommendationGroup.created_at.desc())
+            ).all()
+
+            pending_groups = session.scalars(
+                select(RecommendationGroup)
+                .where(RecommendationGroup.hypothetical_pnl_usd.is_(None))
+                .order_by(RecommendationGroup.created_at.desc())
+            ).all()
+            pending_groups = [g for g in pending_groups if g.legs]
+
+            total_pnl = sum(g.hypothetical_pnl_usd or 0.0 for g in settled_groups)
+            wins = sum(1 for g in settled_groups if (g.hypothetical_pnl_usd or 0) > 0)
+            losses = sum(1 for g in settled_groups if (g.hypothetical_pnl_usd or 0) <= 0)
+
+            edge_diffs: list[float] = []
+            for g in settled_groups:
+                pnl = g.hypothetical_pnl_usd
+                if (
+                    pnl is not None
+                    and g.estimated_edge_pct
+                    and g.total_exposure_usd
+                    and g.total_exposure_usd > 0
+                ):
+                    realized_pct = (pnl / g.total_exposure_usd) * 100
+                    edge_diffs.append(abs(g.estimated_edge_pct - realized_pct))
+
+            return {
+                "total_pnl_usd": round(total_pnl, 2),
+                "total_settled": len(settled_groups),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": (
+                    round(wins / len(settled_groups) * 100, 1) if settled_groups else 0.0
+                ),
+                "avg_edge_error": (
+                    round(sum(edge_diffs) / len(edge_diffs), 2) if edge_diffs else None
+                ),
+                "settled_groups": [g.to_dict() for g in settled_groups],
+                "pending_groups": [g.to_dict() for g in pending_groups],
+            }
 
     # ── Market snapshots (bulk insert for collector) ──────────
 
@@ -649,14 +730,12 @@ class AgentDatabase:
 
     # ── Session state (for startup) ───────────────────────────
 
-    def get_session_state(self) -> dict[str, Any]:
+    def get_session_state(self, current_session_id: str | None = None) -> dict[str, Any]:
         with self._session_factory() as session:
-            last_session_row = session.scalars(
-                select(Session)
-                .where(Session.ended_at.isnot(None))
-                .order_by(Session.ended_at.desc())
-                .limit(1)
-            ).first()
+            stmt = select(Session).order_by(Session.started_at.desc()).limit(1)
+            if current_session_id:
+                stmt = stmt.where(Session.id != current_session_id)
+            last_session_row = session.scalars(stmt).first()
 
             unreconciled_trades = session.scalars(
                 select(Trade)
@@ -712,11 +791,36 @@ class AgentDatabase:
             return [t.to_dict() for t in trades]
 
     def get_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Session listing for history screen."""
+        """Session listing for history screen with derived rec/trade counts."""
+        rec_count_sq = (
+            select(func.count(RecommendationGroup.id))
+            .where(RecommendationGroup.session_id == Session.id)
+            .correlate(Session)
+            .scalar_subquery()
+            .label("recommendations_made")
+        )
+        trade_count_sq = (
+            select(func.count(Trade.id))
+            .where(Trade.session_id == Session.id)
+            .correlate(Session)
+            .scalar_subquery()
+            .label("trades_placed")
+        )
         with self._session_factory() as session:
-            stmt = select(Session).order_by(Session.started_at.desc()).limit(limit)
-            rows = session.scalars(stmt).all()
-            return [r.to_dict() for r in rows]
+            stmt = (
+                select(Session, rec_count_sq, trade_count_sq)
+                .order_by(Session.started_at.desc())
+                .limit(limit)
+            )
+            rows = session.execute(stmt).all()
+            return [
+                {
+                    **row[0].to_dict(),
+                    "recommendations_made": row[1],
+                    "trades_placed": row[2],
+                }
+                for row in rows
+            ]
 
     # ── Backup ────────────────────────────────────────────────
 
@@ -740,18 +844,16 @@ class AgentDatabase:
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"agent_{ts}.db"
 
-        import sqlite3
+        import shutil
 
-        raw_conn = self._engine.raw_connection()
-        try:
-            backup_conn = sqlite3.connect(str(backup_path))
-            driver = raw_conn.driver_connection
-            if driver is None:
-                raise RuntimeError("No underlying driver connection for backup")
-            driver.backup(backup_conn)  # type: ignore[union-attr]
-            backup_conn.close()
-        finally:
-            raw_conn.close()
+        # Checkpoint WAL into main DB, then file-copy. Much faster than
+        # sqlite3.backup() for large databases, and safe when no other
+        # writers are active (enforced by EXCLUSIVE locking mode).
+        # Dispose pool to release EXCLUSIVE file lock before copying.
+        with self._engine.connect() as conn:
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        self._engine.dispose()
+        shutil.copy2(self.db_path, backup_path)
 
         logger.info("Database backup created: %s", backup_path)
 

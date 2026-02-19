@@ -28,6 +28,7 @@ class KnowledgeBaseScreen(Screen):
         ("f3", "app.switch_screen('recommendations')", "Recs"),
         ("f4", "app.switch_screen('portfolio')", "Portfolio"),
         ("f5", "app.switch_screen('history')", "History"),
+        ("f6", "app.switch_screen('performance')", "P&L"),
         ("escape", "back", "Back"),
         ("r", "refresh", "Refresh"),
     ]

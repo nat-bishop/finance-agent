@@ -35,7 +35,8 @@ class DashboardScreen(Screen):
         ("f3", "app.switch_screen('recommendations')", "Recs"),
         ("f4", "app.switch_screen('portfolio')", "Portfolio"),
         ("f5", "app.switch_screen('history')", "History"),
-        ("ctrl+l", "app.reset_session", "Reset"),
+        ("f6", "app.switch_screen('performance')", "P&L"),
+        ("ctrl+l", "app.clear_chat", "Clear"),
     ]
 
     def __init__(

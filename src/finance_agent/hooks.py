@@ -1,16 +1,14 @@
-"""Audit hooks -- recommendation counting, KB versioning, session lifecycle."""
+"""Audit hooks -- recommendation counting and KB versioning."""
 
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import HookContext, HookEvent, HookInput, HookJSONOutput
 
-from .database import AgentDatabase
 from .kb_versioning import commit_kb
 
 logger = logging.getLogger(__name__)
@@ -21,11 +19,8 @@ _PROTECTED_PREFIXES = ("/workspace/data/", "/workspace/scripts/")
 
 
 def create_audit_hooks(
-    db: AgentDatabase,
-    session_id: str,
     on_recommendation: Callable[[], None] | None = None,
 ) -> dict[HookEvent, list[HookMatcher]]:
-    session_start = time.time()
     rec_count = 0
 
     async def auto_approve(
@@ -94,18 +89,6 @@ def create_audit_hooks(
             await commit_kb()
         return _EMPTY
 
-    async def session_end(
-        _input_data: HookInput, _tool_use_id: str | None, _context: HookContext
-    ) -> HookJSONOutput:
-        duration = time.time() - session_start
-        logger.info("Session ending: %ds, %d recommendations", int(duration), rec_count)
-        db.end_session(
-            session_id=session_id,
-            summary=f"Duration: {duration:.0f}s | Recommendations: {rec_count}",
-            recommendations_made=rec_count,
-        )
-        return _EMPTY
-
     return {
         "PreToolUse": [
             HookMatcher(hooks=[auto_approve]),
@@ -118,8 +101,5 @@ def create_audit_hooks(
             HookMatcher(
                 hooks=[commit_kb_if_written],
             ),
-        ],
-        "Stop": [
-            HookMatcher(hooks=[session_end]),
         ],
     }

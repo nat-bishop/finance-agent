@@ -25,6 +25,7 @@ class RecommendationsScreen(Screen):
         ("f2", "app.switch_screen('knowledge_base')", "KB"),
         ("f4", "app.switch_screen('portfolio')", "Portfolio"),
         ("f5", "app.switch_screen('history')", "History"),
+        ("f6", "app.switch_screen('performance')", "P&L"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
     ]
 

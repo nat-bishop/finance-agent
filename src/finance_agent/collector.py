@@ -270,6 +270,54 @@ def _generate_markets_jsonl(db: AgentDatabase, output_path: str) -> None:
 # ── Entry point ──────────────────────────────────────────────────
 
 
+async def resolve_settlements(kalshi: KalshiAPIClient, db: AgentDatabase) -> int:
+    """Check unresolved recommendation legs for market settlement.
+
+    Batches API calls by unique ticker (not N calls for N legs).
+    Returns count of legs settled.
+    """
+    tickers = db.get_unresolved_leg_tickers()
+    if not tickers:
+        logger.info("Settlement check: no unresolved tickers")
+        return 0
+
+    logger.info("Settlement check: %d unique tickers to check", len(tickers))
+
+    settled_count = 0
+    for ticker in tickers:
+        try:
+            market_data = await kalshi.get_market(ticker)
+            inner = market_data.get("market", market_data) if isinstance(market_data, dict) else {}
+            settlement_value = inner.get("settlement_value")
+            if settlement_value is not None:
+                count = db.settle_legs(ticker, int(settlement_value))
+                if count > 0:
+                    logger.info(
+                        "  Settled %s -> %dc (%d legs updated)", ticker, settlement_value, count
+                    )
+                    settled_count += count
+        except Exception as e:
+            logger.debug("  Could not check %s: %s", ticker, e)
+
+    # Compute P&L for groups that became fully settled
+    from .fees import compute_hypothetical_pnl
+
+    groups = db.get_groups_pending_pnl()
+    for group in groups:
+        pnl = compute_hypothetical_pnl(group)
+        db.update_group_pnl(group["id"], pnl)
+        logger.info(
+            "  Group %d P&L: $%.4f (%s, %d legs)",
+            group["id"],
+            pnl,
+            group.get("strategy", "?"),
+            len(group.get("legs", [])),
+        )
+
+    logger.info("Settlement check complete: %d legs settled", settled_count)
+    return settled_count
+
+
 async def _run_collector_async() -> None:
     """Async collector implementation — Kalshi only."""
     from .logging_config import setup_logging
@@ -296,6 +344,9 @@ async def _run_collector_async() -> None:
         from .backfill import backfill_missing_meta
 
         await backfill_missing_meta(kalshi, db)
+
+        # Resolve settlements for recommendation legs
+        await resolve_settlements(kalshi, db)
 
         # Purge old snapshots and stale daily data
         db.purge_old_snapshots(trading_config.snapshot_retention_days)

@@ -24,6 +24,7 @@ class PortfolioScreen(Screen):
         ("f2", "app.switch_screen('knowledge_base')", "KB"),
         ("f3", "app.switch_screen('recommendations')", "Recs"),
         ("f5", "app.switch_screen('history')", "History"),
+        ("f6", "app.switch_screen('performance')", "P&L"),
         ("escape", "app.switch_screen('dashboard')", "Back"),
         ("r", "refresh", "Refresh"),
     ]

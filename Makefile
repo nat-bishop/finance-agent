@@ -1,10 +1,16 @@
-.PHONY: up down shell logs lint format test test-cov collect backfill backup startup nuke-db nuke-data
+.PHONY: up up-fast down shell logs lint format test test-cov collect backfill backup startup nuke-db nuke-data
 
 # ── Docker ───────────────────────────────────────────────────
 
 up:
 	@uv run python -c "import sqlite3, pathlib; p='workspace/data/agent.db'; pathlib.Path(p).exists() and (c:=sqlite3.connect(p)) and (c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close())" 2>/dev/null || true
-	docker compose run --build --rm agent
+	@echo "Collecting market data (build runs in parallel)..."
+	@uv run python -m finance_agent.collector & COLLECT_PID=$$!; docker compose build agent; wait $$COLLECT_PID
+	docker compose run --rm agent
+
+up-fast:
+	@uv run python -c "import sqlite3, pathlib; p='workspace/data/agent.db'; pathlib.Path(p).exists() and (c:=sqlite3.connect(p)) and (c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close())" 2>/dev/null || true
+	docker compose run --rm agent
 
 down:
 	docker compose down --remove-orphans
@@ -12,8 +18,9 @@ down:
 shell:
 	docker compose run --build --rm agent /bin/bash
 
+N ?= 250
 logs:
-	@if [ -f workspace/data/agent.log ]; then tail -100 workspace/data/agent.log; else echo "No agent.log yet -- run make up first"; fi
+	@if [ -f workspace/data/agent.log ]; then tail -$(N) workspace/data/agent.log; else echo "No agent.log yet -- run make up first"; fi
 
 # ── Code quality (local) ────────────────────────────────────
 

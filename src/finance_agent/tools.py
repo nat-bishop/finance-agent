@@ -289,6 +289,7 @@ def _build_db_legs(enriched_legs: list[dict[str, Any]], contracts: int) -> list[
                     "no_ask": leg.get("no_ask"),
                     "yes_depth": leg.get("yes_depth"),
                     "no_depth": leg.get("no_depth"),
+                    "close_time": leg.get("close_time"),
                 }
             ),
         }
@@ -428,8 +429,10 @@ def create_db_tools(
                     market_data.get("market", market_data) if isinstance(market_data, dict) else {}
                 )
                 title = str(inner.get("title", inner.get("question", market_id)))
+                close_time = inner.get("close_time") or inner.get("expected_expiration_time")
             except Exception:
                 title = market_id
+                close_time = None
 
             yes_price, yes_depth = best_price_and_depth(ob, SIDE_YES)
             no_price, no_depth = best_price_and_depth(ob, SIDE_NO)
@@ -439,6 +442,7 @@ def create_db_tools(
                     "exchange": EXCHANGE_KALSHI,
                     "market_id": market_id,
                     "market_title": title,
+                    "close_time": str(close_time) if close_time else None,
                     "orderbook": ob,
                     "leg_index": i,
                     "yes_ask": yes_price,
@@ -473,6 +477,11 @@ def create_db_tools(
 
         cost_per_pair_usd = cost_per_pair_cents / 100.0
         contracts = int(total_exposure / cost_per_pair_usd)
+
+        # Cap by shallowest orderbook depth — never exceed top-of-book liquidity
+        min_depth = min(leg["depth"] for leg in enriched_legs)
+        contracts = min(contracts, min_depth)
+
         if contracts < 1:
             return _text(
                 {
