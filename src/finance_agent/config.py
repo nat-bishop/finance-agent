@@ -31,7 +31,6 @@ class TradingConfig:
     kalshi_max_position_usd: float = 100.0
     max_portfolio_usd: float = 1000.0
     max_order_count: int = 50
-    min_edge_pct: float = 1.0
 
     # Paths: defaults are local (./workspace/*); Docker sets env overrides via FA_* env vars
     db_path: str = "workspace/data/agent.db"
@@ -90,7 +89,6 @@ def build_system_prompt(trading_config: TradingConfig) -> str:
         "KALSHI_MAX_POSITION_USD": trading_config.kalshi_max_position_usd,
         "MAX_PORTFOLIO_USD": trading_config.max_portfolio_usd,
         "MAX_ORDER_COUNT": trading_config.max_order_count,
-        "MIN_EDGE_PCT": trading_config.min_edge_pct,
         "RECOMMENDATION_TTL_MINUTES": trading_config.recommendation_ttl_minutes,
         "EXECUTION_TIMEOUT_SECONDS": trading_config.execution_timeout_seconds,
         "MAX_SLIPPAGE_CENTS": trading_config.max_slippage_cents,

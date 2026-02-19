@@ -23,7 +23,7 @@ from finance_agent.constants import (
     STATUS_OPEN,
     STATUS_PENDING,
     STATUS_PLACED,
-    STRATEGY_BRACKET,
+    STRATEGY_MANUAL,
 )
 from finance_agent.models import (
     Event,
@@ -268,7 +268,7 @@ class AgentDatabase:
         total_exposure_usd: float | None = None,
         computed_edge_pct: float | None = None,
         computed_fees_usd: float | None = None,
-        strategy: str = STRATEGY_BRACKET,
+        strategy: str = STRATEGY_MANUAL,
     ) -> tuple[int, str]:
         """Insert a recommendation group + legs atomically. Returns (group_id, expires_at)."""
         now = _now()

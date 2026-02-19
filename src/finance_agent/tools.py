@@ -16,11 +16,10 @@ from .constants import (
     SIDE_NO,
     SIDE_YES,
     STATUS_PENDING,
-    STRATEGY_BRACKET,
     STRATEGY_MANUAL,
 )
 from .database import AgentDatabase
-from .fees import best_price_and_depth, compute_arb_edge, kalshi_fee
+from .fees import best_price_and_depth, kalshi_fee
 from .kalshi_client import KalshiAPIClient
 
 
@@ -129,66 +128,6 @@ def create_market_tools(kalshi: KalshiAPIClient) -> list:
 
 
 # ── Recommendation helpers ──────────────────────────────────────────
-
-
-def _validate_leg_prices(enriched_legs: list[dict[str, Any]]) -> str | None:
-    """Check all legs have executable prices in the 1-99c range.
-
-    Returns error string or None on success.
-    """
-    for leg in enriched_legs:
-        if not leg.get("price_cents") or not (1 <= leg["price_cents"] <= 99):
-            return (
-                f"No executable price for {leg['market_id']} "
-                f"({leg.get('side', '?')} side) — orderbook may be empty"
-            )
-    return None
-
-
-def _determine_direction_bracket(enriched_legs: list[dict[str, Any]]) -> str | None:
-    """Assign action/side/price/depth to an N-leg bracket arb (same exchange).
-
-    Compares buying all YES vs all NO, picks the profitable direction.
-    Mutates legs in-place. Returns error string or None on success.
-    """
-    yes_prices = [leg.get("yes_ask") for leg in enriched_legs]
-    no_prices = [leg.get("no_ask") for leg in enriched_legs]
-
-    if any(p is None for p in yes_prices):
-        missing = [
-            leg["market_id"] for leg, p in zip(enriched_legs, yes_prices, strict=True) if p is None
-        ]
-        return f"Empty YES orderbook for: {', '.join(missing)}"
-
-    yes_cost = sum(yes_prices)  # type: ignore[arg-type]
-    buy_yes_edge = BINARY_PAYOUT_CENTS - yes_cost
-
-    if all(p is not None for p in no_prices):
-        no_cost = sum(no_prices)  # type: ignore[arg-type]
-        buy_no_edge = BINARY_PAYOUT_CENTS - no_cost
-    else:
-        no_cost = None
-        buy_no_edge = -999
-
-    if buy_yes_edge > 0 and buy_yes_edge >= buy_no_edge:
-        for leg in enriched_legs:
-            leg["action"], leg["side"] = ACTION_BUY, SIDE_YES
-            leg["price_cents"] = leg["yes_ask"]
-            leg["depth"] = leg["yes_depth"]
-    elif buy_no_edge > 0:
-        for leg in enriched_legs:
-            leg["action"], leg["side"] = ACTION_BUY, SIDE_NO
-            leg["price_cents"] = leg["no_ask"]
-            leg["depth"] = leg["no_depth"]
-    else:
-        return (
-            f"No bracket arb edge at executable prices: "
-            f"YES sum {yes_cost}c"
-            + (f", NO sum {no_cost}c" if no_cost is not None else "")
-            + " (need sum < 100c on one side)"
-        )
-
-    return _validate_leg_prices(enriched_legs)
 
 
 def _apply_manual_direction(
@@ -334,45 +273,30 @@ def create_db_tools(
     @tool(
         "recommend_trade",
         (
-            "Record a trade recommendation. Two strategies: 'bracket' for mutually exclusive "
-            "events (auto-computes direction, sizing, edge), 'manual' for correlated market "
-            "trades (you specify action, side, quantity per leg)."
+            "Record a trade recommendation. Specify action, side, and quantity per leg. "
+            "System validates position limits and computes fees."
         ),
         {
             "type": "object",
-            "required": ["thesis", "strategy", "legs"],
+            "required": ["thesis", "legs"],
             "properties": {
                 "thesis": {
                     "type": "string",
-                    "description": "1-3 sentences explaining the opportunity",
+                    "description": "Explain the semantic reasoning for this trade",
                     "minLength": 10,
                 },
                 "equivalence_notes": {
                     "type": "string",
                     "description": "Explain the relationship between these markets",
                 },
-                "strategy": {
-                    "type": "string",
-                    "enum": [STRATEGY_BRACKET, STRATEGY_MANUAL],
-                    "description": (
-                        "'bracket' for mutually exclusive events (auto-computed), "
-                        "'manual' for correlated/calendar trades (agent-specified)"
-                    ),
-                },
-                "total_exposure_usd": {
-                    "type": "number",
-                    "description": "Total capital to deploy (required for bracket, ignored for manual)",
-                    "minimum": 1,
-                    "maximum": 1000,
-                },
                 "legs": {
                     "type": "array",
-                    "description": "Markets to trade (2+ required)",
-                    "minItems": 2,
+                    "description": "Markets to trade (1+ required)",
+                    "minItems": 1,
                     "maxItems": 10,
                     "items": {
                         "type": "object",
-                        "required": ["market_id"],
+                        "required": ["market_id", "action", "side", "quantity"],
                         "properties": {
                             "market_id": {
                                 "type": "string",
@@ -381,16 +305,13 @@ def create_db_tools(
                             "action": {
                                 "type": "string",
                                 "enum": [ACTION_BUY, ACTION_SELL],
-                                "description": "Required for manual strategy",
                             },
                             "side": {
                                 "type": "string",
                                 "enum": [SIDE_YES, SIDE_NO],
-                                "description": "Required for manual strategy",
                             },
                             "quantity": {
                                 "type": "integer",
-                                "description": "Contracts per leg (required for manual strategy)",
                                 "minimum": 1,
                             },
                         },
@@ -401,17 +322,9 @@ def create_db_tools(
     )
     async def recommend_trade(args: dict) -> dict:
         legs_input = args.get("legs", [])
-        strategy = args.get("strategy", STRATEGY_BRACKET)
-        total_exposure = args.get("total_exposure_usd", 0)
 
-        # ── Validation ──────────────────────────────────────────
-        errors: list[str] = []
-        if len(legs_input) < 2:
-            errors.append("Requires 2+ legs")
-        if strategy == STRATEGY_BRACKET and not total_exposure:
-            errors.append("Bracket strategy requires total_exposure_usd")
-        if errors:
-            return _text({"error": "; ".join(errors)})
+        if not legs_input:
+            return _text({"error": "Requires at least 1 leg"})
 
         # ── Fetch orderbooks, extract prices, resolve titles ────
         enriched_legs: list[dict[str, Any]] = []
@@ -449,122 +362,12 @@ def create_db_tools(
                     "yes_depth": yes_depth,
                     "no_ask": no_price,
                     "no_depth": no_depth,
-                    # Derive bid prices from opposite side (binary: bid = payout - opposite ask)
                     "yes_bid": (BINARY_PAYOUT_CENTS - no_price) if no_price else None,
                     "no_bid": (BINARY_PAYOUT_CENTS - yes_price) if yes_price else None,
                 }
             )
 
-        # ── Strategy routing ──────────────────────────────────────
-        if strategy == STRATEGY_BRACKET:
-            return await _handle_bracket(enriched_legs, args, total_exposure)
-        return await _handle_manual(enriched_legs, legs_input, args)
-
-    async def _handle_bracket(
-        enriched_legs: list[dict[str, Any]],
-        args: dict[str, Any],
-        total_exposure: float,
-    ) -> dict:
-        """Bracket strategy: mutually exclusive outcomes, auto-computed."""
-        direction_error = _determine_direction_bracket(enriched_legs)
-        if direction_error:
-            return _text({"error": direction_error})
-
-        # Compute balanced quantities
-        cost_per_pair_cents = sum(leg["price_cents"] for leg in enriched_legs)
-        if cost_per_pair_cents <= 0:
-            return _text({"error": "Invalid prices — cost per pair is zero"})
-
-        cost_per_pair_usd = cost_per_pair_cents / 100.0
-        contracts = int(total_exposure / cost_per_pair_usd)
-
-        # Cap by shallowest orderbook depth — never exceed top-of-book liquidity
-        min_depth = min(leg["depth"] for leg in enriched_legs)
-        contracts = min(contracts, min_depth)
-
-        if contracts < 1:
-            return _text(
-                {
-                    "error": f"total_exposure_usd ${total_exposure} too low for one contract pair "
-                    f"(cost per pair: ${cost_per_pair_usd:.2f})"
-                }
-            )
-
-        # Check depth
-        for leg in enriched_legs:
-            if leg.get("depth", 0) < 5:
-                return _text(
-                    {
-                        "error": f"Orderbook depth too thin for {leg['market_id']} "
-                        f"({leg['side']} side): only {leg.get('depth', 0)} contracts available"
-                    }
-                )
-
-        # Assign maker/taker and compute edge
-        _assign_maker_taker(enriched_legs)
-        fee_legs = [
-            {
-                "exchange": EXCHANGE_KALSHI,
-                "price_cents": leg["price_cents"],
-                "maker": leg["is_maker"],
-            }
-            for leg in enriched_legs
-        ]
-        edge_result = compute_arb_edge(fee_legs, contracts)
-
-        if edge_result["net_edge_pct"] < cfg.min_edge_pct:
-            return _text(
-                {
-                    "error": f"Net edge {edge_result['net_edge_pct']:.1f}% after fees "
-                    f"is below minimum {cfg.min_edge_pct}%",
-                    "details": edge_result,
-                }
-            )
-
-        # Validate position limits
-        limit_error = _validate_position_limits(enriched_legs, contracts, cfg)
-        if limit_error:
-            return _text({"error": limit_error})
-
-        # Store and respond
-        group_id, expires_at = db.log_recommendation_group(
-            session_id=session_id,
-            thesis=args.get("thesis"),
-            estimated_edge_pct=edge_result["net_edge_pct"],
-            equivalence_notes=args.get("equivalence_notes"),
-            legs=_build_db_legs(enriched_legs, contracts),
-            ttl_minutes=recommendation_ttl_minutes,
-            total_exposure_usd=total_exposure,
-            computed_edge_pct=edge_result["net_edge_pct"],
-            computed_fees_usd=edge_result["total_fees_usd"],
-            strategy=STRATEGY_BRACKET,
-        )
-
-        return _text(
-            {
-                "group_id": group_id,
-                "status": STATUS_PENDING,
-                "expires_at": expires_at,
-                "computed": {
-                    "contracts_per_leg": contracts,
-                    "cost_per_pair_usd": round(cost_per_pair_usd, 4),
-                    "total_cost_usd": round(contracts * cost_per_pair_usd, 2),
-                    "gross_edge_usd": edge_result["gross_edge_usd"],
-                    "total_fees_usd": edge_result["total_fees_usd"],
-                    "net_edge_usd": edge_result["net_edge_usd"],
-                    "net_edge_pct": edge_result["net_edge_pct"],
-                    "fee_breakdown": edge_result["fee_breakdown"],
-                },
-                "legs": _build_response_legs(enriched_legs, contracts),
-            }
-        )
-
-    async def _handle_manual(
-        enriched_legs: list[dict[str, Any]],
-        legs_input: list[dict[str, Any]],
-        args: dict[str, Any],
-    ) -> dict:
-        """Manual strategy: agent-specified positions, no guaranteed edge."""
+        # ── Apply direction and validate ─────────────────────────
         direction_error = _apply_manual_direction(enriched_legs, legs_input)
         if direction_error:
             return _text({"error": direction_error})
@@ -606,7 +409,6 @@ def create_db_tools(
                 "group_id": group_id,
                 "status": STATUS_PENDING,
                 "expires_at": expires_at,
-                "strategy": STRATEGY_MANUAL,
                 "computed": {
                     "total_cost_usd": round(total_cost, 2),
                     "total_fees_usd": round(total_fees, 4),

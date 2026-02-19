@@ -12,9 +12,7 @@ from typing import Any
 from .constants import (
     ACTION_BUY,
     BINARY_PAYOUT_CENTS,
-    EXCHANGE_KALSHI,
     SIDE_YES,
-    STRATEGY_BRACKET,
 )
 
 
@@ -52,104 +50,15 @@ def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | No
     return None, 0
 
 
-def compute_arb_edge(
-    legs: list[dict[str, Any]],
-    contracts: int,
-) -> dict[str, Any]:
-    """Compute net edge for a balanced arb (equal contracts on all legs).
-
-    Each leg dict must have: exchange, price_cents, maker (bool).
-
-    For bracket N-leg (same exchange): edge = sum of prices - $1 per set.
-    """
-    if not legs or contracts <= 0:
-        return {
-            "gross_edge_usd": 0.0,
-            "total_fees_usd": 0.0,
-            "net_edge_usd": 0.0,
-            "net_edge_pct": 0.0,
-            "profitable": False,
-            "fee_breakdown": [],
-        }
-
-    cost_per_pair_cents = sum(leg["price_cents"] for leg in legs)
-
-    # Bracket: selling all outcomes at sum > 100c, guaranteed cost = 100c per set
-    payout_per_pair_cents = cost_per_pair_cents
-    cost_per_pair_cents = BINARY_PAYOUT_CENTS  # you collect the sum, pay out $1
-    total_cost_usd = contracts * BINARY_PAYOUT_CENTS / 100.0
-
-    gross_edge_per_pair = abs(payout_per_pair_cents - cost_per_pair_cents) / 100.0
-    gross_edge_usd = contracts * gross_edge_per_pair
-
-    fee_breakdown = []
-    total_fees = 0.0
-    for leg in legs:
-        fee = kalshi_fee(contracts, leg["price_cents"], maker=leg.get("maker", False))
-        fee_breakdown.append(
-            {
-                "exchange": leg.get("exchange", EXCHANGE_KALSHI),
-                "price_cents": leg["price_cents"],
-                "maker": leg.get("maker", False),
-                "fee_usd": round(fee, 4),
-            }
-        )
-        total_fees += fee
-
-    net_edge_usd = gross_edge_usd - total_fees
-    # Express as % of total capital deployed
-    net_edge_pct = (net_edge_usd / total_cost_usd * 100) if total_cost_usd > 0 else 0.0
-
-    return {
-        "gross_edge_usd": round(gross_edge_usd, 4),
-        "total_fees_usd": round(total_fees, 4),
-        "net_edge_usd": round(net_edge_usd, 4),
-        "net_edge_pct": round(net_edge_pct, 2),
-        "profitable": net_edge_usd > 0,
-        "fee_breakdown": fee_breakdown,
-    }
-
-
 # ── Hypothetical P&L ─────────────────────────────────────────────
 
 
 def compute_hypothetical_pnl(group: dict[str, Any]) -> float:
     """Compute hypothetical P&L in USD for a fully-settled recommendation group."""
-    strategy = group.get("strategy", STRATEGY_BRACKET)
-    legs = group.get("legs", [])
-    if strategy == STRATEGY_BRACKET:
-        return _pnl_bracket(legs)
-    return _pnl_manual(legs)
+    return _pnl(group.get("legs", []))
 
 
-def _pnl_bracket(legs: list[dict[str, Any]]) -> float:
-    """P&L for bracket arb: guaranteed payout minus cost minus fees.
-
-    Buy all N outcomes at combined cost < $1 per set. One settles at 100c, rest at 0c.
-    Payout is always 100c x quantity regardless of which outcome wins.
-    """
-    if not legs:
-        return 0.0
-
-    quantity = legs[0].get("quantity", 0)
-    total_cost_cents = sum(
-        leg.get("price_cents", 0) * leg.get("quantity", quantity) for leg in legs
-    )
-    payout_cents = BINARY_PAYOUT_CENTS * quantity
-
-    total_fees = sum(
-        kalshi_fee(
-            leg.get("quantity", quantity),
-            leg.get("price_cents", 0),
-            maker=leg.get("is_maker", False),
-        )
-        for leg in legs
-    )
-
-    return round((payout_cents - total_cost_cents) / 100.0 - total_fees, 4)
-
-
-def _pnl_manual(legs: list[dict[str, Any]]) -> float:
+def _pnl(legs: list[dict[str, Any]]) -> float:
     """P&L for manual strategy: per-leg directional P&L minus fees."""
     total_pnl_cents = 0
     total_fees = 0.0

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from .constants import EXCHANGE_KALSHI, STATUS_PENDING, STRATEGY_BRACKET
+from .constants import EXCHANGE_KALSHI, STATUS_PENDING, STRATEGY_MANUAL
 
 
 class Base(DeclarativeBase):
@@ -129,7 +129,7 @@ class RecommendationGroup(Base):
     total_exposure_usd: Mapped[float | None] = mapped_column(Float)
     computed_edge_pct: Mapped[float | None] = mapped_column(Float)
     computed_fees_usd: Mapped[float | None] = mapped_column(Float)
-    strategy: Mapped[str | None] = mapped_column(Text, server_default=STRATEGY_BRACKET)
+    strategy: Mapped[str | None] = mapped_column(Text, server_default=STRATEGY_MANUAL)
     hypothetical_pnl_usd: Mapped[float | None] = mapped_column(Float)
 
     legs: Mapped[list[RecommendationLeg]] = relationship(

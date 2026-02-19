@@ -4,10 +4,12 @@ __pycache__/
 .env.*
 
 # Workspace runtime data
-workspace/data/*.db
-workspace/data/*.db-shm
-workspace/data/*.db-wal
-workspace/data/*.jsonl
-workspace/data/*.log
+workspace/data/
+workspace/analysis/*
+!workspace/analysis/knowledge_base.md
 workspace/keys/
 workspace/backups/
+
+# Dev artifacts
+.claude/agent-memory/
+test_prompt_hooks.py

@@ -19,10 +19,9 @@ from ..constants import (
     STATUS_PARTIAL,
     STATUS_PLACED,
     STATUS_REJECTED,
-    STRATEGY_MANUAL,
 )
 from ..database import AgentDatabase
-from ..fees import best_price_and_depth, compute_arb_edge, kalshi_fee
+from ..fees import best_price_and_depth, kalshi_fee
 from ..kalshi_client import KalshiAPIClient
 from ..ws_monitor import FillMonitor
 from .messages import ExecutionProgress, FillReceived
@@ -180,10 +179,9 @@ class TUIServices:
     async def _refresh_legs_and_validate(
         self,
         group_id: int,
-        group: dict[str, Any],
         legs: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
-        """Re-fetch orderbooks, recompute edge, validate limits.
+        """Re-fetch orderbooks, validate slippage and limits.
 
         Returns (refreshed_legs, None) on success or (None, rejection_results) on failure.
         """
@@ -223,30 +221,6 @@ class TUIServices:
                     "price_cents": price or leg.get("price_cents", 0),
                     "depth": depth,
                 }
-            )
-
-        # Recompute edge with fresh prices (only for bracket strategy)
-        contracts = refreshed_legs[0].get("quantity", 0) if refreshed_legs else 0
-        if group.get("strategy") != STRATEGY_MANUAL and contracts > 0:
-            fee_legs = [
-                {
-                    "exchange": lg.get("exchange", EXCHANGE_KALSHI),
-                    "price_cents": lg["price_cents"],
-                    "maker": lg.get("is_maker", False),
-                }
-                for lg in refreshed_legs
-            ]
-            edge = compute_arb_edge(fee_legs, contracts)
-            if edge["net_edge_pct"] < self._config.min_edge_pct:
-                error = (
-                    f"Edge evaporated: was {group.get('computed_edge_pct', '?')}%, "
-                    f"now {edge['net_edge_pct']}% (min {self._config.min_edge_pct}%)"
-                )
-                logger.warning("Group %d rejected: %s", group_id, error)
-                return None, self._reject_all_legs(group_id, legs, error)
-
-            self.db.update_group_computed_fields(
-                group_id, edge["net_edge_pct"], edge["total_fees_usd"]
             )
 
         # Validate position limits
@@ -294,9 +268,7 @@ class TUIServices:
         _emit(ExecutionProgress(group_id, "recomputing_edge"))
 
         # Phase 1: Refresh orderbooks, recompute edge, validate limits
-        refreshed_legs, error_results = await self._refresh_legs_and_validate(
-            group_id, group, legs
-        )
+        refreshed_legs, error_results = await self._refresh_legs_and_validate(group_id, legs)
         if error_results is not None:
             return error_results
         if refreshed_legs is None:

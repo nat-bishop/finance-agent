@@ -24,7 +24,6 @@ ACTION_BUY = "buy"
 ACTION_SELL = "sell"
 
 # Recommendation strategies
-STRATEGY_BRACKET = "bracket"
 STRATEGY_MANUAL = "manual"
 
 # Binary market mechanics

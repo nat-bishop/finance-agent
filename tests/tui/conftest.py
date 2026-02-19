@@ -12,12 +12,11 @@ from finance_agent.tui.services import TUIServices
 
 @pytest.fixture
 def trading_config(tmp_path) -> TradingConfig:
-    """TradingConfig with safe test defaults (edge validation disabled)."""
+    """TradingConfig with safe test defaults."""
     return TradingConfig(
         kalshi_max_position_usd=100.0,
         recommendation_ttl_minutes=60,
         db_path=str(tmp_path / "test.db"),
-        min_edge_pct=0.0,
     )
 
 

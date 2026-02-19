@@ -6,47 +6,57 @@ import json
 
 from finance_agent.fees import assess_depth_concern, compute_hypothetical_pnl
 
-# ── Bracket P&L ─────────────────────────────────────────────────
+# ── P&L ─────────────────────────────────────────────────────────
 
 
-def test_pnl_bracket_positive():
-    """3-leg bracket at 30c each (sum=90c), qty=10 → positive P&L."""
-    group = {
-        "strategy": "bracket",
-        "legs": [
-            {"price_cents": 30, "quantity": 10, "is_maker": False, "side": "yes"},
-            {"price_cents": 30, "quantity": 10, "is_maker": False, "side": "yes"},
-            {"price_cents": 30, "quantity": 10, "is_maker": False, "side": "yes"},
-        ],
-    }
-    pnl = compute_hypothetical_pnl(group)
-    # Payout = 100 * 10 / 100 = $10.00
-    # Cost = 90 * 10 / 100 = $9.00
-    # Gross = $1.00, minus fees
-    assert pnl > 0
-    assert pnl < 1.0  # Gross is $1.00, fees reduce it
-
-
-def test_pnl_bracket_negative():
-    """Bracket with sum > 100c → negative P&L."""
-    group = {
-        "strategy": "bracket",
-        "legs": [
-            {"price_cents": 60, "quantity": 5, "is_maker": False, "side": "yes"},
-            {"price_cents": 60, "quantity": 5, "is_maker": False, "side": "yes"},
-        ],
-    }
-    pnl = compute_hypothetical_pnl(group)
-    # Cost = 120 * 5 / 100 = $6.00, payout = 100 * 5 / 100 = $5.00
-    assert pnl < 0
-
-
-def test_pnl_bracket_empty_legs():
-    group = {"strategy": "bracket", "legs": []}
+def test_pnl_empty_legs():
+    group = {"legs": []}
     assert compute_hypothetical_pnl(group) == 0.0
 
 
-# ── Manual P&L ──────────────────────────────────────────────────
+def test_pnl_backward_compat_bracket_strategy():
+    """Groups with strategy='bracket' from old data still compute P&L correctly.
+
+    After removing bracket-specific logic, compute_hypothetical_pnl ignores
+    the strategy field and processes all legs via the unified _pnl path.
+    Legs need action/side fields to compute correctly.
+    """
+    group = {
+        "strategy": "bracket",
+        "legs": [
+            {
+                "price_cents": 30,
+                "quantity": 10,
+                "is_maker": False,
+                "action": "buy",
+                "side": "yes",
+                "settlement_value": 100,
+            },
+            {
+                "price_cents": 30,
+                "quantity": 10,
+                "is_maker": False,
+                "action": "buy",
+                "side": "yes",
+                "settlement_value": 0,
+            },
+            {
+                "price_cents": 30,
+                "quantity": 10,
+                "is_maker": False,
+                "action": "buy",
+                "side": "yes",
+                "settlement_value": 0,
+            },
+        ],
+    }
+    pnl = compute_hypothetical_pnl(group)
+    # Leg 1: (100 - 30) * 10 / 100 = $7.00
+    # Leg 2: (0 - 30) * 10 / 100 = -$3.00
+    # Leg 3: (0 - 30) * 10 / 100 = -$3.00
+    # Gross = $1.00, minus fees
+    assert pnl > 0
+    assert pnl < 1.0
 
 
 def test_pnl_manual_buy_yes_win():

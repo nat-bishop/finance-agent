@@ -2,7 +2,7 @@
 
 Kalshi market analysis system built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
 
-Discovers mispricings across Kalshi markets using code-first analysis — bracket arbitrage on mutually exclusive events, price correlations across categories, and custom analytical scripts. Produces structured trade recommendations for review and execution via a terminal UI.
+Discovers mispricings across Kalshi markets using a combination of programmatic analysis and semantic reasoning — reading settlement rules, identifying cross-market inconsistencies, and writing custom analytical scripts. Produces structured trade recommendations for review and execution via a terminal UI.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ Discovers mispricings across Kalshi markets using code-first analysis — bracke
 
 1. **Programmatic layer** (no LLM) — `collector.py` snapshots Kalshi market data to SQLite, syncs daily history from S3, and generates `markets.jsonl` (one JSON object per market with denormalized event metadata for programmatic discovery).
 
-2. **Agent layer** (Claude) — writes Python scripts against `markets.jsonl` and SQLite for bulk market analysis, investigates top candidates using MCP tools, and records trade recommendations via `recommend_trade`. Two strategies: `bracket` (guaranteed arb, auto-computed) and `manual` (agent-specified correlated trades). Persists findings to a knowledge base across sessions.
+2. **Agent layer** (Claude) — writes Python scripts against `markets.jsonl` and SQLite for bulk market analysis, investigates candidates using MCP tools for semantic analysis (reading settlement rules, understanding market relationships), and records trade recommendations via `recommend_trade` with agent-specified positions per leg. Persists findings to a knowledge base across sessions.
 
 3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 4 navigable screens.
 
@@ -78,7 +78,7 @@ The collector is a standalone script with no LLM dependency. Run it on a schedul
 
 | Tool | Notes |
 |------|-------|
-| `recommend_trade` | Two strategies: `bracket` (mutually exclusive events, auto-computed direction/sizing/edge) and `manual` (agent-specified action/side/quantity per leg). Both require `thesis` and `legs` array (2+ required). |
+| `recommend_trade` | Record a trade recommendation. Requires `thesis` and `legs` array (1+ required) with agent-specified action/side/quantity per leg. System validates limits and computes fees. |
 
 **Conventions:** All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`.
 
@@ -88,7 +88,7 @@ The collector is a standalone script with no LLM dependency. Run it on a schedul
 Agent recommends → TUI review → Execute or Reject
 ```
 
-1. **Agent calls `recommend_trade`** — creates a recommendation group with 2+ legs in SQLite. For `bracket` strategy: auto-computes direction, balanced sizing, and net edge (must exceed `min_edge_pct`). For `manual` strategy: agent specifies action, side, and quantity per leg; system validates limits and computes fees.
+1. **Agent calls `recommend_trade`** — creates a recommendation group with 1+ legs in SQLite. Agent specifies action, side, and quantity per leg; system validates position limits and computes fees.
 
 2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Shows edge, thesis, expiry countdown, and per-leg details.
 
@@ -96,16 +96,14 @@ Agent recommends → TUI review → Execute or Reject
 
 4. **Reject** — marks all legs and the group as rejected. Visible in history.
 
-## Analysis Strategies
+## Analysis Approach
 
-### Bracket Arbitrage (Guaranteed)
-Mutually exclusive outcomes within a single event where YES prices sum ≠ 100c. Discovery via `scan_brackets.py`, validation with orderbook depth, recommendation via `strategy=bracket`.
+The agent combines programmatic analysis with semantic reasoning:
 
-### Correlation Analysis (Relationship)
-Markets whose prices should move together but have diverged. Discovery via `correlations.py`, investigation with `get_market` to understand divergence, recommendation via `strategy=manual`.
-
-### Custom Analysis (Code-First)
-Agent writes Python scripts for any analysis pattern: calendar spreads, category anomalies, volume/price divergences, new market launches vs established markets.
+1. **Programmatic discovery** — writes Python scripts against `markets.jsonl` and SQLite to find numerical anomalies (price inconsistencies, correlation divergences, stale markets, volume spikes)
+2. **Semantic investigation** — reads settlement rules and market descriptions via `get_market` to understand edge cases, resolution criteria, and cross-market relationships
+3. **Hypothesis and validation** — forms a thesis about why a mispricing exists, validates with orderbook depth and trade activity
+4. **Cumulative learning** — records findings, rejected ideas, and heuristics in a persistent knowledge base
 
 ## Configuration
 
@@ -125,7 +123,6 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 | Kalshi max position | $100 |
 | Max portfolio | $1,000 |
 | Max contracts/order | 50 |
-| Min edge required | 7% |
 | Claude budget/session | $2 |
 | Recommendation TTL | 60 min |
 
@@ -160,7 +157,6 @@ The workspace uses a dual-mount isolation pattern. Reference scripts are COPY'd 
 /workspace/                     # agent sandbox (cwd)
   scripts/                      # COPY'd into image (read-only)
     db_utils.py                 # Shared database query helpers (latest_snapshot_ids, latest_snapshots)
-    scan_brackets.py            # Bracket arb scanner
     correlations.py             # Pairwise price correlations
     query_history.py            # Daily history queries
     market_info.py              # Full market lookup
