@@ -15,11 +15,16 @@ def lookup(ticker):
     snapshots = query(
         "SELECT * FROM market_snapshots WHERE ticker = ? ORDER BY captured_at DESC LIMIT 1",
         (ticker,),
+        limit=0,
     )
     if snapshots:
         result["snapshot"] = snapshots[0]
 
-    meta = query("SELECT * FROM kalshi_market_meta WHERE ticker = ?", (ticker,))
+    meta = query(
+        "SELECT * FROM kalshi_market_meta WHERE ticker = ?",
+        (ticker,),
+        limit=0,
+    )
     if meta:
         result["meta"] = meta[0]
 
@@ -27,6 +32,7 @@ def lookup(ticker):
         events = query(
             "SELECT * FROM events WHERE event_ticker = ? AND exchange = 'kalshi'",
             (snapshots[0]["event_ticker"],),
+            limit=0,
         )
         if events:
             result["event"] = events[0]
@@ -37,6 +43,7 @@ def lookup(ticker):
         FROM kalshi_daily WHERE ticker_name = ? ORDER BY date DESC LIMIT 30
         """,
         (ticker,),
+        limit=0,
     )
     if daily:
         result["daily_history"] = daily
@@ -44,6 +51,7 @@ def lookup(ticker):
     trades = query(
         "SELECT * FROM trades WHERE ticker = ? ORDER BY timestamp DESC LIMIT 10",
         (ticker,),
+        limit=0,
     )
     if trades:
         result["trades"] = trades
@@ -56,6 +64,7 @@ def lookup(ticker):
         WHERE rl.market_id = ? ORDER BY rg.created_at DESC LIMIT 10
         """,
         (ticker,),
+        limit=0,
     )
     if legs:
         result["recommendations"] = legs

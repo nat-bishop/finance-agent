@@ -1,61 +1,37 @@
-"""Reusable database helpers for analysis scripts."""
-import sqlite3
+"""Reusable database helpers for analysis scripts (DuckDB)."""
+import time
+import duckdb
 from pathlib import Path
 
-DB_PATH = Path("/workspace/data/agent.db")
+DB_PATH = Path("/workspace/data/agent.duckdb")
+DEFAULT_LIMIT = 10_000
 
 
-def connect():
-    """Get a SQLite connection with dict row factory."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def connect(retries=3, backoff=0.5):
+    """Get a read-only DuckDB connection with retry on lock."""
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(str(DB_PATH), read_only=True)
+        except duckdb.IOException:
+            if attempt < retries - 1:
+                time.sleep(backoff * (attempt + 1))
+            else:
+                raise
 
 
-def query(sql, params=()):
-    """Execute SQL and return list of dicts."""
-    conn = connect()
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def latest_snapshot_ids():
-    """SQL subquery for latest snapshot ID per open ticker.
-
-    Use inside an IN clause:
-        f"... AND id IN ({latest_snapshot_ids()})"
-    """
-    return (
-        "SELECT MAX(id) FROM market_snapshots "
-        "WHERE status = 'open' AND exchange = 'kalshi' GROUP BY ticker"
-    )
-
-
-def materialize_latest_ids(conn):
-    """Create temp table with latest snapshot IDs on the given connection.
-
-    Use when IN(latest_snapshot_ids()) is too slow inside JOINs.
-    After calling, JOIN against _latest_ids instead:
-        JOIN _latest_ids li ON ms.id = li.id
-    """
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _latest_ids (id INTEGER PRIMARY KEY)")
-    conn.execute("DELETE FROM _latest_ids")
-    conn.execute(f"INSERT INTO _latest_ids {latest_snapshot_ids()}")
-
-
-def latest_snapshots(columns="*", where="", params=()):
-    """Query latest snapshot per open ticker with optional filtering.
+def query(sql, params=(), *, limit=DEFAULT_LIMIT):
+    """Execute SQL and return list of dicts. Auto-applies LIMIT unless disabled.
 
     Args:
-        columns: SQL column list (default "*")
-        where: additional WHERE clause (without leading AND)
-        params: query parameters for the where clause
+        sql: SQL query string.
+        params: Query parameters (tuple).
+        limit: Max rows to return. Set to 0 or None to disable.
     """
-    extra = f"AND {where}" if where else ""
-    return query(
-        f"SELECT {columns} FROM market_snapshots "
-        f"WHERE status = 'open' AND exchange = 'kalshi' "
-        f"AND id IN ({latest_snapshot_ids()}) {extra}",
-        params,
-    )
+    if limit and "LIMIT" not in sql.upper():
+        sql = f"{sql.rstrip().rstrip(';')} LIMIT {limit}"
+    conn = connect()
+    result = conn.execute(sql, params)
+    columns = [desc[0] for desc in result.description]
+    rows = result.fetchall()
+    conn.close()
+    return [dict(zip(columns, row)) for row in rows]

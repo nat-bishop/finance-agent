@@ -10,23 +10,23 @@ from db_utils import query
 
 
 def get_history(ticker, days=90):
-    """Get daily history for a specific ticker."""
+    """Get daily history for a specific ticker using v_daily_with_meta."""
     return query(
         """
-        SELECT d.date, d.ticker_name, m.title, m.category,
-               d.high, d.low, d.daily_volume, d.open_interest, d.status
-        FROM kalshi_daily d
-        LEFT JOIN kalshi_market_meta m ON d.ticker_name = m.ticker
-        WHERE d.ticker_name = ?
-        ORDER BY d.date DESC
+        SELECT date, ticker_name, title, category,
+               high, low, daily_volume, open_interest, status
+        FROM v_daily_with_meta
+        WHERE ticker_name = ?
+        ORDER BY date DESC
         LIMIT ?
         """,
         (ticker, days),
+        limit=0,
     )
 
 
 def search_tickers(keyword, days=30):
-    """Search for tickers matching a keyword in title."""
+    """Search for tickers matching a keyword in title (case-insensitive)."""
     return query(
         """
         SELECT DISTINCT m.ticker, m.title, m.category, m.event_ticker,
@@ -35,12 +35,13 @@ def search_tickers(keyword, days=30):
                MAX(d.daily_volume) as max_volume
         FROM kalshi_market_meta m
         LEFT JOIN kalshi_daily d ON m.ticker = d.ticker_name
-        WHERE m.title LIKE ?
-        GROUP BY m.ticker
+        WHERE m.title ILIKE ?
+        GROUP BY m.ticker, m.title, m.category, m.event_ticker
         ORDER BY max_volume DESC NULLS LAST
         LIMIT 50
         """,
         (f"%{keyword}%",),
+        limit=0,
     )
 
 

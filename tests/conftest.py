@@ -15,8 +15,8 @@ from finance_agent.database import AgentDatabase
 
 @pytest.fixture
 def db(tmp_path):
-    """Fresh AgentDatabase with Alembic migrations applied (temp file-based SQLite)."""
-    db_path = tmp_path / "test_agent.db"
+    """Fresh AgentDatabase with Alembic migrations applied (temp file-based DuckDB)."""
+    db_path = tmp_path / "test_agent.duckdb"
     database = AgentDatabase(str(db_path))
     yield database
     database.close()

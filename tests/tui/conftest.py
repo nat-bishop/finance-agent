@@ -16,7 +16,7 @@ def trading_config(tmp_path) -> TradingConfig:
     return TradingConfig(
         kalshi_max_position_usd=100.0,
         recommendation_ttl_minutes=60,
-        db_path=str(tmp_path / "test.db"),
+        db_path=str(tmp_path / "test.duckdb"),
     )
 
 

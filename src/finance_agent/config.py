@@ -33,9 +33,9 @@ class TradingConfig:
     max_order_count: int = 50
 
     # Paths: defaults are local (./workspace/*); Docker sets env overrides via FA_* env vars
-    db_path: str = "workspace/data/agent.db"
+    db_path: str = "workspace/data/agent.duckdb"
     backup_dir: str = "workspace/backups"
-    log_file: str = ""  # empty = no file logging; Docker sets via FA_LOG_FILE
+    log_dir: str = ""  # empty = no file logging; Docker sets via FA_LOG_DIR
     backup_max_age_hours: int = 24
     kalshi_rate_limit_reads_per_sec: int = 30  # Kalshi Basic tier
     kalshi_rate_limit_writes_per_sec: int = 30  # Kalshi Basic tier
@@ -71,7 +71,7 @@ def load_configs() -> tuple[AgentConfig, Credentials, TradingConfig]:
     tc = TradingConfig(
         db_path=os.environ.get("FA_DB_PATH", TradingConfig.db_path),
         backup_dir=os.environ.get("FA_BACKUP_DIR", TradingConfig.backup_dir),
-        log_file=os.environ.get("FA_LOG_FILE", TradingConfig.log_file),
+        log_dir=os.environ.get("FA_LOG_DIR", TradingConfig.log_dir),
     )
     return AgentConfig(), Credentials(), tc
 

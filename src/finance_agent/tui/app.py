@@ -85,6 +85,14 @@ class FinanceApp(App):
         session_id = db.create_session()
         self._session_id = session_id
 
+        # Per-session file logging
+        self._log_handler: logging.Handler | None = None
+        if trading_config.log_dir:
+            from ..logging_config import add_session_file_handler
+
+            self._log_handler = add_session_file_handler(trading_config.log_dir, session_id)
+            logger.info("Session %s started", session_id)
+
         # Exchange clients
         kalshi = KalshiAPIClient(credentials, trading_config)
         self._kalshi = kalshi
@@ -257,3 +265,6 @@ class FinanceApp(App):
         if self._db:
             with contextlib.suppress(BaseException):
                 self._db.close()
+        if self._log_handler:
+            logging.getLogger().removeHandler(self._log_handler)
+            self._log_handler.close()

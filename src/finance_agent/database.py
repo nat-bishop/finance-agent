@@ -1,21 +1,22 @@
-"""SQLite database for agent state, market data, and trades.
+"""DuckDB database for agent state, market data, and trades.
 
-Uses SQLAlchemy ORM with Alembic autogenerate migrations.
+Uses SQLAlchemy ORM with duckdb_engine dialect and Alembic autogenerate migrations.
 """
 
 from __future__ import annotations
 
+import csv
 import logging
+import os
+import tempfile
 import uuid
-from collections.abc import Generator
-from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import create_engine, delete, event, func, insert, select, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from finance_agent.constants import (
     EXCHANGE_KALSHI,
@@ -38,16 +39,92 @@ from finance_agent.models import (
 
 logger = logging.getLogger(__name__)
 
+# ── Canonical view SQL ───────────────────────────────────────────
+
+_VIEW_LATEST_MARKETS = """\
+CREATE OR REPLACE VIEW v_latest_markets AS
+SELECT
+    s.exchange,
+    s.ticker,
+    s.event_ticker,
+    e.title AS event_title,
+    COALESCE(e.mutually_exclusive, 0) AS mutually_exclusive,
+    s.title,
+    COALESCE(e.category, s.category) AS category,
+    COALESCE(
+        json_extract_string(s.raw_json, '$.rules_primary'),
+        json_extract_string(s.raw_json, '$.description')
+    ) AS description,
+    s.mid_price_cents,
+    s.spread_cents,
+    s.yes_bid,
+    s.yes_ask,
+    s.volume_24h,
+    s.open_interest,
+    s.days_to_expiration,
+    s.close_time,
+    s.captured_at
+FROM market_snapshots s
+LEFT JOIN events e
+    ON s.event_ticker = e.event_ticker AND s.exchange = e.exchange
+WHERE s.status = 'open'
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY s.exchange, s.ticker ORDER BY s.captured_at DESC
+) = 1
+"""
+
+_VIEW_DAILY_WITH_META = """\
+CREATE OR REPLACE VIEW v_daily_with_meta AS
+SELECT
+    d.date,
+    d.ticker_name,
+    m.title,
+    m.category,
+    m.event_ticker,
+    d.high,
+    d.low,
+    d.daily_volume,
+    d.open_interest,
+    d.status
+FROM kalshi_daily d
+JOIN kalshi_market_meta m ON d.ticker_name = m.ticker
+"""
+
+_VIEW_ACTIVE_RECOMMENDATIONS = """\
+CREATE OR REPLACE VIEW v_active_recommendations AS
+SELECT
+    g.id AS group_id,
+    g.thesis,
+    g.strategy,
+    g.status AS group_status,
+    g.estimated_edge_pct,
+    g.total_exposure_usd,
+    g.created_at,
+    g.expires_at,
+    l.leg_index,
+    l.exchange,
+    l.market_id,
+    l.market_title,
+    l.action,
+    l.side,
+    l.quantity,
+    l.price_cents,
+    l.status AS leg_status
+FROM recommendation_groups g
+JOIN recommendation_legs l ON g.id = l.group_id
+WHERE g.status = 'pending'
+ORDER BY g.created_at DESC, l.leg_index
+"""
+
+_CANONICAL_VIEWS = [_VIEW_LATEST_MARKETS, _VIEW_DAILY_WITH_META, _VIEW_ACTIVE_RECOMMENDATIONS]
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
 class AgentDatabase:
-    """SQLite database for the trading agent.
-
-    Uses WAL mode for concurrent access (collector + agent).
-    """
+    """DuckDB database for the trading agent."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -55,37 +132,20 @@ class AgentDatabase:
         logger.info("Opening database: %s", self.db_path)
 
         self._engine = create_engine(
-            f"sqlite:///{self.db_path}",
-            connect_args={"timeout": 30, "check_same_thread": False},
+            f"duckdb:///{self.db_path}",
             echo=False,
+            poolclass=NullPool,
         )
 
         @event.listens_for(self._engine, "connect")
-        def _set_sqlite_pragma(dbapi_connection, connection_record):
+        def _set_duckdb_config(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
-            # EXCLUSIVE locking stores WAL index in heap memory instead of
-            # a shared-memory file, avoiding mmap — required for Docker
-            # bind mounts on Windows/Mac where POSIX locking is unsupported.
-            cursor.execute("PRAGMA locking_mode=EXCLUSIVE")
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            except Exception:
-                logger.warning("WAL mode unavailable, falling back to DELETE journal")
-                try:
-                    cursor.execute("PRAGMA journal_mode=DELETE")
-                except Exception:
-                    logger.warning("Could not set journal mode, using database default")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=30000")
-            with suppress(Exception):
-                cursor.execute("PRAGMA mmap_size=268435456")  # 256 MB mmap window
-            cursor.execute("PRAGMA cache_size=-131072")  # 128 MB page cache
-            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("SET memory_limit = '2GB'")
             cursor.close()
 
         self._session_factory = sessionmaker(bind=self._engine)
-        self._bulk_mode = False
         self._run_migrations()
+        self._create_views()
 
     def _run_migrations(self) -> None:
         """Run Alembic migrations to bring schema up to date."""
@@ -95,60 +155,57 @@ class AgentDatabase:
         logger.debug("Running Alembic migrations...")
         config = Config()
         config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
-        config.set_main_option("sqlalchemy.url", f"sqlite:///{self.db_path}")
+        config.set_main_option("sqlalchemy.url", f"duckdb:///{self.db_path}")
         with self._engine.begin() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
         logger.debug("Migrations complete")
+
+    def _create_views(self) -> None:
+        """Create or replace canonical views."""
+        conn = self._engine.raw_connection()
+        try:
+            cursor = conn.cursor()
+            for view_sql in _CANONICAL_VIEWS:
+                cursor.execute(view_sql)
+            cursor.close()
+            conn.commit()
+        finally:
+            conn.close()
 
     def close(self) -> None:
         logger.debug("Closing database connection")
         self._engine.dispose()
 
     def maintenance(self, *, vacuum: bool = False) -> None:
-        """Run database maintenance: update statistics, checkpoint WAL.
-
-        Safe to call while other connections are open (uses PASSIVE checkpoint).
-        Set ``vacuum=True`` only when no other connections are active and
-        sufficient disk space is available (~1x DB size).
-        """
+        """Run database maintenance: checkpoint WAL, optionally reclaim storage."""
         import time
 
         t0 = time.time()
         conn = self._engine.raw_connection()
         try:
             cursor = conn.cursor()
-            # Bound ANALYZE work so first run finishes in seconds, not minutes
-            cursor.execute("PRAGMA analysis_limit=1000")
-            cursor.execute("PRAGMA optimize")
-            # PASSIVE: checkpoint as much as possible without blocking readers
-            cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            row = cursor.fetchone()
-            busy, log_pages, checkpointed = row or (0, 0, 0)
+            cursor.execute("CHECKPOINT")
             cursor.close()
             conn.commit()
         finally:
             conn.close()
 
         elapsed = time.time() - t0
-        logger.info(
-            "Maintenance: optimize + checkpoint in %.1fs (wal_pages=%d, checkpointed=%d, busy=%d)",
-            elapsed,
-            log_pages,
-            checkpointed,
-            busy,
-        )
+        logger.info("Maintenance: checkpoint in %.1fs", elapsed)
 
         if vacuum:
-            logger.info("Running VACUUM (this may take several minutes)...")
+            logger.info("Running VACUUM ANALYZE (this may take several minutes)...")
             t0 = time.time()
             conn = self._engine.raw_connection()
             try:
-                conn.execute("VACUUM")
+                cursor = conn.cursor()
+                cursor.execute("VACUUM ANALYZE")
+                cursor.close()
                 conn.commit()
             finally:
                 conn.close()
-            logger.info("VACUUM completed in %.1fs", time.time() - t0)
+            logger.info("VACUUM ANALYZE completed in %.1fs", time.time() - t0)
 
     # ── Market snapshot queries ─────────────────────────────────
 
@@ -253,6 +310,7 @@ class AgentDatabase:
         with self._session_factory() as session:
             session.add(trade)
             session.commit()
+            session.refresh(trade)
             return trade.id  # type: ignore[return-value]
 
     # ── Recommendation Groups ─────────────────────────────────
@@ -305,6 +363,7 @@ class AgentDatabase:
         with self._session_factory() as session:
             session.add(group)
             session.commit()
+            session.refresh(group)
             group_id = group.id
 
         return group_id, expires_at  # type: ignore[return-value]
@@ -490,14 +549,19 @@ class AgentDatabase:
         """Delete market snapshots older than retention_days. Returns count deleted."""
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
         with self._session_factory() as session:
-            result = session.execute(
-                delete(MarketSnapshot).where(MarketSnapshot.captured_at < cutoff)
+            count = (
+                session.scalar(
+                    select(func.count(MarketSnapshot.id)).where(
+                        MarketSnapshot.captured_at < cutoff
+                    )
+                )
+                or 0
             )
-            session.commit()
-            deleted: int = result.rowcount  # type: ignore[attr-defined]
-        if deleted:
-            logger.info("Purged %d snapshots older than %d days", deleted, retention_days)
-        return deleted
+            if count > 0:
+                session.execute(delete(MarketSnapshot).where(MarketSnapshot.captured_at < cutoff))
+                session.commit()
+                logger.info("Purged %d snapshots older than %d days", count, retention_days)
+        return count
 
     # ── Kalshi daily history ─────────────────────────────────
 
@@ -532,19 +596,25 @@ class AgentDatabase:
         )
 
         with self._session_factory() as session:
-            result = session.execute(
-                delete(KalshiDaily).where(KalshiDaily.ticker_name.in_(stale_tickers))
+            deleted = (
+                session.scalar(
+                    select(func.count(KalshiDaily.id)).where(
+                        KalshiDaily.ticker_name.in_(stale_tickers)
+                    )
+                )
+                or 0
             )
-            session.commit()
-            deleted: int = result.rowcount  # type: ignore[attr-defined]
-
-        if deleted:
-            logger.info(
-                "Purged %d daily rows (tickers with <%d days, no data since %s)",
-                deleted,
-                min_ticker_days,
-                cutoff,
-            )
+            if deleted > 0:
+                session.execute(
+                    delete(KalshiDaily).where(KalshiDaily.ticker_name.in_(stale_tickers))
+                )
+                session.commit()
+                logger.info(
+                    "Purged %d daily rows (tickers with <%d days, no data since %s)",
+                    deleted,
+                    min_ticker_days,
+                    cutoff,
+                )
         return deleted
 
     def purge_inactive_daily(self) -> int:
@@ -553,43 +623,124 @@ class AgentDatabase:
         These are micro-markets with no trading activity — typically 94%+ of
         recent daily records.  Returns total number of rows deleted.
         """
+        condition = [
+            (KalshiDaily.daily_volume == 0) | (KalshiDaily.daily_volume.is_(None)),
+            (KalshiDaily.open_interest == 0) | (KalshiDaily.open_interest.is_(None)),
+        ]
         with self._session_factory() as session:
-            result = session.execute(
-                delete(KalshiDaily).where(
-                    (KalshiDaily.daily_volume == 0) | (KalshiDaily.daily_volume.is_(None)),
-                    (KalshiDaily.open_interest == 0) | (KalshiDaily.open_interest.is_(None)),
-                )
-            )
-            session.commit()
-            deleted: int = result.rowcount  # type: ignore[attr-defined]
-
-        if deleted:
-            logger.info("Purged %d inactive daily rows (zero volume and OI)", deleted)
+            deleted = session.scalar(select(func.count(KalshiDaily.id)).where(*condition)) or 0
+            if deleted > 0:
+                session.execute(delete(KalshiDaily).where(*condition))
+                session.commit()
+                logger.info("Purged %d inactive daily rows (zero volume and OI)", deleted)
         return deleted
+
+    # ── Bulk upsert via CSV staging ──────────────────────────
+
+    def _bulk_upsert(
+        self,
+        *,
+        table: str,
+        columns: list[str],
+        rows: list[dict[str, Any]],
+        conflict_columns: list[str],
+        update_columns: list[str] | None = None,
+    ) -> int:
+        """Bulk upsert via CSV tempfile → DuckDB ``read_csv`` → staging table.
+
+        ~745x faster than row-by-row ``text()`` execution (0.19s vs 141s for 50k rows).
+        Uses ``DISTINCT ON`` to handle in-batch duplicates and ``ORDER BY`` on
+        conflict columns for optimal upsert performance.
+
+        Args:
+            table: Target table name.
+            columns: Column names to insert.
+            rows: List of dicts (keys must include all *columns*).
+            conflict_columns: Columns for ON CONFLICT clause.
+            update_columns: Columns to update on conflict.  ``None`` → DO NOTHING.
+        """
+        if not rows:
+            return 0
+
+        cols_csv = ", ".join(columns)
+        conflict_csv = ", ".join(conflict_columns)
+
+        if update_columns:
+            update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_columns)
+            conflict_clause = f"ON CONFLICT ({conflict_csv}) DO UPDATE SET {update_set}"
+        else:
+            conflict_clause = f"ON CONFLICT ({conflict_csv}) DO NOTHING"
+
+        fd, tmp_name = tempfile.mkstemp(suffix=".csv")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(columns)
+                for row in rows:
+                    writer.writerow(row.get(c) for c in columns)
+
+            # DuckDB needs forward-slash paths on all platforms
+            csv_path = str(tmp_path).replace(os.sep, "/")
+
+            conn = self._engine.raw_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"CREATE TEMP TABLE _bulk_stg AS "  # noqa: S608
+                    f"SELECT * FROM read_csv('{csv_path}', header=true)"
+                )
+                cursor.execute(
+                    f"INSERT INTO {table} ({cols_csv}) "  # noqa: S608
+                    f"SELECT DISTINCT ON ({conflict_csv}) {cols_csv} "
+                    f"FROM _bulk_stg ORDER BY {conflict_csv} "
+                    f"{conflict_clause}"
+                )
+                cursor.execute("DROP TABLE IF EXISTS _bulk_stg")
+                conn.commit()
+            finally:
+                conn.close()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        return len(rows)
+
+    # ── Kalshi daily: insert / upsert ─────────────────────────
+
+    _DAILY_COLUMNS: ClassVar[list[str]] = [
+        "date",
+        "ticker_name",
+        "report_ticker",
+        "payout_type",
+        "open_interest",
+        "daily_volume",
+        "block_volume",
+        "high",
+        "low",
+        "status",
+    ]
+    _DAILY_CONFLICT: ClassVar[list[str]] = ["date", "ticker_name"]
+    _DAILY_UPDATE: ClassVar[list[str]] = [
+        "report_ticker",
+        "payout_type",
+        "open_interest",
+        "daily_volume",
+        "block_volume",
+        "high",
+        "low",
+        "status",
+    ]
 
     def insert_kalshi_daily(self, rows: list[dict[str, Any]]) -> int:
         """Bulk upsert daily Kalshi data. Returns count inserted/updated."""
-        if not rows:
-            return 0
         filtered = [{k: v for k, v in row.items() if k in self._DAILY_COLS} for row in rows]
-        stmt = sqlite_insert(KalshiDaily)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["date", "ticker_name"],
-            set_={
-                "report_ticker": stmt.excluded.report_ticker,
-                "payout_type": stmt.excluded.payout_type,
-                "open_interest": stmt.excluded.open_interest,
-                "daily_volume": stmt.excluded.daily_volume,
-                "block_volume": stmt.excluded.block_volume,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "status": stmt.excluded.status,
-            },
+        return self._bulk_upsert(
+            table="kalshi_daily",
+            columns=self._DAILY_COLUMNS,
+            rows=filtered,
+            conflict_columns=self._DAILY_CONFLICT,
+            update_columns=self._DAILY_UPDATE,
         )
-        with self._session_factory() as session:
-            session.execute(stmt, filtered)
-            session.commit()
-        return len(filtered)
 
     _BULK_CHUNK_SIZE = 50_000
 
@@ -597,77 +748,63 @@ class AgentDatabase:
         """Bulk insert daily Kalshi data, skipping existing rows.
 
         Uses ``ON CONFLICT DO NOTHING`` — faster than upsert for immutable
-        historical data.  Chunks inserts to keep WAL size bounded.
-
-        When called inside ``bulk_import_mode()``, applies aggressive PRAGMAs
-        directly on the session connection (synchronous=OFF, larger cache).
+        historical data.  Chunks inserts to keep memory bounded.
         """
         if not rows:
             return 0
         filtered = [{k: v for k, v in row.items() if k in self._DAILY_COLS} for row in rows]
-        stmt = sqlite_insert(KalshiDaily).on_conflict_do_nothing(
-            index_elements=["date", "ticker_name"],
-        )
         total = 0
-        with self._session_factory() as session:
-            if self._bulk_mode:
-                session.execute(text("PRAGMA synchronous=OFF"))
-                session.execute(text("PRAGMA cache_size=-256000"))
-            try:
-                for i in range(0, len(filtered), self._BULK_CHUNK_SIZE):
-                    chunk = filtered[i : i + self._BULK_CHUNK_SIZE]
-                    session.execute(stmt, chunk)
-                    session.commit()
-                    total += len(chunk)
-            finally:
-                if self._bulk_mode:
-                    session.execute(text("PRAGMA synchronous=FULL"))
-                    session.execute(text("PRAGMA cache_size=-131072"))
+        for i in range(0, len(filtered), self._BULK_CHUNK_SIZE):
+            chunk = filtered[i : i + self._BULK_CHUNK_SIZE]
+            total += self._bulk_upsert(
+                table="kalshi_daily",
+                columns=self._DAILY_COLUMNS,
+                rows=chunk,
+                conflict_columns=self._DAILY_CONFLICT,
+                update_columns=None,
+            )
         return total
 
-    @contextmanager
-    def bulk_import_mode(self) -> Generator[None]:
-        """Temporarily enable aggressive PRAGMAs for bulk data import.
-
-        Sets a flag checked by ``insert_kalshi_daily_bulk()`` to apply
-        performance PRAGMAs (synchronous=OFF, larger cache) on the actual
-        session connection doing the work.  Safe for data that can be
-        re-fetched (e.g. S3 backfill).
-        """
-        self._bulk_mode = True
-        logger.info("Bulk import mode enabled")
-        try:
-            yield
-        finally:
-            self._bulk_mode = False
-            logger.info("Bulk import mode disabled")
-
     # ── Kalshi market metadata ───────────────────────────────
+
+    _META_COLUMNS: ClassVar[list[str]] = [
+        "ticker",
+        "event_ticker",
+        "series_ticker",
+        "title",
+        "category",
+        "first_seen",
+        "last_seen",
+    ]
+    _META_CONFLICT: ClassVar[list[str]] = ["ticker"]
+    _META_UPDATE: ClassVar[list[str]] = [
+        "event_ticker",
+        "series_ticker",
+        "title",
+        "category",
+        "last_seen",
+    ]
 
     def upsert_market_meta(self, rows: list[dict[str, Any]]) -> int:
         """Bulk upsert market metadata. Preserves first_seen on conflict."""
         if not rows:
             return 0
         now = _now()
-        for row in rows:
-            row.setdefault("first_seen", now)
-            row.setdefault("last_seen", now)
-        stmt = sqlite_insert(KalshiMarketMeta)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["ticker"],
-            set_={
-                "event_ticker": stmt.excluded.event_ticker,
-                "series_ticker": stmt.excluded.series_ticker,
-                "title": stmt.excluded.title,
-                "category": stmt.excluded.category,
-                "last_seen": stmt.excluded.last_seen,
-                # first_seen intentionally NOT updated
-            },
+        prepared = [
+            {
+                **row,
+                "first_seen": row.get("first_seen", now),
+                "last_seen": row.get("last_seen", now),
+            }
+            for row in rows
+        ]
+        return self._bulk_upsert(
+            table="kalshi_market_meta",
+            columns=self._META_COLUMNS,
+            rows=prepared,
+            conflict_columns=self._META_CONFLICT,
+            update_columns=self._META_UPDATE,
         )
-        with self._session_factory() as session:
-            session.execute(stmt, rows)
-            session.commit()
-        return len(rows)
 
     def get_missing_meta_tickers(self, limit: int = 200, recency_days: int = 90) -> list[str]:
         """Return tickers in kalshi_daily that have no kalshi_market_meta row.
@@ -712,20 +849,23 @@ class AgentDatabase:
             "last_updated": _now(),
             "markets_json": markets_json,
         }
-        stmt = sqlite_insert(Event).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["event_ticker", "exchange"],
-            set_={
-                "series_ticker": stmt.excluded.series_ticker,
-                "title": stmt.excluded.title,
-                "category": stmt.excluded.category,
-                "mutually_exclusive": stmt.excluded.mutually_exclusive,
-                "last_updated": stmt.excluded.last_updated,
-                "markets_json": stmt.excluded.markets_json,
-            },
-        )
         with self._session_factory() as session:
-            session.execute(stmt)
+            session.execute(
+                text("""
+                    INSERT INTO events (event_ticker, exchange, series_ticker, title,
+                        category, mutually_exclusive, last_updated, markets_json)
+                    VALUES (:event_ticker, :exchange, :series_ticker, :title,
+                        :category, :mutually_exclusive, :last_updated, :markets_json)
+                    ON CONFLICT (event_ticker, exchange) DO UPDATE SET
+                        series_ticker = EXCLUDED.series_ticker,
+                        title = EXCLUDED.title,
+                        category = EXCLUDED.category,
+                        mutually_exclusive = EXCLUDED.mutually_exclusive,
+                        last_updated = EXCLUDED.last_updated,
+                        markets_json = EXCLUDED.markets_json
+                """),
+                values,
+            )
             session.commit()
 
     # ── Session state (for startup) ───────────────────────────
@@ -835,29 +975,32 @@ class AgentDatabase:
 
         import time
 
-        backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
+        backups = sorted(backup_dir.glob("agent_*.duckdb"), key=lambda p: p.stat().st_mtime)
         if backups:
             age_hours = (time.time() - backups[-1].stat().st_mtime) / 3600
             if age_hours < max_age_hours:
                 return None
 
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        backup_path = backup_dir / f"agent_{ts}.db"
+        backup_path = backup_dir / f"agent_{ts}.duckdb"
 
         import shutil
 
-        # Checkpoint WAL into main DB, then file-copy. Much faster than
-        # sqlite3.backup() for large databases, and safe when no other
-        # writers are active (enforced by EXCLUSIVE locking mode).
-        # Dispose pool to release EXCLUSIVE file lock before copying.
-        with self._engine.connect() as conn:
-            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        # Checkpoint to flush WAL into main file, then file-copy
+        conn = self._engine.raw_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CHECKPOINT")
+            cursor.close()
+            conn.commit()
+        finally:
+            conn.close()
         self._engine.dispose()
         shutil.copy2(self.db_path, backup_path)
 
         logger.info("Database backup created: %s", backup_path)
 
-        backups = sorted(backup_dir.glob("agent_*.db"), key=lambda p: p.stat().st_mtime)
+        backups = sorted(backup_dir.glob("agent_*.duckdb"), key=lambda p: p.stat().st_mtime)
         pruned = len(backups) - max_backups
         for old in backups[:-max_backups]:
             old.unlink()

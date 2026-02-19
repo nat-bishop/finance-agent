@@ -58,3 +58,28 @@ def setup_logging(
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def add_session_file_handler(
+    log_dir: str | Path,
+    session_id: str,
+    *,
+    level: int = logging.DEBUG,
+    fmt: str = "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt: str = "%Y-%m-%d %H:%M:%S",
+) -> logging.FileHandler:
+    """Add a session-specific file handler to the root logger.
+
+    Creates ``{log_dir}/agent_{session_id}.log``.  Returns the handler
+    so callers can remove it later if needed.
+    """
+    log_path = Path(log_dir) / f"agent_{session_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = logging.FileHandler(str(log_path), encoding="utf-8")
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+
+    root = logging.getLogger()
+    root.addHandler(handler)
+    return handler

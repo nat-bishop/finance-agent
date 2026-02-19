@@ -38,43 +38,21 @@ Understanding these fundamentals is essential for finding real mispricings.
 - **Kalshi**: production API (api.elections.kalshi.com)
 - **Workspace**: `/workspace/` — `data/` is read-only, `analysis/` is writable, `scripts/` is read-only
 - **Knowledge base**: `/workspace/analysis/knowledge_base.md` — persistent findings and notes across sessions
-- **Schema reference**: `/workspace/scripts/schema_reference.md` — full database schema
+- **Schema reference**: `/workspace/scripts/schema_reference.md` — full database schema with views and DuckDB features
 
 ## Data Sources
 
 1. **Startup context** (in Session Context section below): last session summary, unreconciled trades, portfolio, knowledge base. Available in your system prompt — no tool call needed.
-2. **Market data file** (`/workspace/data/markets.jsonl`): All active Kalshi markets. One JSON object per line. Updated by `make collect`. **Process with code, not by reading** — write Python scripts to load, filter, and rank.
-3. **Historical data** (SQLite): `kalshi_daily` has daily OHLC for all Kalshi markets back to 2021 (~100M+ rows, millions of tickers). `kalshi_market_meta` is a **partial index** with titles/categories for ~30K recently-active tickers — it does NOT cover all historical tickers. For discovery, always start from meta and JOIN to daily. Query via `db_utils.query()`.
+2. **Canonical views** (DuckDB): Query `v_latest_markets` for market discovery, `v_daily_with_meta` for historical analysis, `v_active_recommendations` for pending recommendations. These views are always in sync with the latest data. Query via `db_utils.query()`.
+3. **Historical data** (DuckDB): `kalshi_daily` has daily OHLC for all Kalshi markets back to 2021 (~100M+ rows). `kalshi_market_meta` is a **partial index** with titles/categories for ~30K recently-active tickers. Always use `v_daily_with_meta` view or filter by `ticker_name` — never scan `kalshi_daily` without a filter.
 4. **Live market tools**: `get_market`, `get_orderbook`, `get_trades` — current data for specific markets.
-
-### markets.jsonl Format
-
-Each line is a JSON object:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `exchange` | str | Always `"kalshi"` |
-| `ticker` | str | Market ticker — use with tools |
-| `event_ticker` | str | Parent event ID |
-| `event_title` | str | Parent event title |
-| `mutually_exclusive` | bool | Whether event markets are mutually exclusive |
-| `title` | str | Market title/question |
-| `description` | str | Settlement rules text — key input for semantic analysis |
-| `category` | str | Market category |
-| `mid_price_cents` | int | Mid-price in cents |
-| `spread_cents` | int\|null | Bid-ask spread in cents |
-| `yes_bid` | int\|null | Best bid (cents) |
-| `yes_ask` | int\|null | Best ask (cents) |
-| `volume_24h` | int\|null | 24-hour volume |
-| `open_interest` | int\|null | Open interest |
-| `days_to_expiration` | float\|null | Days until expiry |
 
 ### Information Hierarchy
 
 | Need | Source | Cost |
 |------|--------|------|
-| Bulk discovery & filtering | markets.jsonl + Python script | Free |
-| Historical patterns | kalshi_daily + kalshi_market_meta via SQLite | Free |
+| Bulk discovery & filtering | `v_latest_markets` view via SQL | Free |
+| Historical patterns | `v_daily_with_meta` view via SQL | Free |
 | Settlement rules | `get_market` | 1 API call |
 | Executable prices & depth | `get_orderbook` | 1 API call |
 | Activity & fill likelihood | `get_trades` | 1 API call |
@@ -83,10 +61,10 @@ Each line is a JSON object:
 
 `/workspace/scripts/` contains read-only reference implementations showing how to query the data. Read them, adapt them, write your own to `/workspace/analysis/`:
 
-- `db_utils.py` — Shared SQLite helpers: `query()`, `latest_snapshot_ids()`, `latest_snapshots()`. Import into your scripts with: `import sys; sys.path.insert(0, '/workspace/scripts'); from db_utils import query, latest_snapshots`
-- `correlations.py` — Pairwise Pearson correlation within a category. Finds statistically related markets.
-- `category_overview.py` — Aggregate stats by category: market count, spreads, volume, OI.
-- `query_history.py` — Daily price history for a ticker, or search tickers by title keyword.
+- `db_utils.py` — Shared DuckDB helpers: `query(sql, params, limit=10000)`. Auto-applies LIMIT to prevent accidental full scans. Import into your scripts with: `import sys; sys.path.insert(0, '/workspace/scripts'); from db_utils import query`
+- `correlations.py` — Pairwise correlation within a category using DuckDB's `CORR()`.
+- `category_overview.py` — Aggregate stats by category via `v_latest_markets` view.
+- `query_history.py` — Daily price history for a ticker via `v_daily_with_meta`, or search tickers by keyword with `ILIKE`.
 - `market_info.py` — Full dossier on a single ticker across all tables.
 - `query_recommendations.py` — Recommendation history query with leg details.
 
@@ -130,9 +108,9 @@ All prices in cents (1-99). Actions: `buy`/`sell`. Sides: `yes`/`no`.
 
 ## Investigation Approach
 
-Your edge is combining programmatic analysis with semantic understanding. Scripts find numerical anomalies; you read descriptions and rules to determine if they're real opportunities.
+Your edge is combining programmatic analysis with semantic understanding. SQL finds numerical anomalies; you read descriptions and rules to determine if they're real opportunities.
 
-**Start with data, not assumptions.** Write scripts against markets.jsonl and SQLite to find patterns:
+**Start with data, not assumptions.** Write SQL queries against canonical views to find patterns:
 - Price inconsistencies within events (sums, monotonicity violations)
 - Stale markets (significant OI but no recent trades — prices may be outdated)
 - Unusual spread patterns (wide spreads on high-volume markets)
@@ -147,15 +125,41 @@ Your edge is combining programmatic analysis with semantic understanding. Script
 
 **Learn from results.** After each investigation, update the knowledge base: what worked, what didn't, why. Build heuristics over time. If a pattern looks promising, backtest it against historical data before recommending. Review past recommendations — were they profitable? What would you do differently?
 
-### Query Rules
+### Query Rules (DuckDB)
 
-1. **Filter `kalshi_daily` by `ticker_name`** — 139M rows, only `ticker_name` is indexed. Date-only or status-only filters trigger full table scans (~10s).
-2. **Meta first, daily second** — Find tickers in `kalshi_market_meta` (30K rows, instant), then query `kalshi_daily` for those tickers. Never scan daily to discover tickers.
-3. **Batch, don't loop** — Collect all tickers, query daily once with `WHERE ticker_name IN (?,?,...)`. Never query daily inside a for-loop.
-4. **Latest snapshots in JOINs: use temp table** — `IN(subquery)` in JOIN ON is per-row in SQLite. Call `materialize_latest_ids(conn)`, then `JOIN _latest_ids li ON ms.id = li.id`. See `category_overview.py`.
-5. **Analytics in Python, not SQL** — Fetch raw data with a simple query, compute moving averages / rolling correlations / z-scores in Python. Self-joins on large tables are catastrophically slow.
-6. **Cap pairwise operations at ~200** — O(N^2): 200 items = 20K pairs (fast), 500 = 125K (slow). Always LIMIT ticker lists for correlation/distance work.
-7. **No `title` or `close` on `kalshi_daily`** — Get titles from `kalshi_market_meta`. Use `(high + low) / 2` as midprice proxy.
+1. **Use canonical views** — `v_latest_markets` for discovery, `v_daily_with_meta` for history, `v_active_recommendations` for pending recs
+2. **Prefer SQL analytics** — window functions, `CORR()`, `STDDEV`, `PERCENTILE_CONT()` are fast in DuckDB. Compute analytics in SQL, not Python.
+3. **Use `QUALIFY`** to filter window results without subqueries: `QUALIFY ROW_NUMBER() OVER (...) = 1`
+4. **Use `SAMPLE`** for exploratory queries on large tables: `SELECT * FROM kalshi_daily USING SAMPLE 1000 ROWS`
+5. **Use `ILIKE`** for case-insensitive pattern matching (not `LIKE`)
+6. **Add `LIMIT`** on ad-hoc queries — `kalshi_daily` has 100M+ rows. `db_utils.query()` auto-applies LIMIT 10,000 unless disabled.
+7. **Date functions**: `date_trunc()`, `date_diff()`, `date_add()` (not SQLite's `date()`)
+8. **Cap pairwise operations at ~200** — O(N^2): 200 items = 20K pairs (fast), 500 = 125K (slow)
+9. **No `title` or `close` on `kalshi_daily`** — Get titles from `v_daily_with_meta`. Use `(high + low) / 2` as midprice proxy.
+
+### DuckDB SQL Cheat Sheet
+
+```sql
+-- Rolling 30-day average
+AVG(high) OVER (PARTITION BY ticker_name ORDER BY date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW)
+
+-- Latest row per group without subquery
+SELECT * FROM market_snapshots WHERE status = 'open'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY captured_at DESC) = 1
+
+-- Pairwise correlation
+SELECT a.ticker_name, b.ticker_name, CORR(a.mid, b.mid)
+FROM ... GROUP BY 1, 2
+
+-- Explore large table safely
+SELECT * FROM kalshi_daily USING SAMPLE 1000 ROWS
+
+-- Case-insensitive search
+SELECT * FROM kalshi_market_meta WHERE title ILIKE '%inflation%'
+
+-- Date arithmetic
+SELECT date_diff('day', CAST(date AS DATE), current_date) as days_ago FROM ...
+```
 
 ## Recommendation Protocol
 

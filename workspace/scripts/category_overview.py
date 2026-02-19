@@ -1,58 +1,37 @@
-"""Category summary: market count, spreads, volume, bracket candidates.
+"""Category summary: market count, spreads, volume.
 
 Usage:
     python category_overview.py [CATEGORY]
 """
 import argparse
 import json
-from db_utils import connect, materialize_latest_ids
+from db_utils import query
 
 
 def overview(category=None):
-    """Get summary stats per category."""
-    where = "WHERE e.exchange = 'kalshi'" + (
-        " AND e.category = ?" if category else ""
-    )
+    """Get summary stats per category using v_latest_markets view."""
+    where = "WHERE category = ?" if category else ""
     params = (category,) if category else ()
 
-    conn = connect()
-    materialize_latest_ids(conn)
-
-    rows = conn.execute(
+    return query(
         f"""
-        SELECT e.category,
-               COUNT(DISTINCT e.event_ticker) as events,
-               COUNT(DISTINCT s.ticker) as markets,
-               COUNT(DISTINCT CASE WHEN e.mutually_exclusive = 1
-                   THEN e.event_ticker END) as me_events,
-               AVG(s.spread_cents) as avg_spread,
-               AVG(s.volume_24h) as avg_volume_24h,
-               SUM(s.open_interest) as total_oi
-        FROM events e
-        LEFT JOIN (
-            SELECT ms.* FROM market_snapshots ms
-            JOIN _latest_ids li ON ms.id = li.id
-        ) s ON s.event_ticker = e.event_ticker
+        SELECT
+            lm.category,
+            COUNT(DISTINCT lm.event_ticker) as events,
+            COUNT(DISTINCT lm.ticker) as markets,
+            COUNT(DISTINCT CASE WHEN lm.mutually_exclusive = 1
+                THEN lm.event_ticker END) as mutually_exclusive_events,
+            ROUND(AVG(lm.spread_cents), 1) as avg_spread_cents,
+            ROUND(AVG(lm.volume_24h)) as avg_volume_24h,
+            SUM(lm.open_interest) as total_open_interest
+        FROM v_latest_markets lm
         {where}
-        GROUP BY e.category
+        GROUP BY lm.category
         ORDER BY markets DESC
         """,
         params,
-    ).fetchall()
-    conn.close()
-
-    return [
-        {
-            "category": c["category"],
-            "events": c["events"],
-            "markets": c["markets"],
-            "mutually_exclusive_events": c["me_events"],
-            "avg_spread_cents": round(c["avg_spread"], 1) if c["avg_spread"] else None,
-            "avg_volume_24h": round(c["avg_volume_24h"]) if c["avg_volume_24h"] else None,
-            "total_open_interest": c["total_oi"],
-        }
-        for c in rows
-    ]
+        limit=0,
+    )
 
 
 if __name__ == "__main__":

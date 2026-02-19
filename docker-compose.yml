@@ -3,9 +3,9 @@ services:
     build: .
     env_file: .env
     environment:
-      - FA_DB_PATH=/app/state/agent.db
+      - FA_DB_PATH=/app/state/agent.duckdb
       - FA_BACKUP_DIR=/app/state/backups
-      - FA_LOG_FILE=/app/state/agent.log
+      - FA_LOG_DIR=/app/state/logs
       - KALSHI_PRIVATE_KEY_PATH=/workspace/keys/private_key.pem
     volumes:
       - ./workspace/data:/workspace/data:ro

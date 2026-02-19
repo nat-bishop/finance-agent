@@ -1,10 +1,9 @@
-"""Tests for finance_agent.database -- AgentDatabase (ORM-backed)."""
+"""Tests for finance_agent.database -- AgentDatabase (ORM-backed, DuckDB)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from helpers import get_row, raw_select
 
 from finance_agent.models import Event, Session
@@ -13,8 +12,11 @@ from finance_agent.models import Event, Session
 
 
 def test_db_creates_all_tables(db):
-    rows = raw_select(db, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    names = {r["name"] for r in rows}
+    rows = raw_select(
+        db,
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name",
+    )
+    names = {r["table_name"] for r in rows}
     expected = {
         "market_snapshots",
         "events",
@@ -27,14 +29,13 @@ def test_db_creates_all_tables(db):
     assert expected.issubset(names)
 
 
-def test_db_wal_mode(db):
-    rows = raw_select(db, "SELECT * FROM pragma_journal_mode")
-    assert rows[0][next(iter(rows[0].keys()))] == "wal"
-
-
-def test_db_foreign_keys_enabled(db):
-    rows = raw_select(db, "SELECT * FROM pragma_foreign_keys")
-    assert rows[0][next(iter(rows[0].keys()))] == 1
+def test_db_creates_views(db):
+    rows = raw_select(
+        db,
+        "SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW' AND table_schema = 'main'",
+    )
+    names = {r["table_name"] for r in rows}
+    assert {"v_latest_markets", "v_daily_with_meta", "v_active_recommendations"}.issubset(names)
 
 
 # ── Sessions ─────────────────────────────────────────────────────
@@ -599,6 +600,36 @@ def test_upsert_event_composite_pk(db, sample_event):
     assert count == 1
 
 
+# ── Kalshi daily upsert ──────────────────────────────────────────
+
+
+def test_insert_kalshi_daily_upsert(db):
+    """insert_kalshi_daily upserts on (date, ticker_name) conflict."""
+    row = {
+        "date": "2026-01-01",
+        "ticker_name": "KX-FOO",
+        "report_ticker": "KX-FOO-RPT",
+        "payout_type": "binary",
+        "open_interest": 100,
+        "daily_volume": 50,
+        "block_volume": 0,
+        "high": 60,
+        "low": 40,
+        "status": "open",
+    }
+    assert db.insert_kalshi_daily([row]) == 1
+    # Upsert same date+ticker with different OI
+    row2 = {**row, "open_interest": 200}
+    assert db.insert_kalshi_daily([row2]) == 1
+    # Verify the upsert updated the value
+    rows = raw_select(
+        db,
+        "SELECT open_interest FROM kalshi_daily WHERE ticker_name = :p0 AND date = :p1",
+        ("KX-FOO", "2026-01-01"),
+    )
+    assert rows[0]["open_interest"] == 200
+
+
 # ── get_session_state ────────────────────────────────────────────
 
 
@@ -654,7 +685,7 @@ def test_backup_prunes_old(db, tmp_path):
     for _ in range(4):
         time.sleep(0.01)
         db.backup_if_needed(str(backup_dir), max_age_hours=0, max_backups=3)
-    remaining = list(backup_dir.glob("agent_*.db"))
+    remaining = list(backup_dir.glob("agent_*.duckdb"))
     assert len(remaining) <= 3
 
 
@@ -701,20 +732,18 @@ def test_log_trade_without_leg_id(db, session_id):
     assert trade["leg_id"] is None
 
 
-# ── Recommendation group FK ─────────────────────────────────────
+# ── Recommendation group (no FK constraint in DuckDB) ──────────
 
 
-def test_recommendation_group_session_fk(db):
-    """RecommendationGroup.session_id must reference an existing session."""
-    import sqlalchemy
-
-    with pytest.raises(sqlalchemy.exc.IntegrityError):
-        db.log_recommendation_group(
-            session_id="nonexistent",
-            thesis="Should fail",
-            estimated_edge_pct=1.0,
-            legs=[{"exchange": "kalshi", "market_id": "K-1"}],
-        )
+def test_recommendation_group_without_session(db):
+    """Groups can be created without FK enforcement (DuckDB limitation)."""
+    group_id, _ = db.log_recommendation_group(
+        session_id="nonexistent",
+        thesis="No FK constraint",
+        estimated_edge_pct=1.0,
+        legs=[{"exchange": "kalshi", "market_id": "K-1"}],
+    )
+    assert isinstance(group_id, int)
 
 
 # ── Snapshot purge ──────────────────────────────────────────────
@@ -746,3 +775,142 @@ def test_purge_old_snapshots_nothing_to_purge(db, sample_market_snapshot):
     )
     deleted = db.purge_old_snapshots(retention_days=7)
     assert deleted == 0
+
+
+# ── v_latest_markets view ───────────────────────────────────────
+
+
+def test_v_latest_markets_returns_latest_per_ticker(db, sample_market_snapshot):
+    """View returns only the latest snapshot per ticker."""
+    old_ts = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    new_ts = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    db.insert_market_snapshots(
+        [
+            sample_market_snapshot(ticker="T-1", captured_at=old_ts, yes_bid=30, yes_ask=40),
+            sample_market_snapshot(ticker="T-1", captured_at=new_ts, yes_bid=45, yes_ask=55),
+        ]
+    )
+    rows = raw_select(db, "SELECT ticker, yes_bid FROM v_latest_markets WHERE ticker = 'T-1'")
+    assert len(rows) == 1
+    assert rows[0]["yes_bid"] == 45
+
+
+# ── Bulk upsert (CSV staging) ───────────────────────────────────
+
+
+def test_insert_kalshi_daily_bulk_skips_duplicates(db):
+    """insert_kalshi_daily_bulk uses DO NOTHING — skips existing rows."""
+    row = {
+        "date": "2026-01-15",
+        "ticker_name": "KX-BULK",
+        "report_ticker": "KX-BULK-RPT",
+        "payout_type": "binary",
+        "open_interest": 100,
+        "daily_volume": 50,
+        "block_volume": 0,
+        "high": 60,
+        "low": 40,
+        "status": "open",
+    }
+    assert db.insert_kalshi_daily_bulk([row]) == 1
+    # Insert same row again — should be skipped (DO NOTHING)
+    assert db.insert_kalshi_daily_bulk([row]) == 1  # returns len(rows), not inserted count
+    rows = raw_select(
+        db,
+        "SELECT open_interest FROM kalshi_daily WHERE ticker_name = 'KX-BULK'",
+    )
+    assert len(rows) == 1
+    assert rows[0]["open_interest"] == 100  # original value preserved
+
+
+def test_insert_kalshi_daily_bulk_in_batch_duplicates(db):
+    """In-batch duplicates are handled via DISTINCT ON."""
+    rows = [
+        {
+            "date": "2026-02-01",
+            "ticker_name": "KX-DUP",
+            "report_ticker": "R1",
+            "payout_type": "binary",
+            "open_interest": 100,
+            "daily_volume": 50,
+            "block_volume": 0,
+            "high": 60,
+            "low": 40,
+            "status": "open",
+        },
+        {
+            "date": "2026-02-01",
+            "ticker_name": "KX-DUP",
+            "report_ticker": "R2",
+            "payout_type": "binary",
+            "open_interest": 200,
+            "daily_volume": 100,
+            "block_volume": 0,
+            "high": 70,
+            "low": 30,
+            "status": "open",
+        },
+    ]
+    assert db.insert_kalshi_daily_bulk(rows) == 2
+    result = raw_select(
+        db,
+        "SELECT COUNT(*) as cnt FROM kalshi_daily WHERE ticker_name = 'KX-DUP'",
+    )
+    assert result[0]["cnt"] == 1  # only 1 row, not 2
+
+
+def test_insert_kalshi_daily_bulk_null_values(db):
+    """NULL values in nullable INTEGER columns are preserved through CSV staging."""
+    row = {
+        "date": "2026-03-01",
+        "ticker_name": "KX-NULL",
+        "report_ticker": "KX-NULL-RPT",
+        "payout_type": "binary",
+        "open_interest": None,
+        "daily_volume": None,
+        "block_volume": None,
+        "high": None,
+        "low": None,
+        "status": "open",
+    }
+    db.insert_kalshi_daily_bulk([row])
+    rows = raw_select(
+        db,
+        "SELECT high, low, daily_volume FROM kalshi_daily WHERE ticker_name = 'KX-NULL'",
+    )
+    assert len(rows) == 1
+    assert rows[0]["high"] is None
+    assert rows[0]["low"] is None
+    assert rows[0]["daily_volume"] is None
+
+
+def test_upsert_market_meta_does_not_mutate_input(db):
+    """upsert_market_meta should not mutate the caller's dicts."""
+    original = {"ticker": "KX-MUT", "title": "Mutation Test"}
+    input_rows = [original.copy()]
+    db.upsert_market_meta(input_rows)
+    # Original dict should NOT have first_seen/last_seen added
+    assert "first_seen" not in original
+
+
+def test_upsert_market_meta_preserves_first_seen(db):
+    """ON CONFLICT preserves first_seen but updates last_seen."""
+    db.upsert_market_meta([{"ticker": "KX-FS", "title": "First"}])
+    rows = raw_select(
+        db, "SELECT first_seen, last_seen FROM kalshi_market_meta WHERE ticker = 'KX-FS'"
+    )
+    first_seen_1 = rows[0]["first_seen"]
+
+    db.upsert_market_meta([{"ticker": "KX-FS", "title": "Second"}])
+    rows = raw_select(
+        db, "SELECT first_seen, last_seen, title FROM kalshi_market_meta WHERE ticker = 'KX-FS'"
+    )
+    assert rows[0]["first_seen"] == first_seen_1  # preserved
+    assert rows[0]["title"] == "Second"  # updated
+
+
+def test_bulk_upsert_empty_rows(db):
+    """Empty list returns 0 immediately."""
+    assert db.insert_kalshi_daily([]) == 0
+    assert db.insert_kalshi_daily_bulk([]) == 0
+    assert db.upsert_market_meta([]) == 0

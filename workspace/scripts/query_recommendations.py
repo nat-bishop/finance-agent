@@ -43,6 +43,7 @@ def get_recommendations(status=None, session_id=None, recent=None):
         {limit}
         """,
         tuple(params),
+        limit=0,
     )
 
     # Batch-fetch legs for all groups
@@ -61,6 +62,7 @@ def get_recommendations(status=None, session_id=None, recent=None):
             ORDER BY group_id, leg_index
             """,
             tuple(group_ids),
+            limit=0,
         )
         for leg in all_legs:
             legs_by_group[leg["group_id"]].append(leg)

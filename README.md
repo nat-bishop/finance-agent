@@ -8,9 +8,9 @@ Discovers mispricings across Kalshi markets using a combination of programmatic 
 
 **Three-layer design:**
 
-1. **Programmatic layer** (no LLM) — `collector.py` snapshots Kalshi market data to SQLite, syncs daily history from S3, and generates `markets.jsonl` (one JSON object per market with denormalized event metadata for programmatic discovery).
+1. **Programmatic layer** (no LLM) — `collector.py` snapshots Kalshi market data to DuckDB, syncs daily history from S3, and upserts market metadata. Canonical views (`v_latest_markets`, `v_daily_with_meta`) provide SQL-native discovery.
 
-2. **Agent layer** (Claude) — writes Python scripts against `markets.jsonl` and SQLite for bulk market analysis, investigates candidates using MCP tools for semantic analysis (reading settlement rules, understanding market relationships), and records trade recommendations via `recommend_trade` with agent-specified positions per leg. Persists findings to a knowledge base across sessions.
+2. **Agent layer** (Claude) — queries canonical DuckDB views for bulk market analysis using analytical SQL (window functions, `CORR()`, `QUALIFY`, `SAMPLE`, `ILIKE`), investigates candidates using MCP tools for semantic analysis (reading settlement rules, understanding market relationships), and records trade recommendations via `recommend_trade` with agent-specified positions per leg. Persists findings to a knowledge base across sessions.
 
 3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 4 navigable screens.
 
@@ -53,12 +53,12 @@ make up       # build + run the TUI in Docker
 ## Data Pipeline
 
 ```bash
-make collect    # snapshot markets + events to SQLite, sync daily history, generate markets.jsonl
+make collect    # snapshot markets + events to DuckDB, sync daily history, upsert metadata
 make backup     # backup the database
 make startup    # print startup context JSON (debug)
 ```
 
-The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data fresh. The agent writes Python scripts against `markets.jsonl` and queries SQLite for historical analysis.
+The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data fresh. The agent queries canonical DuckDB views and writes analytical SQL for historical analysis.
 
 ## Agent Tools
 
@@ -88,7 +88,7 @@ The collector is a standalone script with no LLM dependency. Run it on a schedul
 Agent recommends → TUI review → Execute or Reject
 ```
 
-1. **Agent calls `recommend_trade`** — creates a recommendation group with 1+ legs in SQLite. Agent specifies action, side, and quantity per leg; system validates position limits and computes fees.
+1. **Agent calls `recommend_trade`** — creates a recommendation group with 1+ legs in DuckDB. Agent specifies action, side, and quantity per leg; system validates position limits and computes fees.
 
 2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Shows edge, thesis, expiry countdown, and per-leg details.
 
@@ -100,7 +100,7 @@ Agent recommends → TUI review → Execute or Reject
 
 The agent combines programmatic analysis with semantic reasoning:
 
-1. **Programmatic discovery** — writes Python scripts against `markets.jsonl` and SQLite to find numerical anomalies (price inconsistencies, correlation divergences, stale markets, volume spikes)
+1. **Programmatic discovery** — queries canonical DuckDB views and writes analytical SQL to find numerical anomalies (price inconsistencies, correlation divergences, stale markets, volume spikes)
 2. **Semantic investigation** — reads settlement rules and market descriptions via `get_market` to understand edge cases, resolution criteria, and cross-market relationships
 3. **Hypothesis and validation** — forms a thesis about why a mispricing exists, validates with orderbook depth and trade activity
 4. **Cumulative learning** — records findings, rejected ideas, and heuristics in a persistent knowledge base
@@ -130,13 +130,13 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 
 | Env var | Default | Docker value |
 |---|---|---|
-| `FA_DB_PATH` | `workspace/data/agent.db` | `/app/state/agent.db` |
+| `FA_DB_PATH` | `workspace/data/agent.duckdb` | `/app/state/agent.duckdb` |
 | `FA_BACKUP_DIR` | `workspace/backups` | `/app/state/backups` |
 | `FA_LOG_FILE` | *(none)* | `/app/state/agent.log` |
 
 ## Database Schema
 
-SQLite (WAL mode) at `/workspace/data/agent.db`. Schema defined by SQLAlchemy ORM models in `models.py`, with Alembic autogenerate migrations (auto-run on startup). Performance-tuned per-connection PRAGMAs: mmap (256 MB), page cache (128 MB), temp_store in memory. `maintenance()` runs after collector/backfill to checkpoint WAL and update query planner statistics. 8 tables:
+DuckDB at `/workspace/data/agent.duckdb`. Schema defined by SQLAlchemy ORM models in `models.py` via `duckdb_engine`, with Alembic migrations (auto-run on startup). Three canonical views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) are created after migrations. `maintenance()` runs `CHECKPOINT` (and optionally `VACUUM ANALYZE`) after collector/backfill. 8 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
@@ -156,16 +156,15 @@ The workspace uses a dual-mount isolation pattern. Reference scripts are COPY'd 
 ```
 /workspace/                     # agent sandbox (cwd)
   scripts/                      # COPY'd into image (read-only)
-    db_utils.py                 # Shared database query helpers (latest_snapshot_ids, latest_snapshots)
-    correlations.py             # Pairwise price correlations
-    query_history.py            # Daily history queries
-    market_info.py              # Full market lookup
-    category_overview.py        # Category summary stats
-    query_recommendations.py    # Recommendation history queries
-    schema_reference.md         # Database schema reference (tables, indexes, performance guide)
+    db_utils.py                 # Shared DuckDB query helpers (query() with auto-LIMIT)
+    correlations.py             # Pairwise correlations using DuckDB CORR() aggregate
+    query_history.py            # Daily history queries via v_daily_with_meta view
+    market_info.py              # Full market lookup across all tables
+    category_overview.py        # Category summary via v_latest_markets view
+    query_recommendations.py    # Recommendation history queries with leg details
+    schema_reference.md         # Database schema reference (views, DuckDB features, guardrails)
   data/                         # :ro mount (kernel-enforced read-only for agent)
-    agent.db                    # SQLite database
-    markets.jsonl               # Market data (generated by collector)
+    agent.duckdb                # DuckDB database
   analysis/                     # :rw mount (agent's writable scratch space)
     knowledge_base.md           # Persistent memory (watchlist, findings, patterns)
 ```
@@ -177,8 +176,8 @@ src/finance_agent/
   main.py              # Entry point, SDK options, launches TUI
   config.py            # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
   constants.py         # Shared string constants (exchanges, statuses, sides, actions, strategies)
-  models.py            # SQLAlchemy ORM models (canonical schema for all 8 tables)
-  database.py          # AgentDatabase: ORM queries, Alembic migration runner, backup
+  models.py            # SQLAlchemy ORM models + DuckDB Sequences (canonical schema for all 8 tables)
+  database.py          # AgentDatabase: DuckDB via duckdb_engine, ORM queries, canonical views, backup
   tools.py             # Unified MCP tool factories (5 market + 1 DB = 6 tools)
   fees.py              # Kalshi fee calculations (P(1-P) formula)
   kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)

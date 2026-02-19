@@ -1,7 +1,7 @@
 """Kalshi historical daily data backfill.
 
 Fetches EOD market data from Kalshi's public S3 reporting bucket and stores
-it in SQLite.  Standalone long-running command via ``make backfill`` or
+it in DuckDB.  Standalone long-running command via ``make backfill`` or
 ``python -m finance_agent.backfill``.
 """
 
@@ -120,7 +120,7 @@ def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def sync_daily(db: AgentDatabase, max_workers: int = _DEFAULT_MAX_WORKERS) -> int:
-    """Sync Kalshi daily data from S3 to SQLite.
+    """Sync Kalshi daily data from S3 to DuckDB.
 
     Fully dynamic: queries ``MAX(date)`` from the table and fetches only
     missing days through yesterday.  On an empty table this backfills from
@@ -159,46 +159,45 @@ def sync_daily(db: AgentDatabase, max_workers: int = _DEFAULT_MAX_WORKERS) -> in
     completed = 0
 
     pool = ThreadPoolExecutor(max_workers=max_workers)
-    with db.bulk_import_mode():
-        # Submit all days; iterate in date order so cancellation leaves
-        # a contiguous prefix (workers still fetch in parallel).
-        futures = [pool.submit(_fetch_and_normalise, d) for d in dates]
+    # Submit all days; iterate in date order so cancellation leaves
+    # a contiguous prefix (workers still fetch in parallel).
+    futures = [pool.submit(_fetch_and_normalise, d) for d in dates]
 
-        try:
-            for future in futures:
-                d, rows, fetch_elapsed = future.result()
-                completed += 1
+    try:
+        for future in futures:
+            d, rows, fetch_elapsed = future.result()
+            completed += 1
 
-                if rows:
-                    t0 = time.time()
-                    inserted = db.insert_kalshi_daily_bulk(rows)
-                    insert_elapsed = time.time() - t0
-                    total_rows += inserted
-                    logger.info(
-                        "  %s: %d records, fetch=%.1fs insert=%.1fs [%d/%d]",
-                        d,
-                        len(rows),
-                        fetch_elapsed,
-                        insert_elapsed,
-                        completed,
-                        total_days,
-                    )
-                else:
-                    logger.info(
-                        "  %s: no data, fetch=%.1fs [%d/%d]",
-                        d,
-                        fetch_elapsed,
-                        completed,
-                        total_days,
-                    )
-        except KeyboardInterrupt:
-            logger.info("Interrupted — stopping workers...")
-            _shutdown_event.set()
-            pool.shutdown(wait=True, cancel_futures=True)
-            logger.info("Saved %d rows across %d days before interruption", total_rows, completed)
-            return total_rows
-        else:
-            pool.shutdown(wait=False)
+            if rows:
+                t0 = time.time()
+                inserted = db.insert_kalshi_daily_bulk(rows)
+                insert_elapsed = time.time() - t0
+                total_rows += inserted
+                logger.info(
+                    "  %s: %d records, fetch=%.1fs insert=%.1fs [%d/%d]",
+                    d,
+                    len(rows),
+                    fetch_elapsed,
+                    insert_elapsed,
+                    completed,
+                    total_days,
+                )
+            else:
+                logger.info(
+                    "  %s: no data, fetch=%.1fs [%d/%d]",
+                    d,
+                    fetch_elapsed,
+                    completed,
+                    total_days,
+                )
+    except KeyboardInterrupt:
+        logger.info("Interrupted — stopping workers...")
+        _shutdown_event.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+        logger.info("Saved %d rows across %d days before interruption", total_rows, completed)
+        return total_rows
+    else:
+        pool.shutdown(wait=False)
 
     # Checkpoint WAL and update query planner statistics
     db.maintenance()

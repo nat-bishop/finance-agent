@@ -1,4 +1,4 @@
-"""Data collector -- snapshots market data to SQLite.
+"""Data collector -- snapshots market data to DuckDB.
 
 Standalone script, no LLM. Run via `make collect` or `python -m finance_agent.collector`.
 
@@ -10,12 +10,10 @@ storing both event structure and market snapshots.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from .config import load_configs
@@ -57,15 +55,6 @@ def _base_snapshot(now: str, exchange: str, market: dict[str, Any]) -> dict[str,
         "exchange": exchange,
         "raw_json": json.dumps(market, default=str),
     }
-
-
-def _as_list(resp: Any, *keys: str) -> list:
-    if isinstance(resp, list):
-        return resp
-    for k in keys:
-        if k in resp:
-            return resp[k]
-    return []
 
 
 def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
@@ -217,56 +206,6 @@ async def collect_kalshi(
     return event_count, market_count
 
 
-# ── Market data export (for agent discovery) ─────────────────────
-
-
-def _generate_markets_jsonl(db: AgentDatabase, output_path: str) -> None:
-    """Write one JSON object per line for agent programmatic discovery."""
-    markets = db.get_latest_snapshots(status=STATUS_OPEN, require_mid_price=False)
-
-    event_rows = db.get_all_events()
-    event_map: dict[tuple[str, str], dict[str, Any]] = {
-        (e["event_ticker"], e["exchange"]): e for e in event_rows
-    }
-
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    count = 0
-    with out.open("w", encoding="utf-8") as f:
-        for m in markets:
-            evt_ticker = m.get("event_ticker") or ""
-            evt_meta = event_map.get((evt_ticker, m["exchange"]), {})
-
-            # Parse raw_json for description
-            raw: dict[str, Any] = {}
-            if m.get("raw_json"):
-                with contextlib.suppress(json.JSONDecodeError, TypeError):
-                    raw = json.loads(m["raw_json"])
-
-            record = {
-                "exchange": m["exchange"],
-                "ticker": m["ticker"],
-                "event_ticker": m.get("event_ticker"),
-                "event_title": evt_meta.get("title"),
-                "mutually_exclusive": bool(evt_meta.get("mutually_exclusive", False)),
-                "title": m["title"],
-                "description": raw.get("description") or raw.get("rules_primary"),
-                "category": evt_meta.get("category") or m.get("category"),
-                "mid_price_cents": m.get("mid_price_cents"),
-                "spread_cents": m.get("spread_cents"),
-                "yes_bid": m.get("yes_bid"),
-                "yes_ask": m.get("yes_ask"),
-                "volume_24h": m.get("volume_24h"),
-                "open_interest": m.get("open_interest"),
-                "days_to_expiration": m.get("days_to_expiration"),
-            }
-            f.write(json.dumps(record, default=str) + "\n")
-            count += 1
-
-    logger.info("  -> %d markets written to %s", count, output_path)
-
-
 # ── Entry point ──────────────────────────────────────────────────
 
 
@@ -336,10 +275,6 @@ async def _run_collector_async() -> None:
     try:
         k_events, k_markets = await collect_kalshi(kalshi, db, status=STATUS_OPEN)
 
-        # Generate JSONL market data for agent programmatic discovery
-        jsonl_path = str(Path(trading_config.db_path).parent / "markets.jsonl")
-        _generate_markets_jsonl(db, jsonl_path)
-
         # Backfill metadata for historical tickers missing titles/categories
         from .backfill import backfill_missing_meta
 
@@ -355,7 +290,7 @@ async def _run_collector_async() -> None:
             trading_config.daily_min_ticker_days,
         )
 
-        # Checkpoint WAL and update query planner statistics
+        # Checkpoint and update statistics
         db.maintenance()
 
         elapsed = time.time() - start

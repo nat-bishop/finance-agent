@@ -3,13 +3,11 @@
 # ── Docker ───────────────────────────────────────────────────
 
 up:
-	@uv run python -c "import sqlite3, pathlib; p='workspace/data/agent.db'; pathlib.Path(p).exists() and (c:=sqlite3.connect(p)) and (c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close())" 2>/dev/null || true
 	@echo "Collecting market data (build runs in parallel)..."
 	@uv run python -m finance_agent.collector & COLLECT_PID=$$!; docker compose build agent; wait $$COLLECT_PID
 	docker compose run --rm agent
 
 up-fast:
-	@uv run python -c "import sqlite3, pathlib; p='workspace/data/agent.db'; pathlib.Path(p).exists() and (c:=sqlite3.connect(p)) and (c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close())" 2>/dev/null || true
 	docker compose run --rm agent
 
 down:
@@ -20,7 +18,8 @@ shell:
 
 N ?= 250
 logs:
-	@if [ -f workspace/data/agent.log ]; then tail -$(N) workspace/data/agent.log; else echo "No agent.log yet -- run make up first"; fi
+	@latest=$$(ls -t workspace/data/logs/agent_*.log 2>/dev/null | head -1); \
+	if [ -n "$$latest" ]; then tail -$(N) "$$latest"; else echo "No session logs yet -- run make up first"; fi
 
 # ── Code quality (local) ────────────────────────────────────
 
@@ -52,6 +51,9 @@ backfill:
 backup:
 	uv run python -c "from finance_agent.database import run_backup; run_backup()"
 
+migrate:
+	uv run python scripts/migrate_sqlite_to_duckdb.py
+
 startup:
 	uv run python -c "from finance_agent.database import run_startup; run_startup()"
 
@@ -60,7 +62,7 @@ startup:
 nuke-db:
 	@echo "This will DELETE the database."
 	@read -p "Continue? [y/N] " c && [ "$$c" = y ] || exit 1
-	rm -f workspace/data/agent.db workspace/data/agent.db-wal workspace/data/agent.db-shm
+	rm -f workspace/data/agent.duckdb workspace/data/agent.duckdb.wal
 	@echo "Database deleted. Will be recreated on next run."
 
 nuke-data:

@@ -30,7 +30,7 @@ async def test_auto_approve_skips_ask_user():
 async def test_auto_approve_denies_write_to_protected_path():
     pre = _hook(create_audit_hooks(), "PreToolUse")
     result = await pre(
-        {"tool_name": "Write", "tool_input": {"file_path": "/workspace/data/agent.db"}},
+        {"tool_name": "Write", "tool_input": {"file_path": "/workspace/data/agent.duckdb"}},
         "tid-1",
         None,
     )

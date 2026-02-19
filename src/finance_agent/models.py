@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, Text
+from sqlalchemy import (
+    Boolean,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Sequence,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .constants import EXCHANGE_KALSHI, STATUS_PENDING, STRATEGY_MANUAL
@@ -18,10 +27,18 @@ class Base(DeclarativeBase):
 # ── Market Snapshots ──────────────────────────────────────────
 
 
+market_snapshot_id_seq = Sequence("market_snapshot_id_seq")
+
+
 class MarketSnapshot(Base):
     __tablename__ = "market_snapshots"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        market_snapshot_id_seq,
+        primary_key=True,
+        server_default=market_snapshot_id_seq.next_value(),
+    )
     captured_at: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="collector")
     exchange: Mapped[str] = mapped_column(Text, nullable=False, server_default=EXCHANGE_KALSHI)
@@ -75,10 +92,18 @@ class Event(Base):
 # ── Trades ────────────────────────────────────────────────────
 
 
+trade_id_seq = Sequence("trade_id_seq")
+
+
 class Trade(Base):
     __tablename__ = "trades"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, trade_id_seq, primary_key=True, server_default=trade_id_seq.next_value()
+    )
+    # NOTE: ForeignKey declarations kept for ORM relationship resolution.
+    # DuckDB migration (0007) omits FK constraints at DDL level due to
+    # DuckDB's limitation on UPDATE of FK-referenced parent tables.
     session_id: Mapped[str] = mapped_column(Text, ForeignKey("sessions.id"), nullable=False)
     leg_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("recommendation_legs.id"))
     exchange: Mapped[str] = mapped_column(Text, nullable=False)
@@ -113,10 +138,15 @@ class Session(Base):
 # ── Recommendation Groups ────────────────────────────────────
 
 
+rec_group_id_seq = Sequence("rec_group_id_seq")
+
+
 class RecommendationGroup(Base):
     __tablename__ = "recommendation_groups"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, rec_group_id_seq, primary_key=True, server_default=rec_group_id_seq.next_value()
+    )
     session_id: Mapped[str] = mapped_column(Text, ForeignKey("sessions.id"), nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     thesis: Mapped[str | None] = mapped_column(Text)
@@ -154,10 +184,15 @@ class RecommendationGroup(Base):
 # ── Recommendation Legs ──────────────────────────────────────
 
 
+rec_leg_id_seq = Sequence("rec_leg_id_seq")
+
+
 class RecommendationLeg(Base):
     __tablename__ = "recommendation_legs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, rec_leg_id_seq, primary_key=True, server_default=rec_leg_id_seq.next_value()
+    )
     group_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("recommendation_groups.id"), nullable=False
     )
@@ -188,12 +223,20 @@ class RecommendationLeg(Base):
 # ── Kalshi Daily History ─────────────────────────────────────
 
 
+kalshi_daily_id_seq = Sequence("kalshi_daily_id_seq")
+
+
 class KalshiDaily(Base):
     """Daily EOD market data from Kalshi's public S3 reporting bucket."""
 
     __tablename__ = "kalshi_daily"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        kalshi_daily_id_seq,
+        primary_key=True,
+        server_default=kalshi_daily_id_seq.next_value(),
+    )
     date: Mapped[str] = mapped_column(Text, nullable=False)
     ticker_name: Mapped[str] = mapped_column(Text, nullable=False)
     report_ticker: Mapped[str] = mapped_column(Text, nullable=False)
@@ -206,7 +249,7 @@ class KalshiDaily(Base):
     status: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
-        Index("idx_kalshi_daily_unique", "date", "ticker_name", unique=True),
+        UniqueConstraint("date", "ticker_name", name="uq_kalshi_daily_date_ticker"),
         Index("idx_kalshi_daily_ticker", "ticker_name"),
         Index("idx_kalshi_daily_report", "report_ticker"),
     )

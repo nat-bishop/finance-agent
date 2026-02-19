@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 from finance_agent.collector import (
-    _as_list,
     _compute_derived,
-    _generate_markets_jsonl,
     _parse_days_to_expiry,
     collect_kalshi,
     resolve_settlements,
@@ -125,25 +122,6 @@ def test_compute_derived_settlement_value():
     assert result["settlement_value"] == "yes"
 
 
-# ── _as_list ─────────────────────────────────────────────────────
-
-
-def test_as_list_list_input():
-    assert _as_list([1, 2, 3]) == [1, 2, 3]
-
-
-def test_as_list_dict_with_key():
-    assert _as_list({"markets": [1, 2]}, "markets") == [1, 2]
-
-
-def test_as_list_fallback_key():
-    assert _as_list({"data": [1]}, "markets", "data") == [1]
-
-
-def test_as_list_no_matching_key():
-    assert _as_list({"other": [1]}, "markets") == []
-
-
 # ── collect_kalshi (events-first, async) ─────────────────────────
 
 
@@ -226,63 +204,6 @@ async def test_collect_kalshi_max_pages(db, mock_kalshi):
     assert event_count == 1
     assert market_count == 1
     assert mock_kalshi.get_events.call_count == 1
-
-
-# ── _generate_markets_jsonl ─────────────────────────────────────
-
-
-def test_generate_markets_jsonl(db, sample_market_snapshot, tmp_path):
-    # Insert an event so the event-join path is exercised
-    db.upsert_event(
-        event_ticker="EVT-1",
-        exchange="kalshi",
-        title="Test Event Title",
-        category="Politics",
-        mutually_exclusive=True,
-        markets_json="[]",
-    )
-
-    # Kalshi market with raw_json containing rules_primary
-    kalshi_raw = json.dumps({"rules_primary": "Resolves Yes if X happens."})
-    db.insert_market_snapshots(
-        [
-            sample_market_snapshot(
-                ticker="K-1",
-                exchange="kalshi",
-                category="Politics",
-                mid_price_cents=50,
-                raw_json=kalshi_raw,
-            ),
-        ]
-    )
-    output = tmp_path / "markets.jsonl"
-    _generate_markets_jsonl(db, str(output))
-
-    lines = output.read_text().strip().split("\n")
-    assert len(lines) == 1
-
-    records = [json.loads(line) for line in lines]
-    assert records[0]["ticker"] == "K-1"
-
-    # Verify all expected fields are present
-    for r in records:
-        assert "exchange" in r
-        assert "ticker" in r
-        assert "title" in r
-        assert "mid_price_cents" in r
-        assert "category" in r
-        assert "event_title" in r
-        assert "mutually_exclusive" in r
-        assert "description" in r
-
-    # Verify Kalshi record with matching event
-    kalshi_rec = records[0]
-    assert kalshi_rec["exchange"] == "kalshi"
-    assert kalshi_rec["mid_price_cents"] == 50
-    assert kalshi_rec["category"] == "Politics"
-    assert kalshi_rec["event_title"] == "Test Event Title"
-    assert kalshi_rec["mutually_exclusive"] is True
-    assert kalshi_rec["description"] == "Resolves Yes if X happens."
 
 
 # ── resolve_settlements ─────────────────────────────────────────

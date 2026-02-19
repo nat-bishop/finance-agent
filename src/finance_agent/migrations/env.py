@@ -1,9 +1,16 @@
 """Alembic environment — programmatic configuration with autogenerate support."""
 
 from alembic import context
+from alembic.ddl.impl import DefaultImpl
 from sqlalchemy import create_engine
 
 from finance_agent.models import Base
+
+
+class AlembicDuckDBImpl(DefaultImpl):
+    """Tell Alembic how to handle the duckdb dialect."""
+
+    __dialect__ = "duckdb"
 
 
 def run_migrations_online() -> None:
