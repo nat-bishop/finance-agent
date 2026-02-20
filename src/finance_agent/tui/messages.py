@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+from typing import Any
 
 from textual.message import Message
 
@@ -54,10 +54,67 @@ class FillReceived(Message):
         self.exchange = exchange
 
 
-class AskUserQuestionRequest(Message):
-    """Agent needs user input via AskUserQuestion tool."""
+# ── WS-based agent messages (server → TUI) ─────────────────────
 
-    def __init__(self, questions: list[dict], future: asyncio.Future) -> None:
+
+class AgentTextReceived(Message):
+    """Agent produced text output (from TextBlock)."""
+
+    def __init__(self, content: str) -> None:
         super().__init__()
+        self.content = content
+
+
+class AgentToolUse(Message):
+    """Agent called a tool."""
+
+    def __init__(self, name: str, tool_id: str, input_data: dict[str, Any]) -> None:
+        super().__init__()
+        self.name = name
+        self.tool_id = tool_id
+        self.input_data = input_data
+
+
+class AgentToolResult(Message):
+    """Tool returned a result."""
+
+    def __init__(self, tool_id: str, content: str, is_error: bool) -> None:
+        super().__init__()
+        self.tool_id = tool_id
+        self.content = content
+        self.is_error = is_error
+
+
+class AgentResultReceived(Message):
+    """Agent turn completed (cost, error status)."""
+
+    def __init__(self, total_cost_usd: float, is_error: bool) -> None:
+        super().__init__()
+        self.total_cost_usd = total_cost_usd
+        self.is_error = is_error
+
+
+class AskQuestionReceived(Message):
+    """Server relayed AskUserQuestion to TUI."""
+
+    def __init__(self, request_id: str, questions: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.request_id = request_id
         self.questions = questions
-        self.future = future
+
+
+class SessionReset(Message):
+    """Session was rotated (after clear or idle)."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__()
+        self.session_id = session_id
+
+
+class SessionLogSaved(Message):
+    """Session log was written to disk."""
+
+    def __init__(self, session_id: str, path: str) -> None:
+        super().__init__()
+        self.session_id = session_id
+        self.path = path

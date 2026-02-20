@@ -21,4 +21,5 @@ COPY workspace/scripts/ /workspace/scripts/
 RUN chmod -R a-w /workspace/scripts/
 
 WORKDIR /workspace
-CMD ["python", "-m", "finance_agent.main"]
+EXPOSE 8765
+CMD ["python", "-m", "finance_agent.server_main"]

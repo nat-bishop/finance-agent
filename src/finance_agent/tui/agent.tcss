@@ -26,17 +26,21 @@ Screen {
 /* Chat */
 #chat-log {
     height: 1fr;
-    scrollbar-size: 1 1;
+    scrollbar-size: 1 0;
 }
 
 #chat-input-row {
     dock: bottom;
     height: 3;
+    max-height: 10;
     border-top: solid $accent;
 }
 
 #chat-input {
     width: 1fr;
+    height: 1fr;
+    border: none;
+    padding: 0;
 }
 
 #stop-btn {
@@ -98,6 +102,27 @@ KnowledgeBaseScreen {
 #kb-versions-table {
     height: auto;
     max-height: 12;
+}
+
+#kb-tabs {
+    height: 1fr;
+}
+
+/* File browser */
+#file-browser-split {
+    height: 1fr;
+}
+
+#file-tree {
+    width: 1fr;
+    min-width: 25;
+    max-width: 40;
+    border-right: solid $accent;
+}
+
+#file-content-scroll {
+    width: 3fr;
+    padding: 1;
 }
 
 /* Rec cards */

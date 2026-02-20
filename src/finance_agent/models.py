@@ -279,3 +279,26 @@ class KalshiMarketMeta(Base):
         Index("idx_meta_series", "series_ticker"),
         Index("idx_meta_category", "category"),
     )
+
+
+# ── Session Logs ─────────────────────────────────────────────
+
+session_log_id_seq = Sequence("session_log_id_seq")
+
+
+class SessionLog(Base):
+    """Prose session summary captured by the server on session end."""
+
+    __tablename__ = "session_logs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        session_log_id_seq,
+        primary_key=True,
+        server_default=session_log_id_seq.next_value(),
+    )
+    session_id: Mapped[str] = mapped_column(Text, ForeignKey("sessions.id"), nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (Index("idx_session_log_session", "session_id"),)

@@ -46,6 +46,7 @@ class TradingConfig:
     snapshot_retention_days: int = 7  # purge market snapshots older than this
     daily_retention_days: int = 365  # purge daily rows for short-lived tickers older than this
     daily_min_ticker_days: int = 5  # only purge tickers with fewer than this many days of data
+    analysis_dir: str = "workspace/analysis"
 
     @property
     def kalshi_base_url(self) -> str:
@@ -61,7 +62,10 @@ class AgentConfig:
     """SDK-level agent configuration."""
 
     model: str = "claude-sonnet-4-5-20250929"
-    max_budget_usd: float = 2.0
+    max_budget_usd: float = 50.0
+    idle_timeout_minutes: int = 15
+    server_port: int = 8765
+    workspace: str = "/workspace"
 
 
 def load_configs() -> tuple[AgentConfig, Credentials, TradingConfig]:
@@ -72,8 +76,16 @@ def load_configs() -> tuple[AgentConfig, Credentials, TradingConfig]:
         db_path=os.environ.get("FA_DB_PATH", TradingConfig.db_path),
         backup_dir=os.environ.get("FA_BACKUP_DIR", TradingConfig.backup_dir),
         log_dir=os.environ.get("FA_LOG_DIR", TradingConfig.log_dir),
+        analysis_dir=os.environ.get("FA_ANALYSIS_DIR", TradingConfig.analysis_dir),
     )
-    return AgentConfig(), Credentials(), tc
+    ac = AgentConfig(
+        idle_timeout_minutes=int(
+            os.environ.get("FA_IDLE_TIMEOUT_MINUTES", AgentConfig.idle_timeout_minutes)
+        ),
+        server_port=int(os.environ.get("FA_SERVER_PORT", AgentConfig.server_port)),
+        workspace=os.environ.get("FA_WORKSPACE", AgentConfig.workspace),
+    )
+    return ac, Credentials(), tc
 
 
 def load_prompt(name: str) -> str:

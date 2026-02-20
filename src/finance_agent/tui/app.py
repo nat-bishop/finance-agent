@@ -1,4 +1,4 @@
-"""Textual app: initialization, screen registration, keybindings."""
+"""Textual app: thin WS client connecting to the agent server."""
 
 from __future__ import annotations
 
@@ -6,23 +6,25 @@ import asyncio
 import contextlib
 import json
 import logging
-from pathlib import Path
 from typing import Any, ClassVar
 
-from claude_agent_sdk import (
-    ClaudeSDKClient,
-    create_sdk_mcp_server,
-)
-from claude_agent_sdk.types import PermissionResultAllow
+import websockets
+import websockets.asyncio.client
 from textual.app import App
+from textual.css.query import NoMatches
 
 from ..config import AgentConfig, TradingConfig, load_configs
 from ..database import AgentDatabase
-from ..hooks import create_audit_hooks
 from ..kalshi_client import KalshiAPIClient
-from ..main import build_options
-from ..tools import create_db_tools, create_market_tools
-from .messages import AskUserQuestionRequest, RecommendationCreated
+from .messages import (
+    AgentResultReceived,
+    AgentTextReceived,
+    AgentToolResult,
+    AgentToolUse,
+    AskQuestionReceived,
+    RecommendationCreated,
+    SessionReset,
+)
 from .screens.dashboard import DashboardScreen
 from .screens.history import HistoryScreen
 from .screens.knowledge_base import KnowledgeBaseScreen
@@ -30,15 +32,12 @@ from .screens.performance import PerformanceScreen
 from .screens.portfolio import PortfolioScreen
 from .screens.recommendations import RecommendationsScreen
 from .services import TUIServices
-from .widgets.agent_chat import AgentChat
-from .widgets.status_bar import StatusBar
 
-_KB_PATH = Path("/workspace/analysis/knowledge_base.md")
 logger = logging.getLogger(__name__)
 
 
 class FinanceApp(App):
-    """Kalshi market analyst TUI."""
+    """Kalshi market analyst TUI — WebSocket client to agent server."""
 
     TITLE = "Finance Agent"
     CSS_PATH = "agent.tcss"
@@ -48,19 +47,20 @@ class FinanceApp(App):
         ("f6", "switch_screen('performance')", "P&L"),
     ]
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, ws_url: str = "ws://localhost:8765", **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._client: ClaudeSDKClient | None = None
+        self._ws_url = ws_url
+        self._ws: websockets.asyncio.client.ClientConnection | None = None
+        self._ws_listener_task: asyncio.Task[None] | None = None
         self._db: AgentDatabase | None = None
         self._services: TUIServices | None = None
         self._session_id: str | None = None
         self._agent_config: AgentConfig | None = None
         self._trading_config: TradingConfig | None = None
         self._kalshi: KalshiAPIClient | None = None
-        self._can_use_tool: Any = None
 
     async def on_mount(self) -> None:
-        """Initialize clients, DB, session, SDK client, then push dashboard."""
+        """Connect to server, initialize local resources, install screens."""
         try:
             await self._init_app()
         except Exception:
@@ -72,78 +72,41 @@ class FinanceApp(App):
         self._agent_config = agent_config
         self._trading_config = trading_config
 
-        # Database
+        # Local database connection (for TUI screens: recs, portfolio, history)
         db = AgentDatabase(trading_config.db_path)
         self._db = db
-        backup_result = db.backup_if_needed(
-            trading_config.backup_dir,
-            max_age_hours=trading_config.backup_max_age_hours,
-        )
-        if backup_result:
-            self.log(f"DB backup: {backup_result}")
 
-        session_id = db.create_session()
-        self._session_id = session_id
+        # Exchange client (for TUI: portfolio display + trade execution)
+        kalshi = KalshiAPIClient(credentials, trading_config)
+        self._kalshi = kalshi
+
+        # Services (execution, portfolio reads, DB queries)
+        services = TUIServices(
+            db=db,
+            kalshi=kalshi,
+            config=trading_config,
+            session_id="pending",  # updated on WS connect
+            credentials=credentials,
+        )
+        self._services = services
 
         # Per-session file logging
         self._log_handler: logging.Handler | None = None
         if trading_config.log_dir:
             from ..logging_config import add_session_file_handler
 
-            self._log_handler = add_session_file_handler(trading_config.log_dir, session_id)
-            logger.info("Session %s started", session_id)
+            self._log_handler = add_session_file_handler(trading_config.log_dir, "tui")
+            logger.info("TUI started")
 
-        # Exchange clients
-        kalshi = KalshiAPIClient(credentials, trading_config)
-        self._kalshi = kalshi
-
-        # Services
-        services = TUIServices(
-            db=db,
-            kalshi=kalshi,
-            config=trading_config,
-            session_id=session_id,
-            credentials=credentials,
-        )
-        self._services = services
-
-        # AskUserQuestion handler (closure over self, reusable across resets)
-        async def can_use_tool_tui(
-            tool_name: str, input_data: dict[str, Any], context: Any
-        ) -> PermissionResultAllow:
-            if tool_name == "AskUserQuestion":
-                future: asyncio.Future[dict[str, str]] = asyncio.get_event_loop().create_future()
-                self.post_message(
-                    AskUserQuestionRequest(
-                        questions=input_data.get("questions", []),
-                        future=future,
-                    )
-                )
-                answers = await future
-                return PermissionResultAllow(
-                    updated_input={
-                        "questions": input_data.get("questions", []),
-                        "answers": answers,
-                    }
-                )
-            return PermissionResultAllow(updated_input=input_data)
-
-        self._can_use_tool = can_use_tool_tui
-
-        # Build SDK client with session context in system prompt
-        session_context = await self._build_session_context()
-        client = self._build_client(session_id, session_context=session_context)
-        await client.__aenter__()
-        self._client = client
-
-        # Install all screens
+        # Install screens BEFORE connecting WS (so widgets exist for messages)
         screens = {
             "dashboard": DashboardScreen(
-                client=client,
                 services=services,
-                session_id=session_id,
+                session_id="connecting...",
             ),
-            "knowledge_base": KnowledgeBaseScreen(),
+            "knowledge_base": KnowledgeBaseScreen(
+                analysis_dir=trading_config.analysis_dir,
+            ),
             "recommendations": RecommendationsScreen(services=services),
             "portfolio": PortfolioScreen(services=services),
             "history": HistoryScreen(services=services),
@@ -153,118 +116,135 @@ class FinanceApp(App):
             self.install_screen(screen, name=name)
         self.push_screen("dashboard")
 
-    async def _build_session_context(self) -> str:
-        """Build dynamic session context for the system prompt."""
-        db = self._db
-        if not db:
-            return ""
+        # Connect to agent server AFTER screens are installed
+        ws = await websockets.connect(self._ws_url)
+        self._ws = ws
 
-        session_state = db.get_session_state(current_session_id=self._session_id)
-        kb = _KB_PATH.read_text(encoding="utf-8") if _KB_PATH.exists() else ""
+        # Start WS listener after dashboard is active
+        self._ws_listener_task = asyncio.create_task(self._ws_listener())
 
-        portfolio: dict[str, Any] | None = None
-        if self._services:
-            try:
-                portfolio = await self._services.get_portfolio()
-            except Exception:
-                logger.debug("Could not fetch portfolio for session context", exc_info=True)
+    def _post_to_widget(self, selector: str, message: Any) -> None:
+        """Post a message directly to a widget by CSS selector."""
+        try:
+            self.screen.query_one(selector).post_message(message)
+        except NoMatches:
+            logger.debug("Widget %s not mounted — dropped %s", selector, type(message).__name__)
+        except Exception:
+            logger.exception("_post_to_widget failed for %s", selector)
 
-        parts = ["## Session Context"]
-        if session_state.get("last_session"):
-            parts.append(
-                f"### Last Session\n```json\n"
-                f"{json.dumps(session_state['last_session'], indent=2, default=str)}\n```"
-            )
-        if session_state.get("unreconciled_trades"):
-            parts.append(
-                f"### Unreconciled Trades\n```json\n"
-                f"{json.dumps(session_state['unreconciled_trades'], indent=2, default=str)}\n```"
-            )
-        if portfolio:
-            parts.append(
-                f"### Portfolio\n```json\n{json.dumps(portfolio, indent=2, default=str)}\n```"
-            )
-        if kb:
-            parts.append(f"### Knowledge Base\n\n{kb}")
+    def _post_to_screen(self, message: Any) -> None:
+        """Post a message to the active screen."""
+        try:
+            self.screen.post_message(message)
+        except Exception:
+            logger.debug("Screen dispatch failed — dropped %s", type(message).__name__)
 
-        return "\n\n".join(parts)
-
-    def _build_client(self, session_id: str, session_context: str = "") -> ClaudeSDKClient:
-        """Build a new SDK client with fresh MCP servers and hooks."""
-        db = self._db
-        kalshi = self._kalshi
-        trading_config = self._trading_config
-        agent_config = self._agent_config
-        if not db or not kalshi or not trading_config or not agent_config:
-            raise RuntimeError("Cannot build client before _init_app completes")
-
-        mcp_tools = {
-            "markets": create_market_tools(kalshi),
-            "db": create_db_tools(
-                db,
-                session_id,
-                kalshi,
-                trading_config,
-                trading_config.recommendation_ttl_minutes,
-            ),
-        }
-        mcp_servers = {
-            key: create_sdk_mcp_server(name=key, version="1.0.0", tools=tools)
-            for key, tools in mcp_tools.items()
-        }
-        hooks = create_audit_hooks(
-            on_recommendation=lambda: self.post_message(RecommendationCreated()) or None,  # type: ignore[arg-type]
-        )
-        options = build_options(
-            agent_config=agent_config,
-            trading_config=trading_config,
-            mcp_servers=mcp_servers,
-            can_use_tool=self._can_use_tool,
-            hooks=hooks,
-            session_context=session_context,
-        )
-        return ClaudeSDKClient(options=options)
-
-    async def action_clear_chat(self) -> None:
-        """Clear the chat UI and reset the SDK conversation (same DB session)."""
-        if not self._db or not self._session_id:
+    async def _ws_listener(self) -> None:
+        """Background task: consume WS messages from server, dispatch to widgets."""
+        ws = self._ws
+        if not ws:
             return
 
-        # Disconnect old client
-        if self._client:
-            with contextlib.suppress(Exception):
-                await self._client.__aexit__(None, None, None)
-            self._client = None
+        try:
+            async for raw in ws:
+                msg = json.loads(raw)
+                msg_type = msg.get("type")
+                logger.debug("WS recv: %s", msg_type)
 
-        # New SDK client with fresh conversation (same session)
-        session_context = await self._build_session_context()
-        client = self._build_client(self._session_id, session_context=session_context)
-        await client.__aenter__()
-        self._client = client
+                if msg_type == "text":
+                    self._post_to_widget("#agent-chat", AgentTextReceived(msg["content"]))
 
-        # Clear chat widget, point it at new client
-        dashboard: DashboardScreen = self.get_screen("dashboard")  # type: ignore[assignment]
-        dashboard._client = client
-        dashboard.query_one("#agent-chat", AgentChat).reset(client)
-        bar = dashboard.query_one("#status-bar", StatusBar)
-        bar.total_cost = 0.0
+                elif msg_type == "tool_use":
+                    self._post_to_widget(
+                        "#agent-chat",
+                        AgentToolUse(msg["name"], msg["id"], msg.get("input", {})),
+                    )
 
-        logger.info("Chat cleared — conversation reset for session %s", self._session_id)
+                elif msg_type == "tool_result":
+                    self._post_to_widget(
+                        "#agent-chat",
+                        AgentToolResult(
+                            msg["id"], msg.get("content", ""), msg.get("is_error", False)
+                        ),
+                    )
+
+                elif msg_type == "result":
+                    self._post_to_widget(
+                        "#agent-chat",
+                        AgentResultReceived(
+                            msg.get("total_cost_usd", 0),
+                            msg.get("is_error", False),
+                        ),
+                    )
+
+                elif msg_type == "ask_question":
+                    self._post_to_screen(AskQuestionReceived(msg["request_id"], msg["questions"]))
+
+                elif msg_type == "recommendation_created":
+                    self._post_to_screen(RecommendationCreated())
+
+                elif msg_type == "session_reset":
+                    new_id = msg["session_id"]
+                    self._session_id = new_id
+                    if self._services:
+                        self._services._session_id = new_id
+                    self._post_to_screen(SessionReset(new_id))
+
+                elif msg_type == "session_log_saved":
+                    logger.info(
+                        "Session log saved: %s -> %s",
+                        msg["session_id"],
+                        msg.get("path", ""),
+                    )
+
+                elif msg_type == "status":
+                    self._session_id = msg.get("session_id")
+                    if self._services and self._session_id:
+                        self._services._session_id = self._session_id
+                    self._post_to_screen(SessionReset(self._session_id or ""))
+
+                else:
+                    logger.debug("Unknown WS message type: %s", msg_type)
+
+        except websockets.ConnectionClosed:
+            logger.warning("WebSocket connection to server lost")
+        except asyncio.CancelledError:
+            logger.info("WS listener cancelled")
+        except Exception:
+            logger.exception("WS listener crashed")
+
+    async def send_ws(self, data: dict[str, Any]) -> None:
+        """Send a JSON message to the agent server."""
+        if self._ws:
+            try:
+                await self._ws.send(json.dumps(data, default=str))
+            except websockets.ConnectionClosed:
+                logger.warning("Cannot send — WS connection closed")
+                self._ws = None
+
+    async def action_clear_chat(self) -> None:
+        """Send clear command to server (it handles session rotation)."""
+        await self.send_ws({"type": "clear"})
 
     async def on_unmount(self) -> None:
-        """Clean up SDK client, session state, and database."""
-        if self._client:
-            with contextlib.suppress(BaseException):
-                await asyncio.wait_for(
-                    self._client.__aexit__(None, None, None),
-                    timeout=5.0,
-                )
+        """Clean up WS connection and local resources."""
+        if self._ws_listener_task:
+            self._ws_listener_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ws_listener_task
+
+        if self._ws:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+
         if self._services and self._services._fill_monitor:
             with contextlib.suppress(BaseException):
                 await self._services._fill_monitor.close()
+
         if self._db:
             with contextlib.suppress(BaseException):
                 self._db.close()
+
         if self._log_handler:
             logging.getLogger().removeHandler(self._log_handler)
             self._log_handler.close()

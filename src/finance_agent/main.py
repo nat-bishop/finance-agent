@@ -1,4 +1,9 @@
-"""Entry point -- assembles SDK options, launches TUI."""
+"""SDK options builder + legacy TUI entry point.
+
+``build_options`` is the primary export — used by ``server.py`` to
+configure the Claude SDK client.  The ``main()`` function is kept for
+backwards compat but delegates to ``finance_agent.tui``.
+"""
 
 from __future__ import annotations
 

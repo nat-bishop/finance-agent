@@ -34,6 +34,7 @@ from finance_agent.models import (
     RecommendationGroup,
     RecommendationLeg,
     Session,
+    SessionLog,
     Trade,
 )
 
@@ -539,10 +540,14 @@ class AgentDatabase:
         """Bulk insert market snapshots. Returns count inserted."""
         if not rows:
             return 0
+        import time as _time
+
+        t0 = _time.time()
         filtered = [{k: v for k, v in row.items() if k in self._SNAPSHOT_COLS} for row in rows]
         with self._session_factory() as session:
             session.execute(insert(MarketSnapshot), filtered)
             session.commit()
+        logger.info("insert_market_snapshots: %d rows in %.2fs", len(filtered), _time.time() - t0)
         return len(filtered)
 
     def purge_old_snapshots(self, retention_days: int = 7) -> int:
@@ -662,6 +667,9 @@ class AgentDatabase:
         if not rows:
             return 0
 
+        import time as _time
+
+        t0 = _time.time()
         cols_csv = ", ".join(columns)
         conflict_csv = ", ".join(conflict_columns)
 
@@ -703,6 +711,7 @@ class AgentDatabase:
         finally:
             tmp_path.unlink(missing_ok=True)
 
+        logger.info("bulk_upsert %s: %d rows in %.2fs", table, len(rows), _time.time() - t0)
         return len(rows)
 
     # ── Kalshi daily: insert / upsert ─────────────────────────
@@ -829,6 +838,36 @@ class AgentDatabase:
 
     # ── Events (upsert for collector) ─────────────────────────
 
+    _EVENT_COLUMNS: ClassVar[list[str]] = [
+        "event_ticker",
+        "exchange",
+        "series_ticker",
+        "title",
+        "category",
+        "mutually_exclusive",
+        "last_updated",
+        "markets_json",
+    ]
+    _EVENT_CONFLICT: ClassVar[list[str]] = ["event_ticker", "exchange"]
+    _EVENT_UPDATE: ClassVar[list[str]] = [
+        "series_ticker",
+        "title",
+        "category",
+        "mutually_exclusive",
+        "last_updated",
+        "markets_json",
+    ]
+
+    def upsert_events_bulk(self, rows: list[dict[str, Any]]) -> int:
+        """Bulk upsert events via CSV staging."""
+        return self._bulk_upsert(
+            table="events",
+            columns=self._EVENT_COLUMNS,
+            rows=rows,
+            conflict_columns=self._EVENT_CONFLICT,
+            update_columns=self._EVENT_UPDATE,
+        )
+
     def upsert_event(
         self,
         event_ticker: str,
@@ -888,6 +927,26 @@ class AgentDatabase:
                 "last_session": last_session_row.to_dict() if last_session_row else None,
                 "unreconciled_trades": [t.to_dict() for t in unreconciled_trades],
             }
+
+    # ── Session logs ────────────────────────────────────────────
+
+    def log_session_summary(self, session_id: str, content: str) -> int:
+        """Write a session log entry. Returns the log ID."""
+        with self._session_factory() as session:
+            entry = SessionLog(session_id=session_id, created_at=_now(), content=content)
+            session.add(entry)
+            session.commit()
+            session.refresh(entry)
+            return entry.id  # type: ignore[return-value]
+
+    def get_session_logs(self, session_id: str | None = None, limit: int = 20) -> list[dict]:
+        """Get session logs, optionally filtered by session_id."""
+        with self._session_factory() as session:
+            stmt = select(SessionLog).order_by(SessionLog.created_at.desc())
+            if session_id:
+                stmt = stmt.where(SessionLog.session_id == session_id)
+            stmt = stmt.limit(limit)
+            return [log.to_dict() for log in session.scalars(stmt).all()]
 
     # ── TUI query methods ─────────────────────────────────────
 

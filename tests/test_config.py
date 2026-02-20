@@ -50,7 +50,7 @@ def test_credentials_defaults(monkeypatch):
 
 def test_agent_config_defaults():
     config = AgentConfig()
-    assert config.max_budget_usd == 2.0
+    assert config.max_budget_usd == 50.0
     assert "sonnet" in config.model
 
 

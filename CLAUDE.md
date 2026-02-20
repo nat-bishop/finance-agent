@@ -5,11 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Docker
-make up             # build + run agent TUI in Docker
+# Docker (agent server)
+make up             # collect data, build + run agent server (detached)
 make down           # stop containers (workspace data preserved)
-make shell          # bash into container
-make logs           # tail the agent log file (workspace/data/agent.log)
+make shell          # bash into running container
+make logs           # tail agent server logs
+
+# TUI (local)
+make ui             # launch TUI connecting to agent server
 
 # Data pipeline (local)
 make collect        # snapshot market data + sync Kalshi daily history
@@ -28,7 +31,25 @@ make test-cov       # run tests with coverage report
 
 ## Architecture
 
-Kalshi market analysis system built on `claude-agent-sdk`. The agent runs as an interactive REPL inside a Docker container with a sandboxed `/workspace` filesystem. It discovers mispricings across Kalshi markets using a combination of programmatic analysis and semantic reasoning — reading settlement rules, understanding cross-market relationships, and writing custom analytical scripts. Produces structured trade recommendations — it does not execute trades directly.
+Kalshi market analysis system built on `claude-agent-sdk`. The system runs as a persistent WebSocket server inside Docker, with a thin Textual TUI client connecting locally. The agent discovers mispricings across Kalshi markets using a combination of programmatic analysis and semantic reasoning — reading settlement rules, understanding cross-market relationships, and writing custom analytical scripts. Produces structured trade recommendations — it does not execute trades directly.
+
+### Server/TUI split
+
+**Agent server** (Docker, persistent, `make up`):
+- `server.py` — WebSocket server on port 8765
+- Owns the `ClaudeSDKClient` lifecycle (create, query, stream, destroy)
+- MCP tools (markets: 5 tools, db: 1 tool)
+- Hooks (PreToolUse: auto-approve + file protection, PostToolUse: rec audit + KB commit)
+- Session log extraction on clear/idle/shutdown (sends wrap-up prompt, captures prose, writes markdown + DB)
+- Idle timer (15 min default, configurable via `FA_IDLE_TIMEOUT_MINUTES`)
+- Bridges `AskUserQuestion` to TUI via WebSocket
+
+**TUI client** (local, `make ui`):
+- `tui/app.py` — Thin WebSocket client to agent server
+- Own `AgentDatabase` connection (reads + execution writes)
+- Own `KalshiAPIClient` (portfolio display + trade execution)
+- `TUIServices` (execution, portfolio reads — same as before)
+- All screens and widgets (rendering from WS messages instead of SDK types)
 
 ### Three-layer design
 
@@ -36,17 +57,24 @@ Kalshi market analysis system built on `claude-agent-sdk`. The agent runs as an 
 - `collector.py` — snapshots Kalshi market data to DuckDB, syncs daily history from S3
 - Run via: `make collect`
 
-**Agent layer** (Claude REPL, runs on demand):
+**Agent layer** (Claude SDK, runs in server):
 - Queries canonical DuckDB views (`v_latest_markets`, `v_daily_with_meta`) for bulk market analysis
 - Investigates opportunities using MCP tools for live market data (orderbooks, trades, portfolio)
 - Records trade recommendations via `recommend_trade` tool for separate review/execution
 - Persists findings to `/workspace/analysis/knowledge_base.md` across sessions
 
-**TUI layer** (Textual, runs the app):
-- `tui/app.py` — FinanceApp: initializes clients, DB, SDK, registers 4 screens (F1-F4)
+**TUI layer** (Textual, runs locally):
+- `tui/app.py` — FinanceApp: WebSocket client, local DB + Kalshi for screens
 - `tui/services.py` — async wrappers bridging exchange clients to Textual event loop
-- `tui/screens/` — dashboard (chat+sidebar), recommendations, portfolio, history
+- `tui/screens/` — dashboard (chat+sidebar), knowledge base, recommendations, portfolio, history, performance
 - `tui/widgets/` — 8 widgets: agent_chat, rec_card, rec_list, portfolio_panel, kb_panel, status_bar, ask_modal, confirm_modal
+
+### WebSocket protocol
+
+JSON messages with a `type` field:
+
+**TUI → Server:** `chat`, `clear`, `interrupt`, `ask_response`
+**Server → TUI:** `text`, `tool_use`, `tool_result`, `result`, `ask_question`, `recommendation_created`, `session_reset`, `session_log_saved`, `status`
 
 ### Source -> Runtime boundary
 
@@ -61,22 +89,24 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 
 ### Module roles
 
-- **main.py** — Assembles `ClaudeAgentOptions`, builds SDK options. Entry point loads config, wires `setup_logging()`, launches TUI.
+- **server.py** — `AgentServer` class: WebSocket server, Claude SDK client lifecycle, session log extraction, idle timer, `_rotation_lock` serializes clear/idle rotation, `_cancel_ask_futures()` on rotation.
+- **server_main.py** — Entry point for the agent server: loads config, setup logging, starts `AgentServer`.
+- **main.py** — Assembles `ClaudeAgentOptions` via `build_options()`. Used by `server.py`. Also has legacy `main()` that launches TUI.
 - **logging_config.py** — `setup_logging()` configures root logger with stderr console + optional file handler. Idempotent, quiets noisy libraries (alembic, sqlalchemy, urllib3). `add_session_file_handler(log_dir, session_id)` adds a per-session file handler after session creation.
-- **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `recommendation_ttl_minutes=60`. Path fields (`db_path`, `backup_dir`, `log_dir`) have env var overrides (`FA_DB_PATH`, `FA_BACKUP_DIR`, `FA_LOG_DIR`) set in `docker-compose.yml`. Also loads and templates `prompts/system.md`.
+- **config.py** — Three config classes: `Credentials(BaseSettings)` loads API keys from `.env`/env vars; `TradingConfig` and `AgentConfig` are plain dataclasses (edit source to change defaults). Key trading defaults: `kalshi_max_position_usd=100`, `recommendation_ttl_minutes=60`. `AgentConfig` also has `idle_timeout_minutes=15` and `server_port=8765` (env: `FA_IDLE_TIMEOUT_MINUTES`, `FA_SERVER_PORT`). Path fields (`db_path`, `backup_dir`, `log_dir`) have env var overrides (`FA_DB_PATH`, `FA_BACKUP_DIR`, `FA_LOG_DIR`) set in `docker-compose.yml`. Also loads and templates `prompts/system.md`.
 - **constants.py** — Shared string constants: exchange names (`EXCHANGE_KALSHI`), statuses (`STATUS_PENDING`, `STATUS_EXECUTED`, etc.), sides (`SIDE_YES`/`SIDE_NO`), actions (`ACTION_BUY`/`ACTION_SELL`), `STRATEGY_MANUAL`, `BINARY_PAYOUT_CENTS`. Imported across modules to avoid scattered magic strings.
-- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`) with DuckDB-compatible `Sequence` objects for auto-increment PKs. Canonical schema definition for all 8 tables. `UniqueConstraint` on `kalshi_daily(date, ticker_name)` for DuckDB `ON CONFLICT` support. Alembic autogenerate reads these.
+- **models.py** — SQLAlchemy ORM models (`DeclarativeBase`, `mapped_column`) with DuckDB-compatible `Sequence` objects for auto-increment PKs. Canonical schema definition for all 9 tables. `UniqueConstraint` on `kalshi_daily(date, ticker_name)` for DuckDB `ON CONFLICT` support. Alembic autogenerate reads these.
 - **tools.py** — Unified MCP tool factories via `@tool` decorator. `create_market_tools(kalshi)` → 5 read-only tools, `create_db_tools(db, session_id, kalshi)` → 1 tool (`recommend_trade` with thesis + legs array). 6 tools total.
 - **kalshi_client.py** — Thin wrapper around `kalshi_python_sync` SDK with rate limiting. Auth is RSA-PSS signing. Includes get_events (paginated).
 - **polymarket_client.py** — Dormant module. Thin wrapper around `polymarket-us` SDK. Preserved for future re-enablement but not imported by active code.
 - **fees.py** — Kalshi fee calculations: P(1-P) parabolic formula, `kalshi_fee()`, `best_price_and_depth()`, `compute_hypothetical_pnl()`.
-- **hooks.py** — Hooks using `HookMatcher`. Auto-approve with file protection (denies Write/Edit to read-only paths), recommendation counting via PostToolUse, session end DB recording.
-- **database.py** — `AgentDatabase` class wrapping DuckDB via `duckdb_engine` SQLAlchemy dialect. Alembic migrations auto-run on startup. Creates 3 canonical views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) after migrations. Upserts use raw SQL `text()` with `ON CONFLICT` for DuckDB compatibility. `maintenance()` runs `CHECKPOINT` (and optionally `VACUUM ANALYZE`). Events table has composite PK `(event_ticker, exchange)`. `get_session_state()` returns last_session, unreconciled_trades. Recommendation groups+legs CRUD for frontend. `purge_old_daily(retention_days, min_ticker_days)` removes rows for short-lived expired tickers. `get_missing_meta_tickers()` prioritizes recently-seen tickers (last 90 days).
+- **hooks.py** — Hooks using `HookMatcher`. Auto-approve with file protection (denies Write/Edit to read-only paths), recommendation counting via PostToolUse, KB auto-commit.
+- **database.py** — `AgentDatabase` class wrapping DuckDB via `duckdb_engine` SQLAlchemy dialect. Alembic migrations auto-run on startup. Creates 3 canonical views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) after migrations. Upserts use raw SQL `text()` with `ON CONFLICT` for DuckDB compatibility. `maintenance()` runs `CHECKPOINT` (and optionally `VACUUM ANALYZE`). `log_session_summary()` writes session logs. Recommendation groups+legs CRUD for frontend. `purge_old_daily(retention_days, min_ticker_days)` removes rows for short-lived expired tickers. `get_missing_meta_tickers()` prioritizes recently-seen tickers (last 90 days).
 - **collector.py** — Standalone Kalshi data collector. Paginated event collection via `GET /events`. Triggers incremental Kalshi daily history sync, upserts market metadata to `kalshi_market_meta`, resolves settlements, and runs retention purges (`purge_old_snapshots`, `purge_old_daily`).
 - **backfill.py** — Kalshi historical daily data sync from public S3 bucket. Dynamic: fetches only missing days (full backfill on empty DB, incremental on subsequent runs). Parallel S3 downloads (8 workers via ThreadPoolExecutor), serial DB inserts in date order for contiguous-prefix guarantee on interruption. Calls `db.maintenance()` after sync. `backfill_missing_meta()` fetches titles/categories for recent daily tickers missing from `kalshi_market_meta` (200/run, prioritizes recently-seen tickers). Called by collector or standalone via `python -m finance_agent.backfill`.
 - **rate_limiter.py** — Token-bucket rate limiter with separate read/write buckets.
 - **api_base.py** — Base class for API clients with shared rate limiting and serialization.
-- **prompts/system.md** — System prompt template: Kalshi market analyst, prediction market mechanics education, investigative analysis approach, DuckDB query rules, SQL cheat sheet, risk rules, session management.
+- **prompts/system.md** — System prompt template: Kalshi market analyst, prediction market mechanics education, investigative analysis approach, DuckDB query rules, SQL cheat sheet, risk rules.
 
 ### Key patterns
 
@@ -84,19 +114,22 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 - **MCP tool naming**: `mcp__markets__{tool_name}`, `mcp__db__{tool_name}`. Two MCP servers, 6 tools total.
 - **Conventions**: Prices in cents, action+side, exchange column always "kalshi" in active code. Domain strings (`"kalshi"`, `"pending"`, `"yes"`, `"buy"`, `"manual"`, etc.) defined in `constants.py` — import from there, don't hardcode.
 - **Config**: `Credentials` loads from env vars/`.env`; `TradingConfig` and `AgentConfig` are source-level defaults. Path fields on TradingConfig have `FA_*` env var overrides for Docker.
-- **Hook ordering**: PreToolUse (auto-approve + file protection) → PostToolUse rec audit → Stop session end.
-- **Startup context injection**: `app.py` calls `db.get_session_state()` and injects result (including knowledge base content) into `BEGIN_SESSION` message. Agent starts with full context — no tool call needed.
-- **Knowledge base**: `/workspace/analysis/knowledge_base.md` — single markdown file the agent reads/writes for persistent memory (watchlist, verified findings, rejected ideas, patterns). Displayed in sidebar KBPanel.
+- **Hook ordering**: PreToolUse (auto-approve + file protection) → PostToolUse rec audit + KB commit.
+- **Startup context injection**: `server.py` calls `db.get_session_state()` and injects result (including knowledge base content) into system prompt. Agent starts with full context — no tool call needed.
+- **Knowledge base**: `/workspace/analysis/knowledge_base.md` — single markdown file the agent reads/writes for persistent memory (watchlist, verified findings, rejected ideas, patterns).
+- **Session logging**: On session end (clear, idle, shutdown), server sends wrap-up prompt to existing SDK client, captures prose response, writes to `workspace/analysis/sessions/{session_id}.md` and `session_logs` DB table.
 - **Analyst-only**: Agent recommends trades via `recommend_trade` DB tool. Exchange client methods remain for TUI executor.
 - **Canonical views**: 3 DuckDB views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) replace `markets.jsonl` and provide SQL-native discovery. Created on startup after migrations.
 - **DuckDB upserts**: Use raw SQL `text()` with `ON CONFLICT` clauses. `UniqueConstraint` on `kalshi_daily` and PKs on `events`/`kalshi_market_meta` serve as conflict targets.
+- **Rotation lock**: `asyncio.Lock` in server.py serializes session rotation from clear + idle timer to prevent race conditions.
 
 ### Logging
 
 Centralized via `logging_config.py`. Call `setup_logging()` once per entry point; all other modules use `logger = logging.getLogger(__name__)` at module level.
 
 **Where logs go:**
-- **TUI app** (`make up`): per-session log files in `FA_LOG_DIR` (Docker sets `/app/state/logs/`). Each session creates `agent_{session_id}.log`, persisted on host at `./workspace/data/logs/`. `make logs` tails the most recent session log.
+- **Agent server** (`make up`): stderr via `docker compose logs`. Per-session log files in `FA_LOG_DIR` (Docker sets `/app/state/logs/`).
+- **TUI client** (`make ui`): optional file handler if `FA_LOG_DIR` is set locally.
 - **Collector** (`make collect`): stderr only (runs locally, not in Docker). Output visible in terminal, not saved to file.
 - **Log levels**: INFO for normal operations, DEBUG for verbose (exception tracebacks in dashboard/portfolio refresh), WARNING for interrupts, ERROR for execution failures.
 - **TUI display vs logging**: RichLog widgets show user-facing agent conversation. Python logging is a separate developer/ops channel — they don't overlap.

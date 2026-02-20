@@ -1,27 +1,32 @@
-.PHONY: up up-fast down shell logs lint format test test-cov collect backfill backup startup nuke-db nuke-data
+.PHONY: up down shell logs dev ui lint format test test-cov collect backfill backup startup nuke-db nuke-data
 
-# ── Docker ───────────────────────────────────────────────────
+# ── Docker (agent server) ─────────────────────────────────
 
 up:
-	@echo "Collecting market data (build runs in parallel)..."
-	@uv run python -m finance_agent.collector & COLLECT_PID=$$!; docker compose build agent; wait $$COLLECT_PID
-	docker compose run --rm agent
-
-up-fast:
-	docker compose run --rm agent
+	docker compose build agent
+	docker compose up -d
 
 down:
 	docker compose down --remove-orphans
 
 shell:
-	docker compose run --build --rm agent /bin/bash
+	docker compose exec agent bash
 
 N ?= 250
 logs:
-	@latest=$$(ls -t workspace/data/logs/agent_*.log 2>/dev/null | head -1); \
-	if [ -n "$$latest" ]; then tail -$(N) "$$latest"; else echo "No session logs yet -- run make up first"; fi
+	docker compose logs -f agent
 
-# ── Code quality (local) ────────────────────────────────────
+# ── Dev (local server with hot reload) ────────────────────
+
+dev:
+	FA_WORKSPACE=workspace uv run watchfiles "uv run python -m finance_agent.server_main" src/finance_agent/
+
+# ── TUI (local) ───────────────────────────────────────────
+
+ui:
+	uv run python -m finance_agent.tui
+
+# ── Code quality (local) ──────────────────────────────────
 
 lint:
 	uv run ruff check src/
@@ -32,7 +37,7 @@ format:
 	uv run ruff check --fix src/
 	uv run ruff format src/
 
-# ── Testing (local) ─────────────────────────────────────────
+# ── Testing (local) ───────────────────────────────────────
 
 test:
 	uv run pytest tests/ -v
@@ -40,7 +45,7 @@ test:
 test-cov:
 	uv run pytest tests/ -v --cov --cov-report=term-missing
 
-# ── Data pipeline (local) ──────────────────────────────────
+# ── Data pipeline (local) ────────────────────────────────
 
 collect:
 	uv run python -m finance_agent.collector
@@ -57,7 +62,7 @@ migrate:
 startup:
 	uv run python -c "from finance_agent.database import run_startup; run_startup()"
 
-# ── Dangerous resets ────────────────────────────────────────
+# ── Dangerous resets ──────────────────────────────────────
 
 nuke-db:
 	@echo "This will DELETE the database."

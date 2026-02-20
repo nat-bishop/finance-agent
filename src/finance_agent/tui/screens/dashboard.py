@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Any, ClassVar
 
-from claude_agent_sdk import ClaudeSDKClient
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
@@ -14,9 +13,10 @@ from textual.widgets import Button
 from ..messages import (
     AgentCostUpdate,
     AgentResponseComplete,
-    AskUserQuestionRequest,
+    AskQuestionReceived,
     RecommendationCreated,
     RecommendationExecuted,
+    SessionReset,
 )
 from ..services import TUIServices
 from ..widgets.agent_chat import AgentChat
@@ -41,19 +41,17 @@ class DashboardScreen(Screen):
 
     def __init__(
         self,
-        client: ClaudeSDKClient,
         services: TUIServices,
         session_id: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._client = client
         self._services = services
         self._session_id = session_id
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main-content"):
-            yield AgentChat(self._client, id="agent-chat")
+            yield AgentChat(id="agent-chat")
             with Vertical(id="sidebar"):
                 yield PortfolioPanel(id="portfolio-panel")
                 yield RecList(id="rec-list")
@@ -78,6 +76,7 @@ class DashboardScreen(Screen):
         try:
             groups = self._services.get_pending_groups()
             self.query_one("#rec-list", RecList).update_recs(groups)
+            self.query_one("#status-bar", StatusBar).rec_count = len(groups)
         except Exception:
             logger.debug("Failed to refresh rec list", exc_info=True)
 
@@ -91,12 +90,20 @@ class DashboardScreen(Screen):
         self.run_worker(self._refresh_sidebar())
 
     def on_recommendation_created(self, event: RecommendationCreated) -> None:
-        bar = self.query_one("#status-bar", StatusBar)
-        bar.rec_count += 1
         self.run_worker(self._refresh_sidebar())
 
     def on_recommendation_executed(self, event: RecommendationExecuted) -> None:
         self.run_worker(self._refresh_sidebar())
+
+    def on_session_reset(self, event: SessionReset) -> None:
+        """Handle session rotation from server (clear/idle)."""
+        self._session_id = event.session_id
+        bar = self.query_one("#status-bar", StatusBar)
+        bar.session_id = event.session_id
+        bar.total_cost = 0.0
+
+        # Clear chat widget
+        self.query_one("#agent-chat", AgentChat).reset()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle Execute/Reject buttons from sidebar rec cards."""
@@ -125,10 +132,22 @@ class DashboardScreen(Screen):
         self.post_message(RecommendationExecuted())
         await self._refresh_sidebar()
 
-    def on_ask_user_question_request(self, event: AskUserQuestionRequest) -> None:
+    def on_ask_question_received(self, event: AskQuestionReceived) -> None:
+        """Handle AskUserQuestion relayed from server via WS."""
         from ..widgets.ask_modal import AskModal
+
+        def _send_answer(answers: dict[str, str] | None) -> None:
+            self.run_worker(
+                self.app.send_ws(
+                    {  # type: ignore[attr-defined]
+                        "type": "ask_response",
+                        "request_id": event.request_id,
+                        "answers": answers or {},
+                    }
+                )
+            )
 
         self.app.push_screen(
             AskModal(event.questions),
-            callback=lambda answers: event.future.set_result(answers or {}),
+            callback=_send_answer,
         )

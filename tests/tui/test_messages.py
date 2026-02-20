@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from finance_agent.tui.messages import (
     AgentCostUpdate,
     AgentResponseComplete,
-    AskUserQuestionRequest,
+    AgentResultReceived,
+    AgentTextReceived,
+    AgentToolResult,
+    AgentToolUse,
+    AskQuestionReceived,
     RecommendationCreated,
     RecommendationExecuted,
+    SessionReset,
 )
 
 
@@ -33,11 +36,34 @@ def test_recommendation_executed():
     assert msg is not None
 
 
-def test_ask_user_question_request():
-    loop = asyncio.new_event_loop()
-    future = loop.create_future()
+def test_ask_question_received():
     questions = [{"question": "Choose one", "options": [{"label": "A"}]}]
-    msg = AskUserQuestionRequest(questions=questions, future=future)
+    msg = AskQuestionReceived(request_id="abc123", questions=questions)
+    assert msg.request_id == "abc123"
     assert msg.questions == questions
-    assert msg.future is future
-    loop.close()
+
+
+def test_agent_text_received():
+    msg = AgentTextReceived(content="Hello world")
+    assert msg.content == "Hello world"
+
+
+def test_agent_tool_use():
+    msg = AgentToolUse(name="get_market", tool_id="t1", input_data={"market_id": "K-1"})
+    assert msg.name == "get_market"
+    assert msg.tool_id == "t1"
+
+
+def test_agent_tool_result():
+    msg = AgentToolResult(tool_id="t1", content="result data", is_error=False)
+    assert not msg.is_error
+
+
+def test_agent_result_received():
+    msg = AgentResultReceived(total_cost_usd=0.5, is_error=False)
+    assert msg.total_cost_usd == 0.5
+
+
+def test_session_reset():
+    msg = SessionReset(session_id="abc123")
+    assert msg.session_id == "abc123"

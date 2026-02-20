@@ -31,10 +31,29 @@ def kalshi_fee(contracts: int, price_cents: int, *, maker: bool = False) -> floa
     return min(raw, cap)
 
 
+def _to_cents(value: Any) -> int:
+    """Convert a price value to integer cents.
+
+    Handles: int (42), float (0.42), string cents ("42"), string dollars ("0.42").
+    """
+    if isinstance(value, str):
+        f = float(value)
+        # If it looks like a dollar amount (< 1.0 or has decimal), convert to cents
+        return round(f * 100) if f < 1.0 or "." in value else int(f)
+    return int(value)
+
+
+def _to_qty(value: Any) -> int:
+    """Convert a quantity value to integer. Handles int, float, and string."""
+    if isinstance(value, str):
+        return round(float(value))
+    return int(value)
+
+
 def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | None, int]:
     """Extract best executable price (cents) and total depth at that level.
 
-    Handles Kalshi format ({yes: [[price, qty], ...], no: [...]}).
+    Handles Kalshi legacy format (integer cents) and fixed-point format (string dollars).
     """
     ob = orderbook.get("orderbook", orderbook)
     asks = ob.get("yes", []) if side == SIDE_YES else ob.get("no", [])
@@ -44,9 +63,9 @@ def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | No
 
     first = asks[0]
     if isinstance(first, list | tuple):
-        return int(first[0]), int(first[1])
+        return _to_cents(first[0]), _to_qty(first[1])
     if isinstance(first, dict):
-        return int(first.get("price", 0)), int(first.get("quantity", 0))
+        return _to_cents(first.get("price", 0)), _to_qty(first.get("quantity", 0))
     return None, 0
 
 

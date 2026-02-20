@@ -97,34 +97,6 @@ def _compute_derived(market: dict[str, Any], now: str) -> dict[str, Any]:
 # ── Kalshi: events-first collection ─────────────────────────────
 
 
-def _upsert_kalshi_event(db: AgentDatabase, event: dict[str, Any]) -> str | None:
-    """Store a Kalshi event row. Returns event_ticker, or None to skip."""
-    et = event.get("event_ticker")
-    if not et:
-        return None
-    nested = event.get("markets", [])
-    markets_summary = [
-        {
-            "ticker": m.get("ticker"),
-            "title": m.get("title"),
-            "yes_bid": m.get("yes_bid"),
-            "yes_ask": m.get("yes_ask"),
-            "status": m.get("status"),
-        }
-        for m in nested
-    ]
-    db.upsert_event(
-        event_ticker=et,
-        exchange=EXCHANGE_KALSHI,
-        series_ticker=event.get("series_ticker"),
-        title=event.get("title"),
-        category=event.get("category"),
-        mutually_exclusive=event.get("mutually_exclusive"),
-        markets_json=json.dumps(markets_summary, default=str),
-    )
-    return et
-
-
 async def collect_kalshi(
     client: KalshiAPIClient,
     db: AgentDatabase,
@@ -142,6 +114,7 @@ async def collect_kalshi(
     now = _now_iso()
     event_count = 0
     market_count = 0
+    event_batch: list[dict[str, Any]] = []
     market_batch: list[dict[str, Any]] = []
     meta_batch: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -160,16 +133,39 @@ async def collect_kalshi(
 
         page_markets = 0
         for event in events:
-            if not _upsert_kalshi_event(db, event):
+            et = event.get("event_ticker")
+            if not et:
                 continue
-            event_count += 1
             nested = event.get("markets", [])
+            markets_summary = [
+                {
+                    "ticker": m.get("ticker"),
+                    "title": m.get("title"),
+                    "yes_bid": m.get("yes_bid"),
+                    "yes_ask": m.get("yes_ask"),
+                    "status": m.get("status"),
+                }
+                for m in nested
+            ]
+            event_batch.append(
+                {
+                    "event_ticker": et,
+                    "exchange": EXCHANGE_KALSHI,
+                    "series_ticker": event.get("series_ticker"),
+                    "title": event.get("title"),
+                    "category": event.get("category"),
+                    "mutually_exclusive": 1 if event.get("mutually_exclusive") else 0,
+                    "last_updated": now,
+                    "markets_json": json.dumps(markets_summary, default=str),
+                }
+            )
+            event_count += 1
             for m in nested:
                 market_batch.append(_compute_derived(m, now))
                 meta_batch.append(
                     {
                         "ticker": m.get("ticker"),
-                        "event_ticker": event.get("event_ticker"),
+                        "event_ticker": et,
                         "series_ticker": event.get("series_ticker"),
                         "title": m.get("title"),
                         "category": event.get("category"),
@@ -177,6 +173,9 @@ async def collect_kalshi(
                 )
             page_markets += len(nested)
 
+        if len(event_batch) >= 500:
+            db.upsert_events_bulk(event_batch)
+            event_batch.clear()
         if len(market_batch) >= 500:
             market_count += db.insert_market_snapshots(market_batch)
             market_batch.clear()
@@ -197,6 +196,8 @@ async def collect_kalshi(
         if not cursor or (max_pages and pages >= max_pages):
             break
 
+    if event_batch:
+        db.upsert_events_bulk(event_batch)
     if market_batch:
         market_count += db.insert_market_snapshots(market_batch)
     if meta_batch:

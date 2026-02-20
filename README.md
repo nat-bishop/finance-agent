@@ -6,28 +6,32 @@ Discovers mispricings across Kalshi markets using a combination of programmatic 
 
 ## Architecture
 
-**Three-layer design:**
+**Server/TUI split:**
+
+The system runs as a persistent WebSocket server in Docker with a thin Textual TUI client connecting locally. Closing the TUI doesn't kill the agent — the server keeps running and rotates sessions on idle timeout. On session end, the server extracts a prose summary from the agent and saves it to disk and the database.
 
 1. **Programmatic layer** (no LLM) — `collector.py` snapshots Kalshi market data to DuckDB, syncs daily history from S3, and upserts market metadata. Canonical views (`v_latest_markets`, `v_daily_with_meta`) provide SQL-native discovery.
 
-2. **Agent layer** (Claude) — queries canonical DuckDB views for bulk market analysis using analytical SQL (window functions, `CORR()`, `QUALIFY`, `SAMPLE`, `ILIKE`), investigates candidates using MCP tools for semantic analysis (reading settlement rules, understanding market relationships), and records trade recommendations via `recommend_trade` with agent-specified positions per leg. Persists findings to a knowledge base across sessions.
+2. **Agent server** (Docker, persistent) — `server.py` runs a WebSocket server on port 8765, owning the Claude SDK client lifecycle. Queries canonical DuckDB views for bulk market analysis using analytical SQL (window functions, `CORR()`, `QUALIFY`, `SAMPLE`, `ILIKE`), investigates candidates using MCP tools for semantic analysis (reading settlement rules, understanding market relationships), and records trade recommendations via `recommend_trade`. Persists findings to a knowledge base across sessions. Extracts session logs on clear/idle/shutdown.
 
-3. **TUI layer** ([Textual](https://textual.textualize.io/)) — terminal interface embedding the agent chat alongside portfolio monitoring, recommendation review, and order execution. 4 navigable screens.
+3. **TUI client** (local, [Textual](https://textual.textualize.io/)) — thin WebSocket client rendering agent output alongside portfolio monitoring, recommendation review, and order execution. 6 navigable screens.
 
 ### TUI Screens
 
 | Key | Screen | Purpose |
 |-----|--------|---------|
 | F1 | Dashboard | Agent chat (left) + portfolio summary & pending recs sidebar (right) |
-| F2 | Recommendations | Full recommendation review with grouped execution and rejection |
-| F3 | Portfolio | Balances, positions, resting orders, recent trades |
-| F4 | History | Session list with drill-down to per-session trades and recommendations |
+| F2 | Knowledge Base | Agent knowledge base content + git history |
+| F3 | Recommendations | Full recommendation review with grouped execution and rejection |
+| F4 | Portfolio | Balances, positions, resting orders, recent trades |
+| F5 | History | Session list with drill-down to per-session trades and recommendations |
+| F6 | Performance | Hypothetical P&L tracking for settled recommendations |
 
 ## Quickstart
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - [uv](https://docs.astral.sh/uv/)
 - Docker (for sandboxed execution)
 - Kalshi API credentials (key ID + RSA private key)
@@ -47,8 +51,11 @@ cp .env.example .env
 
 ```bash
 make collect  # collect market data
-make up       # build + run the TUI in Docker
+make up       # build + run agent server in Docker (detached)
+make ui       # launch TUI locally (connects to server)
 ```
+
+The server runs persistently — you can close and reopen the TUI without losing the agent session. Use `make down` to stop the server.
 
 ## Data Pipeline
 
@@ -90,11 +97,21 @@ Agent recommends → TUI review → Execute or Reject
 
 1. **Agent calls `recommend_trade`** — creates a recommendation group with 1+ legs in DuckDB. Agent specifies action, side, and quantity per leg; system validates position limits and computes fees.
 
-2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F2). Shows edge, thesis, expiry countdown, and per-leg details.
+2. **TUI displays pending groups** — sidebar on the dashboard (F1) and full review on the recommendations screen (F3). Shows edge, thesis, expiry countdown, and per-leg details.
 
 3. **Execute** — confirmation modal shows order details and cost. On confirm, the TUI service layer validates position limits, places orders via the Kalshi client per leg, logs trades for audit, and updates leg + group status.
 
 4. **Reject** — marks all legs and the group as rejected. Visible in history.
+
+## Session Logging
+
+When a session ends (user clears chat, idle timeout, or server shutdown), the server:
+1. Sends a wrap-up prompt to the agent asking for a summary
+2. Captures the prose response
+3. Writes it to `workspace/analysis/sessions/{session_id}.md`
+4. Stores it in the `session_logs` database table
+
+This provides a persistent record of what the agent investigated, found, and recommended in each session.
 
 ## Analysis Approach
 
@@ -126,17 +143,24 @@ API credentials load from `.env` / environment variables via Pydantic `BaseSetti
 | Claude budget/session | $2 |
 | Recommendation TTL | 60 min |
 
+**Server settings** (in `config.py` + env vars):
+
+| Parameter | Default | Env var |
+|---|---|---|
+| Server port | 8765 | `FA_SERVER_PORT` |
+| Idle timeout | 15 min | `FA_IDLE_TIMEOUT_MINUTES` |
+
 **Docker path overrides** (set in `docker-compose.yml`):
 
 | Env var | Default | Docker value |
 |---|---|---|
 | `FA_DB_PATH` | `workspace/data/agent.duckdb` | `/app/state/agent.duckdb` |
 | `FA_BACKUP_DIR` | `workspace/backups` | `/app/state/backups` |
-| `FA_LOG_FILE` | *(none)* | `/app/state/agent.log` |
+| `FA_LOG_DIR` | *(none)* | `/app/state/logs` |
 
 ## Database Schema
 
-DuckDB at `/workspace/data/agent.duckdb`. Schema defined by SQLAlchemy ORM models in `models.py` via `duckdb_engine`, with Alembic migrations (auto-run on startup). Three canonical views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) are created after migrations. `maintenance()` runs `CHECKPOINT` (and optionally `VACUUM ANALYZE`) after collector/backfill. 8 tables:
+DuckDB at `/workspace/data/agent.duckdb`. Schema defined by SQLAlchemy ORM models in `models.py` via `duckdb_engine`, with Alembic migrations (auto-run on startup). Three canonical views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) are created after migrations. `maintenance()` runs `CHECKPOINT` (and optionally `VACUUM ANALYZE`) after collector/backfill. 9 tables:
 
 | Table | Written by | Read by | Key columns |
 |-------|-----------|---------|-------------|
@@ -145,7 +169,8 @@ DuckDB at `/workspace/data/agent.duckdb`. Schema defined by SQLAlchemy ORM model
 | `trades` | TUI executor | agent, TUI | exchange, ticker, action, side, quantity, leg_id FK |
 | `recommendation_groups` | agent | TUI | session_id FK, thesis, estimated_edge_pct, status |
 | `recommendation_legs` | agent | TUI | group_id FK, exchange, market_id, action, side, price_cents |
-| `sessions` | main | agent, TUI | started_at, summary, trades_placed, recommendations_made |
+| `sessions` | server | agent, TUI | started_at |
+| `session_logs` | server | TUI | session_id FK, content (prose summary) |
 | `kalshi_daily` | collector (S3) | agent scripts | date, ticker_name, high, low, daily_volume, open_interest. **Very large** (~100M+ rows). |
 | `kalshi_market_meta` | collector | agent scripts | ticker PK, title, category, event_ticker, first_seen. **Partial index** (~30K recently-active tickers, not all historical). |
 
@@ -167,40 +192,46 @@ The workspace uses a dual-mount isolation pattern. Reference scripts are COPY'd 
     agent.duckdb                # DuckDB database
   analysis/                     # :rw mount (agent's writable scratch space)
     knowledge_base.md           # Persistent memory (watchlist, findings, patterns)
+    sessions/                   # Session log markdown files
 ```
 
 ## Project Structure
 
 ```
 src/finance_agent/
-  main.py              # Entry point, SDK options, launches TUI
-  config.py            # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
-  constants.py         # Shared string constants (exchanges, statuses, sides, actions, strategies)
-  models.py            # SQLAlchemy ORM models + DuckDB Sequences (canonical schema for all 8 tables)
-  database.py          # AgentDatabase: DuckDB via duckdb_engine, ORM queries, canonical views, backup
-  tools.py             # Unified MCP tool factories (5 market + 1 DB = 6 tools)
-  fees.py              # Kalshi fee calculations (P(1-P) formula)
-  kalshi_client.py     # Kalshi SDK wrapper (batch, amend, paginated events)
+  server.py          # WebSocket agent server (Claude SDK lifecycle, session logging, idle timer)
+  server_main.py     # Server entry point (python -m finance_agent.server_main)
+  main.py            # SDK options builder (build_options), legacy TUI entry point
+  config.py          # Credentials (env vars), TradingConfig + AgentConfig (source defaults)
+  constants.py       # Shared string constants (exchanges, statuses, sides, actions, strategies)
+  models.py          # SQLAlchemy ORM models + DuckDB Sequences (canonical schema for all 9 tables)
+  database.py        # AgentDatabase: DuckDB via duckdb_engine, ORM queries, canonical views, backup
+  tools.py           # Unified MCP tool factories (5 market + 1 DB = 6 tools)
+  fees.py            # Kalshi fee calculations (P(1-P) formula)
+  kalshi_client.py   # Kalshi SDK wrapper (batch, amend, paginated events)
   polymarket_client.py # Dormant: Polymarket US SDK wrapper (preserved for future)
-  hooks.py             # File protection, recommendation counting, session lifecycle
-  collector.py         # Kalshi market data collector
-  backfill.py          # Kalshi daily history sync from S3
-  rate_limiter.py      # Token-bucket rate limiter
-  api_base.py          # Shared base class for API clients
-  migrations/          # Alembic schema migrations
-  prompts/system.md    # System prompt template
-  tui/                 # Textual TUI frontend
-    app.py             # FinanceApp: init, screen registration, keybindings
-    services.py        # Async service layer (DB queries, order execution)
-    messages.py        # Inter-widget message types
-    agent.tcss         # CSS stylesheet
+  hooks.py           # File protection, recommendation counting, KB auto-commit
+  collector.py       # Kalshi market data collector
+  backfill.py        # Kalshi daily history sync from S3
+  rate_limiter.py    # Token-bucket rate limiter
+  api_base.py        # Shared base class for API clients
+  migrations/        # Alembic schema migrations (0007 DuckDB initial, 0008 session_logs)
+  prompts/system.md  # System prompt template
+  tui/               # Textual TUI frontend (thin WebSocket client)
+    __main__.py      # TUI entry point (python -m finance_agent.tui)
+    app.py           # FinanceApp: WS client, local DB + Kalshi, screen registration
+    services.py      # Async service layer (DB queries, order execution)
+    messages.py      # Inter-widget message types (agent WS + internal)
+    agent.tcss       # CSS stylesheet
     screens/
       dashboard.py     # F1: agent chat + sidebar (portfolio + pending recs)
-      recommendations.py # F2: full recommendation review + execution
-      portfolio.py     # F3: balances, positions, orders
-      history.py       # F4: session history with drill-down
+      knowledge_base.py # F2: KB content + git history
+      recommendations.py # F3: full recommendation review + execution
+      portfolio.py     # F4: balances, positions, orders
+      history.py       # F5: session history with drill-down
+      performance.py   # F6: hypothetical P&L tracking
     widgets/
-      agent_chat.py    # RichLog + Input with async streaming
+      agent_chat.py    # RichLog + Input, renders WS messages
       rec_card.py      # Single recommendation group card
       rec_list.py      # Recommendation group list
       portfolio_panel.py # Compact balance summary
@@ -219,4 +250,4 @@ make shell              # bash into container
 uv run pre-commit run --all-files
 ```
 
-Ruff for linting/formatting (line length 99, Python 3.12 target), mypy for type checking. Pre-commit hooks enforce both.
+Ruff for linting/formatting (line length 99, Python 3.13 target), mypy for type checking. Pre-commit hooks enforce both.
