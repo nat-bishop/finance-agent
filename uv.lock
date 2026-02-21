@@ -469,7 +469,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=44.0" },
     { name = "duckdb", specifier = ">=1.2" },
     { name = "duckdb-engine", specifier = ">=0.15" },
-    { name = "kalshi-python-async", specifier = ">=3.6.0" },
+    { name = "kalshi-python-async", specifier = ">=3.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19" },
     { name = "numpy", specifier = ">=2.4" },
     { name = "polymarket-us", specifier = ">=0.1.0" },
@@ -702,7 +702,7 @@ wheels = [
 
 [[package]]
 name = "kalshi-python-async"
-version = "3.6.0"
+version = "3.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -713,9 +713,9 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/69/ce2e38b922112ba2c904f862b28f35458ec296060f5076b72cded5129b50/kalshi_python_async-3.6.0.tar.gz", hash = "sha256:19a52ad906b1374ba84223b47b1a5b0a6e31382bb20cc7efd61437d809ea7c21", size = 136878, upload-time = "2026-01-27T23:43:54.837Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/ad/2c54497c9d6a99d46fb68c3b2b714318636f61fd155095af78a84447795e/kalshi_python_async-3.7.0.tar.gz", hash = "sha256:daa6d7c70e03b52f8f57df3f9d93b71118815fe243d8db2b988a9d578fb801ad", size = 143211, upload-time = "2026-02-17T22:06:45.449Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/29/68/6d2e9ec97db66f558bfcabdd43cb12e978e5ee327e8c75cf6ba0406ff950/kalshi_python_async-3.6.0-py3-none-any.whl", hash = "sha256:4dfb95467d9d320fd495826ae8b52083ec19a8acfc6ec800e895d7fa78f3f8cc", size = 305022, upload-time = "2026-01-27T23:43:52.591Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/51/96dcb613a260c1114955024f85fa47f99cce96411277117ef4407f22f471/kalshi_python_async-3.7.0-py3-none-any.whl", hash = "sha256:0b15b10caebd01c89034a40f965da3344fc32135ad5bdca277aa7633cef16722", size = 310468, upload-time = "2026-02-17T22:06:43.856Z" },
 ]
 
 [[package]]

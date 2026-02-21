@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,8 @@ from kalshi_python_async import Configuration, KalshiClient
 
 from .api_base import BaseAPIClient
 from .config import Credentials, TradingConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _optional(**kwargs: Any) -> dict[str, Any]:
@@ -73,7 +77,17 @@ class KalshiAPIClient(BaseAPIClient):
         return await self._read(self._client.get_market(ticker))
 
     async def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
-        return await self._read(self._client.get_market_orderbook(ticker, depth=depth))
+        try:
+            return await self._read(self._client.get_market_orderbook(ticker, depth=depth))
+        except Exception:
+            # SDK 3.7.0 bug: Orderbook model requires yes_dollars/no_dollars
+            # but API returns null for empty orderbooks. Fall back to raw JSON.
+            logger.debug("SDK orderbook deserialization failed for %s, using raw JSON", ticker)
+            await self._rate_read()
+            api = self._client._market_api
+            resp = await api.get_market_orderbook_without_preload_content(ticker, depth=depth)
+            body = await resp.text()
+            return json.loads(body)
 
     async def get_event(
         self, event_ticker: str, with_nested_markets: bool = True

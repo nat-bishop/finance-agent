@@ -56,7 +56,8 @@ def best_price_and_depth(orderbook: dict[str, Any], side: str) -> tuple[int | No
     Handles Kalshi legacy format (integer cents) and fixed-point format (string dollars).
     """
     ob = orderbook.get("orderbook", orderbook)
-    asks = ob.get("yes", []) if side == SIDE_YES else ob.get("no", [])
+    key = "yes" if side == SIDE_YES else "no"
+    asks = ob.get(key) or ob.get(f"{key}_dollars") or []
 
     if not asks:
         return None, 0

@@ -1,4 +1,4 @@
-.PHONY: up down shell logs dev ui lint format test test-cov collect backfill backup startup nuke-db nuke-data
+.PHONY: up down shell logs dev ui lint format test test-cov test-live collect backfill backup startup nuke-db nuke-data
 
 # ── Docker (agent server) ─────────────────────────────────
 
@@ -16,10 +16,10 @@ N ?= 250
 logs:
 	docker compose logs -f agent
 
-# ── Dev (local server with hot reload) ────────────────────
+# ── Dev (local server) ────────────────────────────────────
 
 dev:
-	FA_WORKSPACE=workspace uv run watchfiles "uv run python -m finance_agent.server_main" src/finance_agent/
+	FA_WORKSPACE=workspace FA_LOG_DIR=workspace/logs uv run python -m finance_agent.server_main
 
 # ── TUI (local) ───────────────────────────────────────────
 
@@ -40,10 +40,13 @@ format:
 # ── Testing (local) ───────────────────────────────────────
 
 test:
-	uv run pytest tests/ -v
+	uv run pytest tests/ -v -m "not live"
 
 test-cov:
-	uv run pytest tests/ -v --cov --cov-report=term-missing
+	uv run pytest tests/ -v -m "not live" --cov --cov-report=term-missing
+
+test-live:
+	uv run pytest tests/test_kalshi_live.py -v -m live
 
 # ── Data pipeline (local) ────────────────────────────────
 

@@ -9,7 +9,7 @@ description = "Cross-platform prediction market arbitrage agent"
 requires-python = ">=3.13"
 dependencies = [
     "claude-agent-sdk>=0.1.33",
-    "kalshi-python-async>=3.6.0",
+    "kalshi-python-async>=3.7.0",
     "python-dotenv>=1.2.0",
     "pydantic>=2.12",
     "pydantic-settings>=2.12",
@@ -93,6 +93,7 @@ known-first-party = ["finance_agent"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
+markers = ["live: requires Kalshi API credentials and network access"]
 
 # ---------- Coverage ----------
 [tool.coverage.run]

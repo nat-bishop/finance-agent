@@ -52,7 +52,10 @@
       "Bash(grep:*)",
       "WebFetch(domain:techcommunity.microsoft.com)",
       "WebFetch(domain:baeke.info)",
-      "WebFetch(domain:arxiv.org)"
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:milvus.io)",
+      "WebFetch(domain:smartscope.blog)",
+      "WebFetch(domain:www.dataiku.com)"
     ]
   },
   "hooks": {
