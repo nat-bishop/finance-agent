@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models — canonical schema definition for all 8 tables."""
+"""SQLAlchemy ORM models — canonical schema definition for all 9 tables."""
 
 from __future__ import annotations
 

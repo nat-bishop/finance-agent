@@ -41,7 +41,7 @@ The system runs as a persistent WebSocket server in Docker with a thin Textual T
 
 ```bash
 git clone <repo-url> && cd finance-agent
-uv sync --extra dev --extra skills
+uv sync --extra dev
 
 cp .env.example .env
 # Edit .env: ANTHROPIC_API_KEY, KALSHI_API_KEY_ID, key path

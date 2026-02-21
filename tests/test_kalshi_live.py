@@ -12,56 +12,47 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
 
 from finance_agent.config import load_configs  # noqa: E402
 from finance_agent.fees import best_price_and_depth  # noqa: E402
 from finance_agent.kalshi_client import KalshiAPIClient  # noqa: E402
 
-pytestmark = pytest.mark.live
+pytestmark = [pytest.mark.live, pytest.mark.asyncio(loop_scope="module")]
 
 
-@pytest.fixture(scope="module")
-def client() -> KalshiAPIClient:
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def client() -> KalshiAPIClient:
     """Single authenticated client reused across all tests."""
     _, creds, tc = load_configs()
     return KalshiAPIClient(creds, tc)
 
 
-@pytest.fixture(scope="module")
-def liquid_ticker(client: KalshiAPIClient) -> str:
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def liquid_ticker(client: KalshiAPIClient) -> str:
     """Find a market with open interest for orderbook tests."""
-    import asyncio
-
-    async def _find():
-        resp = await client.get_events(status="open", limit=20, with_nested_markets=True)
-        for event in resp.get("events", []):
-            for mkt in event.get("markets", []):
-                oi = mkt.get("open_interest", 0) or 0
-                vol = mkt.get("volume", 0) or 0
-                if oi > 0 or vol > 500:
-                    return mkt["ticker"]
-        # Fallback: just use the first open market
-        markets = await client.search_markets(status="open", limit=1)
-        return markets["markets"][0]["ticker"]
-
-    return asyncio.get_event_loop().run_until_complete(_find())
-
-
-@pytest.fixture(scope="module")
-def empty_ticker(client: KalshiAPIClient) -> str:
-    """Find a market with zero volume (likely empty orderbook)."""
-    import asyncio
-
-    async def _find():
-        resp = await client.search_markets(status="open", limit=20)
-        for mkt in resp.get("markets", []):
-            vol = mkt.get("volume", 0) or 0
+    resp = await client.get_events(status="open", limit=20, with_nested_markets=True)
+    for event in resp.get("events", []):
+        for mkt in event.get("markets", []):
             oi = mkt.get("open_interest", 0) or 0
-            if vol == 0 and oi == 0:
+            vol = mkt.get("volume", 0) or 0
+            if oi > 0 or vol > 500:
                 return mkt["ticker"]
-        return resp["markets"][0]["ticker"]
+    # Fallback: just use the first open market
+    markets = await client.search_markets(status="open", limit=1)
+    return markets["markets"][0]["ticker"]
 
-    return asyncio.get_event_loop().run_until_complete(_find())
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def empty_ticker(client: KalshiAPIClient) -> str:
+    """Find a market with zero volume (likely empty orderbook)."""
+    resp = await client.search_markets(status="open", limit=20)
+    for mkt in resp.get("markets", []):
+        vol = mkt.get("volume", 0) or 0
+        oi = mkt.get("open_interest", 0) or 0
+        if vol == 0 and oi == 0:
+            return mkt["ticker"]
+    return resp["markets"][0]["ticker"]
 
 
 # ── Exchange ───────────────────────────────────────────────────────
