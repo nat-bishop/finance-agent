@@ -1,4 +1,4 @@
-.PHONY: up down shell logs dev ui lint format test test-cov test-live collect backfill backup startup nuke-db nuke-data
+.PHONY: up down shell logs dev ui lint format test test-cov test-live collect backfill backfill-meta backup startup nuke-db nuke-data
 
 # ── Docker (agent server) ─────────────────────────────────
 
@@ -55,6 +55,9 @@ collect:
 
 backfill:
 	uv run python -m finance_agent.backfill
+
+backfill-meta:  ## backfill metadata for historical tickers from Kalshi API
+	uv run python -m finance_agent.meta_backfill $(ARGS)
 
 backup:
 	uv run python -c "from finance_agent.database import run_backup; run_backup()"

@@ -276,11 +276,6 @@ async def _run_collector_async() -> None:
     try:
         k_events, k_markets = await collect_kalshi(kalshi, db, status=STATUS_OPEN)
 
-        # Backfill metadata for historical tickers missing titles/categories
-        from .backfill import backfill_missing_meta
-
-        await backfill_missing_meta(kalshi, db)
-
         # Resolve settlements for recommendation legs
         await resolve_settlements(kalshi, db)
 

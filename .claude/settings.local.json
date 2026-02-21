@@ -55,7 +55,8 @@
       "WebFetch(domain:arxiv.org)",
       "WebFetch(domain:milvus.io)",
       "WebFetch(domain:smartscope.blog)",
-      "WebFetch(domain:www.dataiku.com)"
+      "WebFetch(domain:www.dataiku.com)",
+      "Bash(.venv/Scripts/python.exe:*)"
     ]
   },
   "hooks": {

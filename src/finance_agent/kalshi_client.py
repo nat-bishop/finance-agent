@@ -211,6 +211,28 @@ class KalshiAPIClient(BaseAPIClient):
     async def get_exchange_status(self) -> dict[str, Any]:
         return await self._read(self._client.get_exchange_status())
 
+    # -- Historical data --
+
+    async def get_historical_markets(
+        self,
+        *,
+        limit: int = 1000,
+        cursor: str | None = None,
+        event_ticker: str | None = None,
+        tickers: str | None = None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "limit": limit,
+            **_optional(cursor=cursor, event_ticker=event_ticker, tickers=tickers),
+        }
+        return await self._read(self._client._historical_api.get_historical_markets(**kwargs))
+
+    async def get_historical_market(self, ticker: str) -> dict[str, Any]:
+        return await self._read(self._client._historical_api.get_historical_market(ticker))
+
+    async def get_historical_cutoff(self) -> dict[str, Any]:
+        return await self._read(self._client._historical_api.get_historical_cutoff())
+
     # -- Events (paginated) --
 
     async def get_events(

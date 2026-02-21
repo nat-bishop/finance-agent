@@ -41,7 +41,15 @@ Latest snapshot per open ticker with event metadata and description. Use for all
 | `captured_at` | TEXT | When data was captured |
 
 ### `v_daily_with_meta` — safe historical data entry point
-Daily history joined with metadata. The JOIN to `kalshi_market_meta` (~30K rows) naturally limits results to tickers with metadata, preventing accidental full scans of `kalshi_daily` (100M+ rows).
+Daily history joined with metadata. The INNER JOIN to `kalshi_market_meta` naturally limits results to tickers with metadata, preventing accidental full scans of `kalshi_daily`.
+
+**Coverage limitation**: This view only returns rows for tickers present in `kalshi_market_meta`. Expired/settled markets may not have metadata entries. For maximum historical coverage, query `kalshi_daily` directly with a `ticker_name` LIKE filter. Use `report_ticker` as the event grouping key.
+```sql
+-- Example: all Rotten Tomatoes historical data (including expired markets)
+SELECT date, ticker_name, report_ticker, high, low, daily_volume, open_interest
+FROM kalshi_daily WHERE ticker_name LIKE 'KXRT%'
+ORDER BY report_ticker, ticker_name, date
+```
 
 | Column | Type | Description |
 |--------|------|-------------|
