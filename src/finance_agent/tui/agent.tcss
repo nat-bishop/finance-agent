@@ -245,14 +245,45 @@ PortfolioScreen {
     margin: 0 0 1 0;
 }
 
-/* History screen */
+/* History screen — journal layout */
 HistoryScreen {
     layout: vertical;
 }
 
-#history-container {
+#history-split {
     height: 1fr;
+}
+
+#session-list-pane {
+    width: 1fr;
+    min-width: 28;
+    max-width: 42;
+    border-right: solid $accent;
+    padding: 0 1;
+}
+
+#session-detail-pane {
+    width: 3fr;
     padding: 1;
+}
+
+#detail-header {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#session-log-content {
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+#recs-section-title {
+    margin-top: 1;
+}
+
+#trades-section-title {
+    margin-top: 1;
 }
 
 /* Performance screen */

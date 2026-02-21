@@ -462,5 +462,8 @@ class TUIServices:
     def get_sessions(self, **kwargs: Any) -> list[dict[str, Any]]:
         return self.db.get_sessions(**kwargs)
 
+    def get_session_logs(self, **kwargs: Any) -> list[dict]:
+        return self.db.get_session_logs(**kwargs)
+
     def get_performance_summary(self) -> dict[str, Any]:
         return self.db.get_performance_summary()

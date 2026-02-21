@@ -6,7 +6,6 @@ services:
       - FA_DB_PATH=/app/state/agent.duckdb
       - FA_BACKUP_DIR=/app/state/backups
       - FA_LOG_DIR=/app/state/logs
-      - FA_IDLE_TIMEOUT_MINUTES=15
       - FA_SERVER_PORT=8765
       - KALSHI_PRIVATE_KEY_PATH=/workspace/keys/private_key.pem
     volumes:
@@ -17,7 +16,11 @@ services:
       - ./workspace/analysis:/app/repo/workspace/analysis
       - ~/.kalshi/private_key.pem:/workspace/keys/private_key.pem:ro
       - ~/.claude/.credentials.json:/root/.claude/.credentials.json:ro
+      - claude-sessions:/root/.claude/projects
     ports:
       - "8765:8765"
     restart: unless-stopped
     stop_grace_period: 30s
+
+volumes:
+  claude-sessions:

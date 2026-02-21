@@ -63,7 +63,6 @@ class AgentConfig:
 
     model: str = "claude-sonnet-4-5-20250929"
     max_budget_usd: float = 50.0
-    idle_timeout_minutes: int = 15
     server_port: int = 8765
     workspace: str = "/workspace"
 
@@ -79,9 +78,6 @@ def load_configs() -> tuple[AgentConfig, Credentials, TradingConfig]:
         analysis_dir=os.environ.get("FA_ANALYSIS_DIR", TradingConfig.analysis_dir),
     )
     ac = AgentConfig(
-        idle_timeout_minutes=int(
-            os.environ.get("FA_IDLE_TIMEOUT_MINUTES", AgentConfig.idle_timeout_minutes)
-        ),
         server_port=int(os.environ.get("FA_SERVER_PORT", AgentConfig.server_port)),
         workspace=os.environ.get("FA_WORKSPACE", AgentConfig.workspace),
     )

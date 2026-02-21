@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
-from sqlalchemy import create_engine, delete, event, func, insert, select, text
+from sqlalchemy import create_engine, delete, event, func, insert, select, text, update
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -948,6 +948,29 @@ class AgentDatabase:
             stmt = stmt.limit(limit)
             return [log.to_dict() for log in session.scalars(stmt).all()]
 
+    def update_sdk_session_id(self, session_id: str, sdk_session_id: str) -> None:
+        """Store the SDK (CLI) session ID for a given DB session."""
+        with self._session_factory() as session:
+            session.execute(
+                update(Session)
+                .where(Session.id == session_id)
+                .values(sdk_session_id=sdk_session_id)
+            )
+            session.commit()
+
+    def get_unlogged_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Find recent sessions that have an SDK session ID but no log entry."""
+        with self._session_factory() as session:
+            stmt = (
+                select(Session)
+                .outerjoin(SessionLog, Session.id == SessionLog.session_id)
+                .where(Session.sdk_session_id.isnot(None))
+                .where(SessionLog.id.is_(None))
+                .order_by(Session.started_at.desc())
+                .limit(limit)
+            )
+            return [s.to_dict() for s in session.scalars(stmt).all()]
+
     # ── TUI query methods ─────────────────────────────────────
 
     def get_recommendations(
@@ -990,7 +1013,7 @@ class AgentDatabase:
             return [t.to_dict() for t in trades]
 
     def get_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Session listing for history screen with derived rec/trade counts."""
+        """Session listing for history screen with derived rec/trade/log counts."""
         rec_count_sq = (
             select(func.count(RecommendationGroup.id))
             .where(RecommendationGroup.session_id == Session.id)
@@ -1005,9 +1028,16 @@ class AgentDatabase:
             .scalar_subquery()
             .label("trades_placed")
         )
+        log_count_sq = (
+            select(func.count(SessionLog.id))
+            .where(SessionLog.session_id == Session.id)
+            .correlate(Session)
+            .scalar_subquery()
+            .label("log_count")
+        )
         with self._session_factory() as session:
             stmt = (
-                select(Session, rec_count_sq, trade_count_sq)
+                select(Session, rec_count_sq, trade_count_sq, log_count_sq)
                 .order_by(Session.started_at.desc())
                 .limit(limit)
             )
@@ -1017,6 +1047,7 @@ class AgentDatabase:
                     **row[0].to_dict(),
                     "recommendations_made": row[1],
                     "trades_placed": row[2],
+                    "has_log": row[3] > 0,
                 }
                 for row in rows
             ]

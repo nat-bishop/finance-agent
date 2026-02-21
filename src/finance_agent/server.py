@@ -7,7 +7,6 @@ import contextlib
 import json
 import logging
 import signal
-import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +38,8 @@ logger = logging.getLogger(__name__)
 _EXTRACTION_TIMEOUT = 20  # seconds, must fit within Docker stop_grace_period (30s)
 
 _WRAP_UP_PROMPT = (
-    "This session is ending. Please provide a brief session summary covering:\n"
+    "This session is ending. Summarize ONLY what happened in THIS conversation — "
+    "do not repeat information from prior sessions injected into your system prompt. Cover:\n"
     "- What you investigated and your approach\n"
     "- Key findings and insights\n"
     "- Any recommendations you made\n"
@@ -70,14 +70,14 @@ class AgentServer:
         self._session_log_dir = workspace / "analysis" / "sessions"
 
         self._ws_client: websockets.asyncio.server.ServerConnection | None = None
-        self._idle_task: asyncio.Task[None] | None = None
         self._chat_task: asyncio.Task[None] | None = None
         self._rec_notify_task: asyncio.Task[None] | None = None
-        self._last_activity: float = 0.0
         self._ask_futures: dict[str, asyncio.Future[dict[str, str]]] = {}
         self._shutting_down: bool = False
         self._streaming: bool = False
         self._rotation_lock = asyncio.Lock()
+        self._session_message_count: int = 0
+        self._sdk_session_id: str | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -95,14 +95,11 @@ class AgentServer:
         # Exchange client
         self._kalshi = KalshiAPIClient(self._credentials, self._trading_config)
 
+        # Deferred extraction for sessions that missed logging (crash recovery)
+        await self._deferred_extraction()
+
         # Create initial session + SDK client
         await self._new_session()
-
-        # Reset activity timer
-        self._last_activity = time.monotonic()
-
-        # Start idle timer
-        self._idle_task = asyncio.create_task(self._idle_timer_loop())
 
         # Handle graceful shutdown signals (not supported on Windows)
         loop = asyncio.get_running_loop()
@@ -125,9 +122,6 @@ class AgentServer:
             return
         self._shutting_down = True
         logger.info("Shutting down...")
-
-        if self._idle_task:
-            self._idle_task.cancel()
 
         # Cancel pending ask futures
         self._cancel_ask_futures()
@@ -165,6 +159,8 @@ class AgentServer:
 
         session_id = self._db.create_session()
         self._session_id = session_id
+        self._session_message_count = 0
+        self._sdk_session_id = None
         logger.info("New session: %s", session_id)
 
         session_context = await self._build_session_context()
@@ -175,7 +171,7 @@ class AgentServer:
     async def _rotate_session(self) -> None:
         """Extract session log, destroy old client, create new session.
 
-        Serialized via ``_rotation_lock`` so idle timer and clear
+        Serialized via ``_rotation_lock`` so concurrent clears
         cannot race each other.
         """
         async with self._rotation_lock:
@@ -204,7 +200,6 @@ class AgentServer:
 
             # Create new session + client
             await self._new_session()
-            self._last_activity = time.monotonic()
 
             await self._send_ws(
                 {
@@ -380,8 +375,8 @@ class AgentServer:
             return
 
         logger.info("Chat: %s", content[:120])
-        self._last_activity = time.monotonic()
         self._streaming = True
+        self._session_message_count += 1
 
         try:
             await self._client.query(content)
@@ -434,6 +429,11 @@ class AgentServer:
                 elif isinstance(msg, ResultMessage):
                     result_cost = msg.total_cost_usd or 0.0
                     result_error = msg.is_error
+                    # Capture SDK session ID on first result
+                    if not self._sdk_session_id and msg.session_id:
+                        self._sdk_session_id = msg.session_id
+                        if self._db and self._session_id:
+                            self._db.update_sdk_session_id(self._session_id, msg.session_id)
                     await self._send_ws(
                         {
                             "type": "result",
@@ -529,6 +529,10 @@ class AgentServer:
         if not self._client or not self._db:
             return
 
+        if self._session_message_count == 0:
+            logger.info("Session %s had no messages — skipping log extraction", session_id)
+            return
+
         logger.info("Extracting session log for %s...", session_id)
 
         try:
@@ -543,26 +547,15 @@ class AgentServer:
             content = "\n\n".join(parts).strip()
             if not content:
                 logger.warning("Session log extraction produced no content")
+                self._write_session_log(
+                    self._db, session_id, "Session ended without summary (empty extraction)."
+                )
                 return
 
-            # Write markdown file
-            self._session_log_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now(UTC).isoformat()
-            md_path = self._session_log_dir / f"{session_id}.md"
-            md_path.write_text(
-                f"# Session Log\n\n"
-                f"**Session ID:** {session_id}\n"
-                f"**Date:** {ts}\n\n"
-                f"---\n\n"
-                f"{content}\n",
-                encoding="utf-8",
-            )
-
-            # Write DB entry
-            log_id = self._db.log_session_summary(session_id, content)
-            logger.info("Session log saved: %s (db id=%d)", md_path, log_id)
+            self._write_session_log(self._db, session_id, content)
 
             # Notify TUI
+            md_path = self._session_log_dir / f"{session_id}.md"
             await self._send_ws(
                 {
                     "type": "session_log_saved",
@@ -574,22 +567,91 @@ class AgentServer:
         except Exception:
             logger.exception("Failed to extract session log for %s", session_id)
 
-    # ── Idle timer ────────────────────────────────────────────────
+    # ── Deferred extraction (crash recovery) ─────────────────────
 
-    async def _idle_timer_loop(self) -> None:
-        """Periodically check for idle timeout and rotate sessions."""
-        timeout_secs = self._agent_config.idle_timeout_minutes * 60
+    async def _deferred_extraction(self) -> None:
+        """On startup, extract logs for sessions that missed logging."""
+        db = self._db
+        if not db:
+            return
+
+        unlogged = db.get_unlogged_sessions()
+        if not unlogged:
+            return
+
+        logger.info("Found %d unlogged session(s), attempting deferred extraction", len(unlogged))
+
+        for sess in unlogged:
+            sid = sess["id"]
+            sdk_sid = sess.get("sdk_session_id")
+
+            if not sdk_sid:
+                logger.info("Session %s has no SDK session ID — writing stub", sid)
+                self._write_session_log(
+                    db, sid, "Session ended without summary (no SDK session available)."
+                )
+                continue
+
+            try:
+                await asyncio.wait_for(
+                    self._resume_and_extract(db, sid, sdk_sid),
+                    timeout=_EXTRACTION_TIMEOUT,
+                )
+            except TimeoutError:
+                logger.warning("Deferred extraction timed out for %s", sid)
+                self._write_session_log(
+                    db, sid, "Session ended without summary (deferred extraction timed out)."
+                )
+            except Exception:
+                logger.exception("Deferred extraction failed for %s", sid)
+                self._write_session_log(
+                    db, sid, "Session ended without summary (deferred extraction failed)."
+                )
+
+    async def _resume_and_extract(
+        self, db: AgentDatabase, session_id: str, sdk_session_id: str
+    ) -> None:
+        """Resume an old SDK session and run the wrap-up prompt."""
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        logger.info("Resuming SDK session %s for deferred extraction...", sdk_session_id)
+        options = ClaudeAgentOptions(
+            model=self._agent_config.model,
+            cwd=self._agent_config.workspace,
+            resume=sdk_session_id,
+            max_budget_usd=1.0,
+        )
+        client = ClaudeSDKClient(options=options)
         try:
-            while True:
-                await asyncio.sleep(60)
-                if self._streaming:
-                    continue
-                elapsed = time.monotonic() - self._last_activity
-                if elapsed >= timeout_secs and self._client:
-                    logger.info(
-                        "Idle timeout (%d min) — rotating session",
-                        self._agent_config.idle_timeout_minutes,
+            await client.__aenter__()
+            await client.query(_WRAP_UP_PROMPT)
+            parts: list[str] = []
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    parts.extend(
+                        block.text for block in msg.content if isinstance(block, TextBlock)
                     )
-                    await self._rotate_session()
-        except asyncio.CancelledError:
-            pass
+
+            content = "\n\n".join(parts).strip()
+            if content:
+                self._write_session_log(db, session_id, content)
+                logger.info("Deferred extraction succeeded for %s", session_id)
+            else:
+                self._write_session_log(
+                    db, session_id, "Session ended without summary (empty extraction)."
+                )
+        finally:
+            with contextlib.suppress(Exception):
+                await client.__aexit__(None, None, None)
+
+    def _write_session_log(self, db: AgentDatabase, session_id: str, content: str) -> None:
+        """Write session log to both markdown file and DB."""
+        self._session_log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).isoformat()
+        md_path = self._session_log_dir / f"{session_id}.md"
+        md_path.write_text(
+            f"# Session Log\n\n**Session ID:** {session_id}\n**Date:** {ts}\n\n---\n\n{content}\n",
+            encoding="utf-8",
+        )
+        log_id = db.log_session_summary(session_id, content)
+        logger.info("Session log saved: %s (db id=%d)", md_path, log_id)

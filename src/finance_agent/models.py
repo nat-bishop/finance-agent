@@ -133,6 +133,7 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    sdk_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # ── Recommendation Groups ────────────────────────────────────
