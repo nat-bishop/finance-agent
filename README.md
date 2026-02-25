@@ -2,6 +2,10 @@
 
 Kalshi prediction market analysis system built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk). Discovers mispricings by combining programmatic SQL analysis with semantic reasoning — reading settlement rules, understanding cross-market relationships, and writing custom analytical scripts. Produces structured trade recommendations for review and execution via a terminal UI.
 
+## Archived Skills
+
+`workspace/.claude/skills/_archived/` contains 11 experimental agent skills (Bayesian updating, option pricing, Kelly sizing, microstructure analysis, ML ensembles, Monte Carlo, calibration, risk management, sports prediction, statistical classification, time-series forecasting). These were prototyped early on and are being incrementally integrated as the core platform matures.
+
 ## Architecture
 
 ```
