@@ -25,6 +25,7 @@ make ui             # launch TUI connecting to agent server
 
 # Data pipeline (local)
 make collect        # snapshot market data + sync Kalshi daily history
+make backfill-meta  # backfill kalshi_market_meta from Kalshi API (historical + live)
 make backup         # backup DuckDB database
 make startup        # dump session state JSON (debug)
 
@@ -109,9 +110,10 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 | `models.py` | SQLAlchemy ORM (9 tables, DuckDB `Sequence` PKs, `UniqueConstraint` for upserts). Alembic autogenerate source |
 | `tools.py` | MCP tool factories: `create_market_tools(kalshi)` → 5 tools, `create_db_tools(db, session_id, kalshi)` → 1 tool. 6 total |
 | `database.py` | `AgentDatabase`: DuckDB via `duckdb_engine`, auto-migrations, canonical views, upserts via raw SQL `ON CONFLICT`, CRUD for recs/sessions |
-| `kalshi_client.py` | Thin wrapper around `kalshi_python_sync` SDK. RSA-PSS auth, rate limiting, paginated `get_events` |
+| `kalshi_client.py` | Thin wrapper around `kalshi_python_async` SDK. RSA-PSS auth, rate limiting, paginated `get_events`, historical API methods |
 | `collector.py` | Standalone data collector: snapshots markets, syncs daily history from S3, resolves settlements, runs retention purges |
-| `backfill.py` | Kalshi daily history sync from public S3. Incremental, parallel downloads (8 workers), `backfill_missing_meta()` for titles/categories |
+| `backfill.py` | Kalshi daily history sync from public S3. Incremental, parallel downloads (8 workers) |
+| `meta_backfill.py` | Bulk metadata backfill for `kalshi_market_meta`. Two-phase: historical API pagination + live API batched `get_markets`. CLI via `make backfill-meta` |
 | `hooks.py` | PreToolUse (auto-approve + file protection) + PostToolUse (rec audit + KB commit) |
 | `fees.py` | Kalshi fee calculations: `kalshi_fee()`, `best_price_and_depth()`, `compute_hypothetical_pnl()` |
 | `kb_versioning.py` | Async git helpers for KB versioning: `commit_kb()`, `get_versions()`, `get_version_content()` |

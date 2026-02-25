@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 from claude_agent_sdk import tool
@@ -21,6 +23,8 @@ from .constants import (
 from .database import AgentDatabase
 from .fees import best_price_and_depth, kalshi_fee
 from .kalshi_client import KalshiAPIClient
+
+logger = logging.getLogger(__name__)
 
 
 def _text(data: Any) -> dict:
@@ -326,26 +330,37 @@ def create_db_tools(
         if not legs_input:
             return _text({"error": "Requires at least 1 leg"})
 
-        # ── Fetch orderbooks, extract prices, resolve titles ────
+        # ── Batch-fetch market data + concurrent orderbooks ────
+        all_tickers = [leg["market_id"] for leg in legs_input]
+
+        # Single batch call for titles/close_times
+        market_map: dict[str, dict[str, Any]] = {}
+        try:
+            markets_resp = await kalshi.search_markets(tickers=",".join(all_tickers), limit=1000)
+            for m in markets_resp.get("markets", []):
+                t = m.get("ticker")
+                if t:
+                    market_map[t] = m
+        except Exception:
+            logger.debug("Batch market fetch failed, falling back to ticker as title")
+
+        # Concurrent orderbook fetches
+        ob_results = await asyncio.gather(
+            *[kalshi.get_orderbook(leg["market_id"]) for leg in legs_input],
+            return_exceptions=True,
+        )
+
         enriched_legs: list[dict[str, Any]] = []
         for i, leg in enumerate(legs_input):
             market_id = leg["market_id"]
 
-            try:
-                ob = await kalshi.get_orderbook(market_id)
-            except Exception as e:
-                return _text({"error": f"Failed to fetch orderbook for {market_id}: {e}"})
+            ob = ob_results[i]
+            if isinstance(ob, BaseException):
+                return _text({"error": f"Failed to fetch orderbook for {market_id}: {ob}"})
 
-            try:
-                market_data = await kalshi.get_market(market_id)
-                inner = (
-                    market_data.get("market", market_data) if isinstance(market_data, dict) else {}
-                )
-                title = str(inner.get("title", inner.get("question", market_id)))
-                close_time = inner.get("close_time") or inner.get("expected_expiration_time")
-            except Exception:
-                title = market_id
-                close_time = None
+            mkt = market_map.get(market_id, {})
+            title = str(mkt.get("title", mkt.get("question", market_id)))
+            close_time = mkt.get("close_time") or mkt.get("expected_expiration_time")
 
             yes_price, yes_depth = best_price_and_depth(ob, SIDE_YES)
             no_price, no_depth = best_price_and_depth(ob, SIDE_NO)

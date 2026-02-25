@@ -165,7 +165,7 @@ async def _phase_live(
     db: AgentDatabase,
     *,
     prefix: str | None = None,
-    min_days: int = 5,
+    min_days: int,
     dry_run: bool = False,
 ) -> tuple[int, int, int]:
     """Fetch metadata for post-cutoff tickers via batched GET /markets.
@@ -198,28 +198,40 @@ async def _phase_live(
     meta_batch: list[dict[str, Any]] = []
     start = time.time()
 
-    for batch_idx in range(n_batches):
-        batch_start = batch_idx * _BATCH_SIZE
-        batch_tickers = missing[batch_start : batch_start + _BATCH_SIZE]
+    # Build all batch ticker lists upfront
+    batches = [missing[i : i + _BATCH_SIZE] for i in range(0, total, _BATCH_SIZE)]
 
-        try:
-            resp = await kalshi.search_markets(tickers=",".join(batch_tickers), limit=1000)
-            markets = resp.get("markets", [])
-            meta_batch.extend(_extract_meta(m) for m in markets)
-            fetched += len(markets)
+    # Fetch batches concurrently (semaphore limits in-flight requests;
+    # the token-bucket rate limiter in api_base.py still paces individual calls)
+    sem = asyncio.Semaphore(5)
 
-            # Flush every 5000 markets
-            if len(meta_batch) >= 5000:
-                upserted += db.upsert_market_meta(meta_batch)
-                meta_batch.clear()
+    async def _fetch_batch(batch_tickers: list[str]) -> dict[str, Any]:
+        async with sem:
+            return await kalshi.search_markets(tickers=",".join(batch_tickers), limit=1000)
 
-        except Exception as exc:
+    results = await asyncio.gather(
+        *[_fetch_batch(b) for b in batches],
+        return_exceptions=True,
+    )
+
+    for batch_idx, result in enumerate(results):
+        if isinstance(result, BaseException):
             errors += 1
             if errors <= 10:
-                logger.warning("Batch %d failed: %s", batch_idx, exc)
+                logger.warning("Batch %d failed: %s", batch_idx, result)
             elif errors == 11:
                 logger.warning("Suppressing further error details...")
             logger.debug("Batch %d traceback", batch_idx, exc_info=True)
+            continue
+
+        markets = result.get("markets", [])
+        meta_batch.extend(_extract_meta(m) for m in markets)
+        fetched += len(markets)
+
+        # Flush every 5000 markets
+        if len(meta_batch) >= 5000:
+            upserted += db.upsert_market_meta(meta_batch)
+            meta_batch.clear()
 
         # Progress logging
         if (batch_idx + 1) % 50 == 0 or batch_idx == n_batches - 1:
@@ -262,7 +274,7 @@ async def run_backfill(
     *,
     phase: str = "all",
     prefix: str | None = None,
-    min_days: int = 5,
+    min_days: int,
     dry_run: bool = False,
 ) -> None:
     """Run the metadata backfill."""
@@ -290,8 +302,8 @@ def main() -> None:
     parser.add_argument(
         "--min-days",
         type=int,
-        default=5,
-        help="Only backfill tickers with >= N days of daily history (default: 5)",
+        default=None,
+        help="Only backfill tickers with >= N days of daily history (default: from config)",
     )
     parser.add_argument(
         "--dry-run",
@@ -308,12 +320,17 @@ def main() -> None:
 
     async def _run() -> None:
         try:
+            min_days = (
+                args.min_days
+                if args.min_days is not None
+                else trading_config.daily_min_ticker_days
+            )
             await run_backfill(
                 kalshi,
                 db,
                 phase=args.phase,
                 prefix=args.prefix,
-                min_days=args.min_days,
+                min_days=min_days,
                 dry_run=args.dry_run,
             )
         finally:

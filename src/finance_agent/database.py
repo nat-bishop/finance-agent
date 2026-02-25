@@ -29,7 +29,6 @@ from finance_agent.constants import (
 from finance_agent.models import (
     Event,
     KalshiDaily,
-    KalshiMarketMeta,
     MarketSnapshot,
     RecommendationGroup,
     RecommendationLeg,
@@ -814,27 +813,6 @@ class AgentDatabase:
             conflict_columns=self._META_CONFLICT,
             update_columns=self._META_UPDATE,
         )
-
-    def get_missing_meta_tickers(self, limit: int = 200, recency_days: int = 90) -> list[str]:
-        """Return tickers in kalshi_daily that have no kalshi_market_meta row.
-
-        Prioritizes recently-seen tickers (more likely to still exist in API).
-        Filters to tickers with daily data within the last ``recency_days``.
-        """
-        cutoff = (datetime.now(UTC) - timedelta(days=recency_days)).strftime("%Y-%m-%d")
-        meta_tickers = select(KalshiMarketMeta.ticker)
-        with self._session_factory() as session:
-            stmt = (
-                select(KalshiDaily.ticker_name)
-                .where(
-                    KalshiDaily.ticker_name.notin_(meta_tickers),
-                    KalshiDaily.date >= cutoff,
-                )
-                .group_by(KalshiDaily.ticker_name)
-                .order_by(func.max(KalshiDaily.date).desc())
-                .limit(limit)
-            )
-            return list(session.scalars(stmt).all())
 
     # ── Events (upsert for collector) ─────────────────────────
 

@@ -206,55 +206,6 @@ def sync_daily(db: AgentDatabase, max_workers: int = _DEFAULT_MAX_WORKERS) -> in
     return total_rows
 
 
-async def backfill_missing_meta(
-    kalshi_client: Any,
-    db: AgentDatabase,
-    batch_size: int = 200,
-) -> int:
-    """Fetch metadata for historical tickers missing from kalshi_market_meta.
-
-    Queries kalshi_daily for tickers with no meta row, then calls the Kalshi
-    API to get titles/categories.  Capped at ``batch_size`` per run so it
-    converges over multiple ``make collect`` runs without hammering the API.
-
-    Returns number of meta rows upserted.
-    """
-    missing = db.get_missing_meta_tickers(limit=batch_size)
-    if not missing:
-        logger.info("Market metadata is complete — no missing tickers")
-        return 0
-
-    logger.info("Backfilling metadata for %d historical tickers", len(missing))
-    meta_rows: list[dict[str, Any]] = []
-    errors = 0
-
-    for ticker in missing:
-        try:
-            resp = await kalshi_client.get_market(ticker)
-            market = resp.get("market", resp)
-            meta_rows.append(
-                {
-                    "ticker": ticker,
-                    "event_ticker": market.get("event_ticker"),
-                    "series_ticker": market.get("series_ticker"),
-                    "title": market.get("title"),
-                    "category": market.get("category"),
-                }
-            )
-        except Exception:
-            errors += 1
-            logger.debug("Could not fetch metadata for %s", ticker)
-
-    upserted = db.upsert_market_meta(meta_rows) if meta_rows else 0
-    logger.info(
-        "Meta backfill: %d upserted, %d errors, %d remaining",
-        upserted,
-        errors,
-        max(0, len(missing) - upserted),
-    )
-    return upserted
-
-
 def run_backfill() -> None:
     """CLI entry point for standalone backfill."""
     from .config import load_configs

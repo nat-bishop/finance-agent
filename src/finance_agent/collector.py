@@ -213,8 +213,8 @@ async def collect_kalshi(
 async def resolve_settlements(kalshi: KalshiAPIClient, db: AgentDatabase) -> int:
     """Check unresolved recommendation legs for market settlement.
 
-    Batches API calls by unique ticker (not N calls for N legs).
-    Returns count of legs settled.
+    Batches tickers into search_markets calls (200/batch) instead of
+    individual get_market calls.  Returns count of legs settled.
     """
     tickers = db.get_unresolved_leg_tickers()
     if not tickers:
@@ -224,20 +224,26 @@ async def resolve_settlements(kalshi: KalshiAPIClient, db: AgentDatabase) -> int
     logger.info("Settlement check: %d unique tickers to check", len(tickers))
 
     settled_count = 0
-    for ticker in tickers:
+    batch_size = 200
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i : i + batch_size]
         try:
-            market_data = await kalshi.get_market(ticker)
-            inner = market_data.get("market", market_data) if isinstance(market_data, dict) else {}
-            settlement_value = inner.get("settlement_value")
-            if settlement_value is not None:
-                count = db.settle_legs(ticker, int(settlement_value))
-                if count > 0:
-                    logger.info(
-                        "  Settled %s -> %dc (%d legs updated)", ticker, settlement_value, count
-                    )
-                    settled_count += count
+            resp = await kalshi.search_markets(tickers=",".join(batch), limit=1000)
+            for market in resp.get("markets", []):
+                ticker = market.get("ticker")
+                settlement_value = market.get("settlement_value")
+                if ticker and settlement_value is not None:
+                    count = db.settle_legs(ticker, int(settlement_value))
+                    if count > 0:
+                        logger.info(
+                            "  Settled %s -> %dc (%d legs updated)",
+                            ticker,
+                            settlement_value,
+                            count,
+                        )
+                        settled_count += count
         except Exception as e:
-            logger.debug("  Could not check %s: %s", ticker, e)
+            logger.debug("  Batch settlement check failed: %s", e)
 
     # Compute P&L for groups that became fully settled
     from .fees import compute_hypothetical_pnl

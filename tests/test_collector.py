@@ -238,12 +238,16 @@ async def test_resolve_settlements_settles_leg(db, session_id, mock_kalshi):
         ],
     )
 
-    async def mock_get_market(ticker):
-        if ticker == "K-SETTLED":
-            return {"market": {"ticker": ticker, "settlement_value": 100}}
-        return {"market": {"ticker": ticker}}
+    async def mock_search(*, tickers=None, limit=1000, **kw):
+        markets = []
+        for t in (tickers or "").split(","):
+            m = {"ticker": t}
+            if t == "K-SETTLED":
+                m["settlement_value"] = 100
+            markets.append(m)
+        return {"markets": markets}
 
-    mock_kalshi.get_market = AsyncMock(side_effect=mock_get_market)
+    mock_kalshi.search_markets = AsyncMock(side_effect=mock_search)
 
     count = await resolve_settlements(mock_kalshi, db)
     assert count == 1  # Only K-SETTLED resolved
@@ -287,10 +291,11 @@ async def test_resolve_settlements_computes_pnl(db, session_id, mock_kalshi):
         ],
     )
 
-    async def mock_get_market(ticker):
-        return {"market": {"ticker": ticker, "settlement_value": 100}}
+    async def mock_search(*, tickers=None, limit=1000, **kw):
+        markets = [{"ticker": t, "settlement_value": 100} for t in (tickers or "").split(",")]
+        return {"markets": markets}
 
-    mock_kalshi.get_market = AsyncMock(side_effect=mock_get_market)
+    mock_kalshi.search_markets = AsyncMock(side_effect=mock_search)
 
     await resolve_settlements(mock_kalshi, db)
 
@@ -317,7 +322,7 @@ async def test_resolve_settlements_handles_404(db, session_id, mock_kalshi):
             },
         ],
     )
-    mock_kalshi.get_market = AsyncMock(side_effect=Exception("404 Not Found"))
+    mock_kalshi.search_markets = AsyncMock(side_effect=Exception("404 Not Found"))
 
     count = await resolve_settlements(mock_kalshi, db)
     assert count == 0  # No legs settled
@@ -330,4 +335,4 @@ async def test_resolve_settlements_no_tickers(db, mock_kalshi):
     """No unresolved tickers → no API calls."""
     count = await resolve_settlements(mock_kalshi, db)
     assert count == 0
-    mock_kalshi.get_market.assert_not_called()
+    mock_kalshi.search_markets.assert_not_called()

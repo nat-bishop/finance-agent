@@ -60,12 +60,15 @@ The server runs persistently — you can close and reopen the TUI without losing
 ## Data Pipeline
 
 ```bash
-make collect    # snapshot markets + events to DuckDB, sync daily history, upsert metadata
-make backup     # backup the database
-make startup    # print startup context JSON (debug)
+make collect        # snapshot markets + events to DuckDB, sync daily history, upsert metadata
+make backfill-meta  # backfill kalshi_market_meta from Kalshi API (historical + live phases)
+make backup         # backup the database
+make startup        # print startup context JSON (debug)
 ```
 
 The collector is a standalone script with no LLM dependency. Run it on a schedule (e.g. hourly cron) to keep data fresh. The agent queries canonical DuckDB views and writes analytical SQL for historical analysis.
+
+`make backfill-meta` populates `kalshi_market_meta` with titles, categories, and event tickers for historical markets. Two phases: bulk pagination of the Kalshi historical API (~190 calls), then batched `GET /markets` for post-cutoff tickers (~1000 calls). One-time operation, re-run after `make collect` to pick up new tickers. Options: `--phase {all,historical,live}`, `--prefix PATTERN`, `--min-days N`, `--dry-run`.
 
 ## Agent Tools
 
@@ -172,7 +175,7 @@ DuckDB at `/workspace/data/agent.duckdb`. Schema defined by SQLAlchemy ORM model
 | `sessions` | server | agent, TUI | started_at |
 | `session_logs` | server | TUI | session_id FK, content (prose summary) |
 | `kalshi_daily` | collector (S3) | agent scripts | date, ticker_name, high, low, daily_volume, open_interest. **Very large** (~100M+ rows). |
-| `kalshi_market_meta` | collector | agent scripts | ticker PK, title, category, event_ticker, first_seen. **Partial index** (~30K recently-active tickers, not all historical). |
+| `kalshi_market_meta` | collector + meta_backfill | agent scripts | ticker PK, title, category, event_ticker, first_seen. Populated by `make collect` (open markets) and `make backfill-meta` (historical + settled). |
 
 ## Workspace
 
@@ -208,11 +211,12 @@ src/finance_agent/
   database.py        # AgentDatabase: DuckDB via duckdb_engine, ORM queries, canonical views, backup
   tools.py           # Unified MCP tool factories (5 market + 1 DB = 6 tools)
   fees.py            # Kalshi fee calculations (P(1-P) formula)
-  kalshi_client.py   # Kalshi SDK wrapper (batch, amend, paginated events)
+  kalshi_client.py   # Kalshi SDK wrapper (paginated events, historical API, rate limiting)
   polymarket_client.py # Dormant: Polymarket US SDK wrapper (preserved for future)
   hooks.py           # File protection, recommendation counting, KB auto-commit
   collector.py       # Kalshi market data collector
   backfill.py        # Kalshi daily history sync from S3
+  meta_backfill.py   # Bulk metadata backfill (historical API + live batched get_markets)
   rate_limiter.py    # Token-bucket rate limiter
   api_base.py        # Shared base class for API clients
   migrations/        # Alembic schema migrations (0007 DuckDB initial, 0008 session_logs)
