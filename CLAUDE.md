@@ -52,7 +52,7 @@ Kalshi market analysis system built on `claude-agent-sdk`. The system runs as a 
 - MCP tools (markets: 5 tools, db: 1 tool)
 - Hooks (PreToolUse: auto-approve + file protection, PostToolUse: rec audit + KB commit)
 - Session log extraction on clear/idle/shutdown (sends wrap-up prompt, captures prose, writes markdown + DB)
-- Idle timer (15 min default, configurable via `FA_IDLE_TIMEOUT_MINUTES`)
+- Crash recovery (deferred session log extraction for unlogged sessions)
 - Bridges `AskUserQuestion` to TUI via WebSocket
 
 **TUI client** (local, `make ui`):
@@ -102,7 +102,7 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 
 | Module | Role |
 |--------|------|
-| `server.py` | `AgentServer`: WS server, SDK client lifecycle, session log extraction, idle timer, rotation lock |
+| `server.py` | `AgentServer`: WS server, SDK client lifecycle, session log extraction, crash recovery, rotation lock |
 | `server_main.py` | Server entry point: loads config, setup logging, starts `AgentServer` |
 | `main.py` | Assembles `ClaudeAgentOptions` via `build_options()`. Used by `server.py` |
 | `config.py` | `Credentials(BaseSettings)` from env; `TradingConfig` + `AgentConfig` dataclasses. Path fields have `FA_*` env var overrides. Also templates `prompts/system.md` |
@@ -136,7 +136,7 @@ The PreToolUse hook denies Write/Edit to protected paths with helpful messages. 
 - **Analyst-only**: Agent recommends trades via `recommend_trade` DB tool. Exchange client methods remain for TUI executor.
 - **Canonical views**: 3 DuckDB views (`v_latest_markets`, `v_daily_with_meta`, `v_active_recommendations`) replace `markets.jsonl` and provide SQL-native discovery. Created on startup after migrations.
 - **DuckDB upserts**: Use raw SQL `text()` with `ON CONFLICT` clauses. `UniqueConstraint` on `kalshi_daily` and PKs on `events`/`kalshi_market_meta` serve as conflict targets.
-- **Rotation lock**: `asyncio.Lock` in server.py serializes session rotation from clear + idle timer to prevent race conditions.
+- **Rotation lock**: `asyncio.Lock` in server.py serializes concurrent session rotations to prevent race conditions.
 
 ### Logging
 
